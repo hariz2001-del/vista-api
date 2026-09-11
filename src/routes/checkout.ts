@@ -1,0 +1,277 @@
+import { Prisma } from '@prisma/client'
+import type { FastifyInstance } from 'fastify'
+import { z } from 'zod'
+import { requireUser } from '../auth.ts'
+import { prisma, type Tx } from '../db.ts'
+import { businessDateToUtc } from '../domain/business-date.ts'
+import { priceOrder, type PricedLineInput } from '../domain/cart.ts'
+import { badRequest, conflict, notFound } from '../errors.ts'
+
+const modifierSchema = z.object({
+  /** Required: without it the server has no key to reprice a modifier against. */
+  modifier_id: z.string().uuid(),
+})
+
+const itemSchema = z.object({
+  product_id: z.string().uuid(),
+  quantity: z.number().int().positive(),
+  discount_sen: z.number().int().min(0).default(0),
+  modifiers: z.array(modifierSchema).default([]),
+})
+
+const checkoutBody = z.object({
+  shift_id: z.string().uuid(),
+  client_txn_id: z.string().uuid(),
+  business_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  origin: z.enum(['ONLINE', 'OFFLINE_SYNC']).default('ONLINE'),
+  offline_label: z.string().max(32).nullish(),
+  /** What the cashier was shown. Checked against the server's own figure. */
+  claimed_total_sen: z.number().int().min(0),
+  cart_discount_sen: z.number().int().min(0).default(0),
+  cart_items: z.array(itemSchema).min(1),
+})
+
+type CheckoutBody = z.infer<typeof checkoutBody>
+
+function formatQueueNumber(value: number): string {
+  return `#${value.toString().padStart(3, '0')}`
+}
+
+/**
+ * Allocate the day's next queue number.
+ *
+ * The UPDATE takes the row lock itself, so there is no read-then-increment gap
+ * for a second terminal to slip into. A rolled-back checkout leaves no hole,
+ * because the increment rolls back with it.
+ */
+async function allocateQueueNumber(tx: Tx, businessDate: string): Promise<string> {
+  await tx.$executeRaw`
+    INSERT INTO queue_counters (business_date, current_val, updated_at)
+    VALUES (${businessDate}::date, 0, now())
+    ON CONFLICT (business_date) DO NOTHING
+  `
+  const rows = await tx.$queryRaw<Array<{ current_val: number }>>`
+    UPDATE queue_counters
+       SET current_val = current_val + 1, updated_at = now()
+     WHERE business_date = ${businessDate}::date
+     RETURNING current_val
+  `
+  const next = rows[0]?.current_val
+  if (next === undefined) throw badRequest('server:UNEXPECTED', 'queue counter not allocated')
+  return formatQueueNumber(next)
+}
+
+async function loadExisting(client: Tx, clientTxnId: string) {
+  return client.order.findUnique({
+    where: { clientTxnId },
+    include: { items: { include: { modifiers: true } } },
+  })
+}
+
+function serialise(order: NonNullable<Awaited<ReturnType<typeof loadExisting>>>, replayed: boolean) {
+  return {
+    order_id: order.id,
+    queue_number: order.queueNumber,
+    offline_label: order.offlineLabel,
+    business_date: order.businessDate.toISOString().slice(0, 10),
+    total_amount_sen: order.totalAmountSen,
+    item_count: order.items.reduce((sum, item) => sum + item.quantity, 0),
+    needs_review: order.needsReview,
+    review_reason: order.reviewReason,
+    replayed,
+  }
+}
+
+export async function checkoutRoutes(app: FastifyInstance): Promise<void> {
+  app.post('/checkout', { preHandler: requireUser }, async (request) => {
+    const body = checkoutBody.parse(request.body)
+    const userId = request.user.id
+
+    // Cheap pre-check outside the transaction. The unique index is what actually
+    // guarantees correctness; this just avoids doing the work twice.
+    const alreadyDone = await loadExisting(prisma, body.client_txn_id)
+    if (alreadyDone) return serialise(alreadyDone, true)
+
+    try {
+      return await prisma.$transaction((tx) => runCheckout(tx, body, userId), { timeout: 15_000 })
+    } catch (error) {
+      // Lost a race to a concurrent identical request. The other one won and
+      // wrote the sale; return that rather than failing the cashier.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const winner = await loadExisting(prisma, body.client_txn_id)
+        if (winner) return serialise(winner, true)
+      }
+      throw error
+    }
+  })
+}
+
+async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
+  const replay = await loadExisting(tx, body.client_txn_id)
+  if (replay) return serialise(replay, true)
+
+  // Lock the shift. Close takes the same lock, so a sale can never land in a
+  // shift whose totals have already been counted.
+  // Ids are text columns, not Postgres uuid — no cast, or the comparison
+  // becomes uuid = text and Postgres refuses it.
+  const shifts = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+    SELECT id, status FROM shifts WHERE id = ${body.shift_id} FOR UPDATE
+  `
+  const shift = shifts[0]
+  if (!shift) throw notFound('shift:NOT_FOUND')
+
+  // A sale queued at 2:50am that syncs after the cashier closed is the normal
+  // case, not an edge case. Money was collected; refusing it would destroy a
+  // real sale. Take it, flag it, and reopen the reconciliation on that shift so
+  // the owner sees the totals moved.
+  const lateSync = shift.status !== 'OPEN'
+  if (lateSync && body.origin !== 'OFFLINE_SYNC') throw conflict('checkout:SHIFT_NOT_OPEN')
+
+  // ---- Re-price from the catalogue. Nothing the client sent is trusted. ----
+
+  const productIds = [...new Set(body.cart_items.map((item) => item.product_id))]
+  const products = await tx.product.findMany({ where: { id: { in: productIds } } })
+  const productById = new Map(products.map((product) => [product.id, product]))
+
+  const modifierIds = [
+    ...new Set(body.cart_items.flatMap((item) => item.modifiers.map((m) => m.modifier_id))),
+  ]
+  const modifierItems = modifierIds.length
+    ? await tx.modifierItem.findMany({ where: { id: { in: modifierIds } } })
+    : []
+  const modifierById = new Map(modifierItems.map((item) => [item.id, item]))
+
+  const priceInputs: PricedLineInput[] = []
+  const resolved = body.cart_items.map((item) => {
+    const product = productById.get(item.product_id)
+    if (!product) throw badRequest('checkout:UNKNOWN_PRODUCT', item.product_id)
+
+    const mods = item.modifiers.map((selected) => {
+      const modifier = modifierById.get(selected.modifier_id)
+      if (!modifier) throw badRequest('checkout:UNKNOWN_MODIFIER', selected.modifier_id)
+      return modifier
+    })
+
+    const modifierTotalSen = mods.reduce((sum, modifier) => sum + modifier.priceSen, 0)
+    priceInputs.push({
+      brandId: product.brandId,
+      unitPriceSen: product.basePriceSen,
+      modifierTotalSen,
+      quantity: item.quantity,
+      requestedLineDiscountSen: item.discount_sen,
+    })
+
+    return { product, mods, modifierTotalSen, quantity: item.quantity }
+  })
+
+  const priced = priceOrder(priceInputs, body.cart_discount_sen)
+
+  // ---- Does the server's figure match what the cashier was shown? ----
+
+  let needsReview = false
+  let reviewReason: string | null = null
+
+  if (priced.totalAmountSen !== body.claimed_total_sen) {
+    if (body.origin === 'ONLINE') {
+      throw badRequest(
+        'checkout:GROSS_MISMATCH',
+        `claimed ${body.claimed_total_sen} sen, server computed ${priced.totalAmountSen} sen`,
+      )
+    }
+    // An offline tablet priced from a cached menu and cannot be blamed for a
+    // price that changed since. Accept the sale, keep the server's figure, and
+    // put it in front of the owner. Never silently reprice, never drop it.
+    needsReview = true
+    reviewReason = `Priced offline at ${body.claimed_total_sen} sen; current menu gives ${priced.totalAmountSen} sen.`
+  }
+
+  if (lateSync) {
+    needsReview = true
+    reviewReason = [reviewReason, 'Synced after the shift was closed.'].filter(Boolean).join(' ')
+  }
+
+  // ---- Write ----
+
+  const businessDate = businessDateToUtc(body.business_date)
+  const queueNumber = await allocateQueueNumber(tx, body.business_date)
+  const now = new Date()
+
+  const order = await tx.order.create({
+    data: {
+      shiftId: shift.id,
+      businessDate,
+      queueNumber,
+      offlineLabel: body.offline_label ?? null,
+      clientTxnId: body.client_txn_id,
+      origin: body.origin,
+      grossSen: priced.grossSen,
+      lineDiscountSen: priced.lineDiscountSen,
+      orderDiscountSen: priced.orderDiscountSen,
+      totalAmountSen: priced.totalAmountSen,
+      confirmedById: userId,
+      confirmedAt: now,
+      completedAt: now,
+      needsReview,
+      reviewReason,
+      items: {
+        create: resolved.map((line, index) => {
+          const pricedLine = priced.lines[index]
+          if (!pricedLine) throw badRequest('server:UNEXPECTED', 'priced line missing')
+          return {
+            productId: line.product.id,
+            brandId: line.product.brandId,
+            categoryId: line.product.categoryId,
+            productName: line.product.name,
+            quantity: line.quantity,
+            unitPriceSen: line.product.basePriceSen,
+            modifierTotalSen: line.modifierTotalSen,
+            lineDiscountSen: pricedLine.lineDiscountSen,
+            allocatedOrderDiscountSen: pricedLine.allocatedOrderDiscountSen,
+            modifiers: {
+              create: line.mods.map((modifier) => ({
+                modifierItemId: modifier.id,
+                name: modifier.name,
+                priceSen: modifier.priceSen,
+                type: modifier.type,
+              })),
+            },
+          }
+        }),
+      },
+    },
+    include: { items: { include: { modifiers: true } } },
+  })
+
+  // One revenue entry per brand on the order, so the ledger itself carries the
+  // brand attribution the partner settlement is built on. A fully discounted
+  // order writes none: no money moved, and the order row is the audit trail.
+  const netByBrand = new Map<string, number>()
+  priced.lines.forEach((line) => {
+    netByBrand.set(line.brandId, (netByBrand.get(line.brandId) ?? 0) + line.netSen)
+  })
+
+  for (const [brandId, netSen] of netByBrand) {
+    if (netSen <= 0) continue
+    await tx.ledgerEntry.create({
+      data: {
+        businessDate,
+        direction: 'MONEY_IN',
+        amountSen: netSen,
+        category: 'REVENUE',
+        description: `Sale ${queueNumber}`,
+        brandId,
+        orderId: order.id,
+        shiftId: shift.id,
+      },
+    })
+  }
+
+  if (lateSync) {
+    await tx.shift.update({
+      where: { id: shift.id },
+      data: { reconciliationStatus: 'UNRECONCILED' },
+    })
+  }
+
+  return serialise(order, false)
+}

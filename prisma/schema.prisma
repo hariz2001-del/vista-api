@@ -1,0 +1,420 @@
+// Vista — money-path schema.
+//
+// Rules that hold across this whole file:
+//
+//  * Every monetary column is an integer number of sen. No floats, no numeric.
+//    RM 14.50 is 1450. This is the one representation that stays exact through
+//    Postgres, JSON and JavaScript alike.
+//  * Rows on orders, order_items and order_item_modifiers are SNAPSHOTS. They
+//    are written once at checkout and never updated, so editing the catalogue
+//    later cannot rewrite what an old sale reported.
+//  * `brandId` being null means "shared", rather than a SHARED enum member.
+//    A brand is a real row; sharedness is the absence of one.
+//
+// Prisma Migrate owns this schema. Never hand-apply DDL to the database — the
+// predecessor project kept a Prisma schema as documentation alongside manual
+// SQL and the two silently drifted apart.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  OWNER_FOOD
+  OWNER_DRINKS
+  CASHIER
+}
+
+enum ModifierType {
+  ADD_ON
+  REMOVAL
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+/// Set at close. A non-zero variance leaves the shift UNRECONCILED until the
+/// owner declares what it was from the RMS — that action writes the ledger
+/// entry, not the close itself.
+enum ReconciliationStatus {
+  NOT_REQUIRED
+  UNRECONCILED
+  RECONCILED
+}
+
+enum OrderPaymentStatus {
+  MANUALLY_CONFIRMED
+  REFUNDED
+}
+
+/// Whether the device was online when the sale was rung up. Decides whether a
+/// total that disagrees with the catalogue is an error or an expected
+/// consequence of pricing from a cached menu.
+enum OrderOrigin {
+  ONLINE
+  OFFLINE_SYNC
+}
+
+/// Raised by the cashier, resolved by the owner. Cashiers cannot void a paid
+/// sale; flagging is the only thing they can do to one.
+enum FlagStatus {
+  NONE
+  FLAGGED
+  DISMISSED
+  RESOLVED_REFUND
+  RESOLVED_ADJUSTMENT
+}
+
+enum LedgerDirection {
+  MONEY_IN
+  MONEY_OUT
+}
+
+enum LedgerCategory {
+  REVENUE
+  REFUND
+  OPERATING_EXPENSE
+  CAPITAL_INJECTION
+  CAPITAL_ASSET
+  OWNER_DRAWING
+  LOAN_PROCEEDS
+  LOAN_REPAYMENT
+  RECONCILIATION_ADJUSTMENT
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  /// Bcrypt hash of the 4-digit shift PIN. Never sent to a client.
+  pinHash      String?  @map("pin_hash")
+  name         String
+  role         UserRole
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  shiftsOpened    Shift[] @relation("ShiftsOpened")
+  shiftsClosed    Shift[] @relation("ShiftsClosed")
+  ordersConfirmed Order[] @relation("OrdersConfirmed")
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+/// Brand is a financial dimension, not a label: partner profit share and
+/// overhead allocation both key off it. It is a table so that a rename or a
+/// third brand is never a code change.
+model Brand {
+  id         String   @id @default(uuid())
+  name       String   @unique
+  colour     String
+  softColour String   @map("soft_colour")
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  categories    Category[]
+  products      Product[]
+  orderItems    OrderItem[]
+  ledgerEntries LedgerEntry[]
+
+  @@map("brands")
+}
+
+model Category {
+  id        String   @id @default(uuid())
+  brandId   String   @map("brand_id")
+  name      String
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  brand      Brand       @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  products   Product[]
+  orderItems OrderItem[]
+
+  @@unique([brandId, name])
+  @@map("categories")
+}
+
+model Product {
+  id           String   @id @default(uuid())
+  brandId      String   @map("brand_id")
+  categoryId   String   @map("category_id")
+  name         String
+  description  String   @default("")
+  basePriceSen Int      @map("base_price_sen")
+  imageUrl     String?  @map("image_url")
+  isSoldOut    Boolean  @default(false) @map("is_sold_out")
+  isActive     Boolean  @default(true) @map("is_active")
+  sortOrder    Int      @default(0) @map("sort_order")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  brand          Brand           @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  category       Category        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  modifierGroups ModifierGroup[]
+  orderItems     OrderItem[]
+
+  @@index([brandId])
+  @@index([categoryId])
+  @@map("products")
+}
+
+model ModifierGroup {
+  id          String   @id @default(uuid())
+  productId   String   @map("product_id")
+  name        String
+  description String?
+  /// minSelect > 0 means required. There is deliberately no separate
+  /// `isRequired` flag: two sources of truth eventually disagree.
+  minSelect   Int      @default(0) @map("min_select")
+  maxSelect   Int      @default(1) @map("max_select")
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  product Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  items   ModifierItem[]
+
+  @@index([productId])
+  @@map("modifier_groups")
+}
+
+model ModifierItem {
+  id              String       @id @default(uuid())
+  modifierGroupId String       @map("modifier_group_id")
+  name            String
+  priceSen        Int          @default(0) @map("price_sen")
+  type            ModifierType @default(ADD_ON)
+  isSoldOut       Boolean      @default(false) @map("is_sold_out")
+  sortOrder       Int          @default(0) @map("sort_order")
+  createdAt       DateTime     @default(now()) @map("created_at")
+
+  group              ModifierGroup       @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  orderItemModifiers OrderItemModifier[]
+
+  @@index([modifierGroupId])
+  @@map("modifier_items")
+}
+
+// ---------------------------------------------------------------------------
+// Shifts
+// ---------------------------------------------------------------------------
+
+model Shift {
+  id           String      @id @default(uuid())
+  /// The trading evening this shift belongs to. A shift opened at 8pm and still
+  /// running at 1am keeps the date it opened on, so a post-midnight sale reports
+  /// against the night it was actually made.
+  businessDate DateTime    @map("business_date") @db.Date
+  status       ShiftStatus @default(OPEN)
+  openedAt     DateTime    @default(now()) @map("opened_at")
+  closedAt     DateTime?   @map("closed_at")
+  openedById   String      @map("opened_by_id")
+  closedById   String?     @map("closed_by_id")
+
+  /// What the cashier says the bank actually received, entered at close.
+  declaredBankTotalSen Int? @map("declared_bank_total_sen")
+  /// Sum of orders.totalAmountSen for this shift, computed server-side at close.
+  /// Net of discounts, so it compares like-for-like against the declared total.
+  systemNetSalesSen    Int? @map("system_net_sales_sen")
+  /// declared − system. Positive is a surplus, negative a shortfall.
+  varianceSen          Int? @map("variance_sen")
+
+  reconciliationStatus ReconciliationStatus @default(NOT_REQUIRED) @map("reconciliation_status")
+
+  openedBy      User          @relation("ShiftsOpened", fields: [openedById], references: [id])
+  closedBy      User?         @relation("ShiftsClosed", fields: [closedById], references: [id])
+  orders        Order[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([businessDate])
+  @@index([status])
+  @@map("shifts")
+}
+
+/// One row per trading day. The queue number resets daily and is allocated by
+/// `UPDATE … RETURNING`, which takes the row lock itself — so there is no
+/// read-then-increment gap for two terminals to fall into.
+model QueueCounter {
+  businessDate DateTime @id @map("business_date") @db.Date
+  currentVal   Int      @default(0) @map("current_val")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("queue_counters")
+}
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
+
+model Order {
+  id           String   @id @default(uuid())
+  shiftId      String   @map("shift_id")
+  businessDate DateTime @map("business_date") @db.Date
+
+  /// `#042`. Unique within a business date.
+  queueNumber String @map("queue_number")
+  /// The `#OFF-01` the kitchen was actually told, when this sale was rung up
+  /// offline. Kept after syncing: it is the only way to trace a disputed order
+  /// back to what the customer was called.
+  offlineLabel String? @map("offline_label")
+
+  /// Minted on the device once per checkout and reused across every retry.
+  /// The unique constraint is what makes replaying an offline sale safe.
+  clientTxnId String      @unique @map("client_txn_id")
+  origin      OrderOrigin @default(ONLINE)
+
+  /// Server-recomputed. grossSen − orderDiscountSen − sum(line discounts) = totalAmountSen.
+  grossSen          Int @map("gross_sen")
+  lineDiscountSen   Int @default(0) @map("line_discount_sen")
+  orderDiscountSen  Int @default(0) @map("order_discount_sen")
+  totalAmountSen    Int @map("total_amount_sen")
+
+  paymentStatus OrderPaymentStatus @default(MANUALLY_CONFIRMED) @map("payment_status")
+  paymentMode   String             @default("DUITNOW_QR") @map("payment_mode")
+
+  /// Manual confirmation is the only control on revenue — there is no payment
+  /// gateway — so who did it and when is recorded, once, and never edited.
+  confirmedById String   @map("confirmed_by_id")
+  confirmedAt   DateTime @map("confirmed_at")
+
+  /// Raised by the cashier for the owner to resolve.
+  flagStatus FlagStatus @default(NONE) @map("flag_status")
+  flagReason String?    @map("flag_reason")
+
+  /// Raised by the server, not the cashier — e.g. an offline sale whose price
+  /// no longer matches the catalogue. Accepted, never silently repriced.
+  needsReview  Boolean @default(false) @map("needs_review")
+  reviewReason String? @map("review_reason")
+
+  /// Set once the containing month has been closed and settled.
+  isLocked Boolean @default(false) @map("is_locked")
+
+  completedAt DateTime @map("completed_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  shift         Shift         @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  confirmedBy   User          @relation("OrdersConfirmed", fields: [confirmedById], references: [id])
+  items         OrderItem[]
+  ledgerEntries LedgerEntry[]
+
+  @@unique([businessDate, queueNumber])
+  @@index([shiftId])
+  @@index([businessDate])
+  @@index([needsReview])
+  @@map("orders")
+}
+
+model OrderItem {
+  id      String @id @default(uuid())
+  orderId String @map("order_id")
+
+  /// Restrict, not Cascade: a product that has ever been sold cannot be deleted,
+  /// only deactivated. Historical lines must keep pointing somewhere real.
+  productId  String @map("product_id")
+  brandId    String @map("brand_id")
+  categoryId String @map("category_id")
+
+  /// Snapshot of the name as printed, in case the product is later renamed.
+  productName String @map("product_name")
+
+  quantity         Int @default(1)
+  unitPriceSen     Int @map("unit_price_sen")
+  modifierTotalSen Int @default(0) @map("modifier_total_sen")
+
+  /// A discount applied to this line specifically.
+  lineDiscountSen Int @default(0) @map("line_discount_sen")
+  /// This line's share of the order-wide discount, apportioned server-side by
+  /// largest remainder. Stored rather than recomputed at report time, so
+  /// per-brand net sales is a plain SUM and can never drift.
+  allocatedOrderDiscountSen Int @default(0) @map("allocated_order_discount_sen")
+
+  order     Order               @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product   Product             @relation(fields: [productId], references: [id], onDelete: Restrict)
+  brand     Brand               @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  category  Category            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  modifiers OrderItemModifier[]
+
+  @@index([orderId])
+  @@index([brandId])
+  @@map("order_items")
+}
+
+/// Rows, not a JSON blob: add-on revenue by brand is a real report, and a blob
+/// makes it a scan-and-parse.
+model OrderItemModifier {
+  id          String @id @default(uuid())
+  orderItemId String @map("order_item_id")
+
+  /// Nullable so a modifier deleted from the catalogue does not orphan the
+  /// historical line. The snapshotted name and price stand on their own.
+  modifierItemId String? @map("modifier_item_id")
+
+  name     String
+  priceSen Int          @default(0) @map("price_sen")
+  type     ModifierType @default(ADD_ON)
+
+  orderItem    OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  modifierItem ModifierItem? @relation(fields: [modifierItemId], references: [id], onDelete: SetNull)
+
+  @@index([orderItemId])
+  @@map("order_item_modifiers")
+}
+
+// ---------------------------------------------------------------------------
+// Ledger
+// ---------------------------------------------------------------------------
+
+/// Append-only. Money is never corrected by editing an entry — a correction is
+/// its own reversing entry, so the history stays auditable.
+///
+/// The running balance is computed, never stored, and must be ordered by
+/// (businessDate, id) rather than id alone: entries get backdated, and ordering
+/// by insertion would put a receipt entered on the 8th for the 3rd at the
+/// bottom of the book with a meaningless balance beside it.
+model LedgerEntry {
+  id           BigInt   @id @default(autoincrement())
+  businessDate DateTime @map("business_date") @db.Date
+  entryAt      DateTime @default(now()) @map("entry_at")
+
+  direction LedgerDirection
+  amountSen Int             @map("amount_sen")
+  category  LedgerCategory
+  description String
+
+  /// Null means the entry is shared across brands rather than belonging to one.
+  brandId String? @map("brand_id")
+
+  orderId String? @map("order_id")
+  /// Set on entries produced by resolving a shift's unreconciled variance, so
+  /// the owner can trace any adjustment back to the close that caused it.
+  shiftId String? @map("shift_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  brand Brand? @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  order Order? @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  shift Shift? @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  @@index([businessDate, id])
+  @@index([orderId])
+  @@index([shiftId])
+  @@map("ledger_entries")
+}

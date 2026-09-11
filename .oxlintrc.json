@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "env": { "node": true, "es2024": true },
+  "rules": {
+    "oxc/no-async-endpoint-handlers": "off",
+    "eslint/no-await-in-loop": "off",
+    "eslint/no-underscore-dangle": "off"
+  },
+  "ignorePatterns": ["node_modules", "dist", "src/generated"]
+}
