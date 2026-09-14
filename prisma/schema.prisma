@@ -32,6 +32,9 @@ enum UserRole {
   OWNER_FOOD
   OWNER_DRINKS
   CASHIER
+  /// The business account. The business has one account that signs in to both
+  /// apps; what a session can reach is decided by its scope, not by this.
+  OWNER
 }
 
 enum ModifierType {
@@ -119,6 +122,7 @@ model User {
   correctionsCreated SaleCorrection[] @relation("CorrectionsCreated")
   expensesCreated    Expense[]        @relation("ExpensesCreated")
   periodsClosed      PeriodClosure[]  @relation("PeriodsClosed")
+  sessions           Session[]
 
   @@map("users")
 }
@@ -144,6 +148,7 @@ model Brand {
   ledgerEntries    LedgerEntry[]
   correctionDeltas CorrectionBrandDelta[]
   expenses         Expense[]
+  partner          Partner?
 
   @@map("brands")
 }
@@ -615,4 +620,53 @@ model TerminalStatus {
   updatedAt               DateTime  @updatedAt @map("updated_at")
 
   @@map("terminal_status")
+}
+
+// ---------------------------------------------------------------------------
+// Sessions and partners
+// ---------------------------------------------------------------------------
+
+/// What a session may reach. One account signs in to both apps; the scope is
+/// decided by which app signed in.
+enum SessionScope {
+  /// The counter tablet: sales, corrections, shifts. Never expires — the
+  /// cashier only ever has the PIN — and is revoked from the RMS instead.
+  COUNTER
+  /// The owner dashboard: everything, including the books. Expires.
+  OWNER
+}
+
+/// One signed-in device. Every request checks its row, which is how signing
+/// the counter out from the RMS takes effect on the tablet's very next request.
+model Session {
+  id         String       @id @default(uuid())
+  userId     String       @map("user_id")
+  scope      SessionScope
+  createdAt  DateTime     @default(now()) @map("created_at")
+  lastUsedAt DateTime     @default(now()) @map("last_used_at")
+  revokedAt  DateTime?    @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([scope, revokedAt])
+  @@map("sessions")
+}
+
+enum PartnerRole {
+  FOOD_OWNER
+  /// Hosts the stall and owns Drinks. Takes the host commission on Food.
+  STALL_HOST
+}
+
+/// A partner in the business — a name settlement pays, one per brand. Not a
+/// login: the business has one account.
+model Partner {
+  id      String      @id @default(uuid())
+  name    String
+  brandId String      @unique @map("brand_id")
+  role    PartnerRole @unique
+
+  brand Brand @relation(fields: [brandId], references: [id], onDelete: Restrict)
+
+  @@map("partners")
 }

@@ -98,6 +98,8 @@ const settingsBody = z.object({
   capitalAssetFoodPct: z.number().int().min(0).max(100),
 })
 
+const partnerBody = z.object({ name: z.string().trim().min(1).max(60) })
+
 /** Only the window. Any figures a browser sends alongside are stripped and ignored. */
 const periodBody = z.object({ startDate: DATE, endDate: DATE })
 
@@ -118,7 +120,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       brands,
       categories,
       products,
-      owners,
+      partners,
       shifts,
       orders,
       corrections,
@@ -126,15 +128,13 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       expenses,
       closures,
       terminal,
+      counterSessions,
     ] = await Promise.all([
       prisma.accountSettings.findUnique({ where: { id: 1 } }),
       prisma.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
       prisma.category.findMany({ orderBy: [{ brandId: 'asc' }, { sortOrder: 'asc' }] }),
       prisma.product.findMany({ orderBy: { sortOrder: 'asc' } }),
-      prisma.user.findMany({
-        where: { role: { in: ['OWNER_FOOD', 'OWNER_DRINKS'] }, isActive: true },
-        orderBy: { role: 'asc' },
-      }),
+      prisma.partner.findMany({ include: { brand: { select: { sortOrder: true } } } }),
       prisma.shift.findMany({ orderBy: { openedAt: 'asc' } }),
       prisma.order.findMany({ orderBy: { completedAt: 'asc' }, include: { items: true } }),
       prisma.saleCorrection.findMany({
@@ -145,11 +145,12 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       prisma.expense.findMany({ orderBy: [{ businessDate: 'desc' }, { createdAt: 'desc' }] }),
       prisma.periodClosure.findMany({ orderBy: { endDate: 'asc' } }),
       prisma.terminalStatus.findUnique({ where: { id: 1 } }),
+      prisma.session.findMany({
+        where: { scope: 'COUNTER', revokedAt: null },
+        orderBy: { createdAt: 'asc' },
+      }),
     ])
 
-    // Brands are ordered Food first. The partner roles follow the same order:
-    // the Food owner owns the first brand, the host owns the second.
-    const [foodBrand, drinksBrand] = brands
     const current = settings ?? DEFAULT_SETTINGS
 
     return {
@@ -182,12 +183,14 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         isSoldOut: product.isSoldOut,
         isActive: product.isActive,
       })),
-      partners: owners.map((owner) => ({
-        id: owner.id,
-        name: owner.name,
-        brandId: (owner.role === 'OWNER_FOOD' ? foodBrand?.id : drinksBrand?.id) ?? '',
-        role: owner.role === 'OWNER_FOOD' ? 'FOOD_OWNER' : 'STALL_HOST',
-      })),
+      partners: partners
+        .toSorted((a, b) => a.brand.sortOrder - b.brand.sortOrder)
+        .map((partner) => ({
+          id: partner.id,
+          name: partner.name,
+          brandId: partner.brandId,
+          role: partner.role,
+        })),
       shifts: shifts.map((shift) => ({
         id: shift.id,
         businessDate: isoDate(shift.businessDate),
@@ -287,6 +290,12 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         // Unknowable from here: a disconnected tablet cannot report what it holds.
         unsentSaleCount: 0,
       },
+      // Counter tablets signed in right now. Settings lets the owner sign them out.
+      counterSessions: counterSessions.map((session) => ({
+        id: session.id,
+        signedInAt: session.createdAt.toISOString(),
+        lastUsedAt: session.lastUsedAt.toISOString(),
+      })),
     }
   })
 
@@ -521,6 +530,42 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       create: { id: 1, ...body },
     })
     return body
+  })
+
+  /** Rename a partner. Names only: which brand each partner owns is fixed. */
+  app.put<{ Params: { id: string } }>(
+    '/rms/partners/:id',
+    { preHandler: requireOwner },
+    async (request) => {
+      const id = ID.parse(request.params.id)
+      const body = partnerBody.parse(request.body)
+
+      const partner = await prisma.partner.findUnique({ where: { id } })
+      if (!partner) throw notFound('rms:PARTNER_NOT_FOUND')
+
+      await prisma.partner.update({ where: { id }, data: { name: body.name } })
+      return { id }
+    },
+  )
+
+  // -------------------------------------------------------------------------
+  // Counter tablet
+  // -------------------------------------------------------------------------
+
+  /**
+   * Sign the counter tablet out, from the dashboard.
+   *
+   * Revokes every counter session. The tablet is sent back to its sign-in
+   * screen on its next request; anything it has not sent yet stays on the device
+   * and flushes once it is signed in again. A tablet that is offline hears about
+   * this only when it reconnects — there is no way to reach it before that.
+   */
+  app.post('/rms/counter/sign-out', { preHandler: requireOwner }, async () => {
+    const revoked = await prisma.session.updateMany({
+      where: { scope: 'COUNTER', revokedAt: null },
+      data: { revokedAt: new Date() },
+    })
+    return { signedOut: revoked.count }
   })
 
   // -------------------------------------------------------------------------

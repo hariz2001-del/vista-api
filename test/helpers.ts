@@ -28,22 +28,26 @@ export async function makeApp(): Promise<FastifyInstance> {
   return app
 }
 
-/** The Food partner — an owner account, for the RMS routes. */
-export const OWNER = { email: 'food@vistahub.my', password: 'vista' }
-
+/** A counter session, as the POS signs in. Sales, corrections and shifts only. */
 export async function login(app: FastifyInstance): Promise<string> {
-  return loginAs(app, DEMO.email, DEMO.password)
+  return loginAs(app, DEMO.email, DEMO.password, 'COUNTER')
+}
+
+/** The same single account, signed in the way the RMS does: an owner session. */
+export async function loginOwner(app: FastifyInstance): Promise<string> {
+  return loginAs(app, DEMO.email, DEMO.password, 'OWNER')
 }
 
 export async function loginAs(
   app: FastifyInstance,
   email: string,
   password: string,
+  scope: 'COUNTER' | 'OWNER' = 'COUNTER',
 ): Promise<string> {
   const response = await app.inject({
     method: 'POST',
     url: '/auth/login',
-    payload: { email, password },
+    payload: { email, password, scope },
   })
   if (response.statusCode !== 200) {
     throw new Error(`login failed (${response.statusCode}): ${response.body}`)

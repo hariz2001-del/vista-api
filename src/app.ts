@@ -28,7 +28,10 @@ export async function buildApp(): Promise<FastifyInstance> {
     credentials: true,
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
   })
-  await app.register(jwt, { secret: env.JWT_SECRET, sign: { expiresIn: '12h' } })
+  // No default expiry: a counter session must not time out mid-service. Owner
+  // sessions are given their expiry where they are signed (routes/auth.ts), and
+  // every token is checked against its session row, which the RMS can revoke.
+  await app.register(jwt, { secret: env.JWT_SECRET })
 
   /**
    * Nothing raw ever reaches the counter. A cashier needs to know whether to

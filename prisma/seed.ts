@@ -143,7 +143,10 @@ async function main(): Promise<void> {
   // Order matters: children before parents, and every sale-bearing table is
   // Restrict-on-delete, so a reseed on a database with orders will refuse
   // rather than quietly destroying history.
-  // Owner books reference users and brands, so they go before either.
+  // Owner books, sessions and partners reference users and brands, so they go
+  // before either.
+  await prisma.session.deleteMany()
+  await prisma.partner.deleteMany()
   await prisma.expense.deleteMany()
   await prisma.periodClosure.deleteMany()
   await prisma.terminalStatus.deleteMany()
@@ -170,11 +173,9 @@ async function main(): Promise<void> {
 
   await prisma.user.createMany({
     data: [
-      { id: '10000000-0000-4000-8000-000000000001', email: 'demo@vistahub.my', name: 'Aina (Demo)', role: 'CASHIER', passwordHash, pinHash },
-      // The same two partners the RMS demo shows: Hariz owns Food, Iman hosts
-      // the stall and owns Drinks.
-      { id: '10000000-0000-4000-8000-000000000002', email: 'food@vistahub.my', name: 'Hariz', role: 'OWNER_FOOD', passwordHash, pinHash },
-      { id: '10000000-0000-4000-8000-000000000003', email: 'drinks@vistahub.my', name: 'Iman', role: 'OWNER_DRINKS', passwordHash, pinHash },
+      // The business's one account. It signs in to the counter (which then stays
+      // signed in) and to the owner dashboard. The PIN is the counter PIN.
+      { id: '10000000-0000-4000-8000-000000000001', email: 'demo@vistahub.my', name: 'Vista Demo', role: 'OWNER', passwordHash, pinHash },
     ],
   })
 
@@ -196,6 +197,15 @@ async function main(): Promise<void> {
     data: [
       { id: BRAND_FOOD, name: 'Food', colour: '#ef6c35', softColour: '#fff0e8', sortOrder: 1 },
       { id: BRAND_DRINKS, name: 'Drinks', colour: '#087f8c', softColour: '#e4f6f7', sortOrder: 2 },
+    ],
+  })
+
+  // The partners settlement pays — names, not logins. Hariz owns Food; Iman hosts
+  // the stall and owns Drinks. Renamed from RMS Settings.
+  await prisma.partner.createMany({
+    data: [
+      { name: 'Hariz', brandId: BRAND_FOOD, role: 'FOOD_OWNER' },
+      { name: 'Iman', brandId: BRAND_DRINKS, role: 'STALL_HOST' },
     ],
   })
 
@@ -254,6 +264,7 @@ async function main(): Promise<void> {
     modifierGroups: await prisma.modifierGroup.count(),
     modifierItems: await prisma.modifierItem.count(),
     accountSettings: await prisma.accountSettings.count(),
+    partners: await prisma.partner.count(),
   }
   console.log('Seeded:', counts)
 }

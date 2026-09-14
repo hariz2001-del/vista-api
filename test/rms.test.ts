@@ -9,10 +9,9 @@ import {
   correctionPayload,
   DEMO,
   login,
-  loginAs,
+  loginOwner,
   makeApp,
   openShift,
-  OWNER,
   productByName,
   resetTransactional,
 } from './helpers.ts'
@@ -26,7 +25,7 @@ const businessDate = getBusinessDate(new Date())
 beforeAll(async () => {
   app = await makeApp()
   cashierToken = await login(app)
-  ownerToken = await loginAs(app, OWNER.email, OWNER.password)
+  ownerToken = await loginOwner(app)
 })
 
 afterAll(async () => {
@@ -95,7 +94,7 @@ async function closeShiftAtCounter() {
 }
 
 describe('rms — access', () => {
-  it('refuses the counter account, even with a valid token', async () => {
+  it('refuses a counter session of the same account, even with a valid token', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/rms/snapshot',
@@ -154,7 +153,7 @@ describe('rms — what the counter did shows up for the owner', () => {
     expect(books.ledger.filter((entry) => entry.category === 'REFUND')).toHaveLength(1)
   })
 
-  it('names the partners from the owner accounts, in brand order', async () => {
+  it('names the partners from the partners table, in brand order', async () => {
     const books = await snapshot()
     const [food, drinks] = books.brands
     expect(books.partners).toEqual(

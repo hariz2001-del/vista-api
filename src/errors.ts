@@ -50,7 +50,7 @@ export const MESSAGES: Record<string, string> = {
   'correction:OFFLINE_TOTAL_MISMATCH':
     'The offline correction does not add up to the amount recorded on this device.',
 
-  'auth:FORBIDDEN': 'This account cannot open the owner dashboard.',
+  'auth:FORBIDDEN': 'This session is for the counter only. Sign in to the dashboard to see the books.',
 
   'rms:INVALID_RANGE': 'The start date must be on or before the end date.',
   'rms:PERIOD_LOCKED': 'That date falls in a period that has already been settled.',
@@ -63,6 +63,7 @@ export const MESSAGES: Record<string, string> = {
   'rms:UNKNOWN_BRAND': 'That brand does not exist.',
   'rms:PRODUCT_NOT_FOUND': 'That item is no longer on the menu.',
   'rms:NOTHING_TO_CHANGE': 'Nothing to change.',
+  'rms:PARTNER_NOT_FOUND': 'That partner no longer exists.',
 
   'validation:INVALID_REQUEST': 'Something about that request was not valid.',
   'server:UNEXPECTED': 'Something went wrong. The sale was not recorded — try again.',
