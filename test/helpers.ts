@@ -10,6 +10,8 @@ export const DEMO = { email: 'demo@vistahub.my', password: 'vista', pin: '1234' 
  */
 export async function resetTransactional(): Promise<void> {
   await prisma.ledgerEntry.deleteMany()
+  await prisma.correctionBrandDelta.deleteMany()
+  await prisma.saleCorrection.deleteMany()
   await prisma.orderItemModifier.deleteMany()
   await prisma.orderItem.deleteMany()
   await prisma.order.deleteMany()
@@ -75,6 +77,9 @@ export type CheckoutLine = {
   quantity: number
   discount_sen?: number
   modifiers?: Array<{ modifier_id: string }>
+  /** What the device charged, for an offline sale priced against a stale menu. */
+  charged_unit_price_sen?: number
+  charged_modifier_total_sen?: number
 }
 
 export function checkoutPayload(input: {
@@ -100,6 +105,38 @@ export function checkoutPayload(input: {
       quantity: item.quantity,
       discount_sen: item.discount_sen ?? 0,
       modifiers: item.modifiers ?? [],
+      charged_unit_price_sen: item.charged_unit_price_sen,
+      charged_modifier_total_sen: item.charged_modifier_total_sen,
     })),
+  }
+}
+
+export function correctionPayload(input: {
+  clientTxnId: string
+  originalClientTxnId: string
+  kind: 'CANCEL' | 'EXCHANGE'
+  reason?: string
+  claimedDeltaSen: number
+  origin?: 'ONLINE' | 'OFFLINE_SYNC'
+  replacementCartDiscountSen?: number | null
+  replacementItems?: CheckoutLine[] | null
+}) {
+  return {
+    client_txn_id: input.clientTxnId,
+    original_client_txn_id: input.originalClientTxnId,
+    kind: input.kind,
+    reason: input.reason ?? 'Cashier corrected the paid ticket',
+    origin: input.origin ?? 'ONLINE',
+    claimed_delta_sen: input.claimedDeltaSen,
+    replacement_cart_discount_sen: input.replacementCartDiscountSen ?? null,
+    replacement_items:
+      input.replacementItems?.map((item) => ({
+        product_id: item.product_id,
+        quantity: item.quantity,
+        discount_sen: item.discount_sen ?? 0,
+        modifiers: item.modifiers ?? [],
+        charged_unit_price_sen: item.charged_unit_price_sen,
+        charged_modifier_total_sen: item.charged_modifier_total_sen,
+      })) ?? null,
   }
 }

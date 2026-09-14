@@ -29,7 +29,7 @@ export const MESSAGES: Record<string, string> = {
   'shift:NOT_FOUND': 'That shift no longer exists.',
   'shift:ALREADY_CLOSED': 'This shift has already been closed.',
   'shift:UNSYNCED_ORDERS':
-    'Some sales have not reached the server yet. Reconnect and wait for them before closing.',
+    'Some sales or corrections have not reached the server yet. Reconnect and wait before closing.',
 
   'checkout:EMPTY_ORDER': 'Add at least one item before taking payment.',
   'checkout:UNKNOWN_PRODUCT': 'An item on this order is no longer on the menu.',
@@ -38,6 +38,17 @@ export const MESSAGES: Record<string, string> = {
     'The total does not match the current menu prices. Rebuild the order and try again.',
   'checkout:SHIFT_NOT_OPEN': 'No shift is open. Open a shift before taking payment.',
   'checkout:PERIOD_LOCKED': 'That business date is in a month that has already been settled.',
+
+  'correction:ORDER_NOT_FOUND': 'That paid sale could not be found.',
+  'correction:SHIFT_NOT_OPEN': 'That shift is already closed.',
+  'correction:PERIOD_LOCKED': 'That sale belongs to a month that has already been settled.',
+  'correction:ALREADY_CANCELLED': 'That sale has already been fully cancelled.',
+  'correction:DELTA_MISMATCH':
+    'The amount to collect or return has changed. Reopen the sale and try again.',
+  'correction:TOTAL_MISMATCH':
+    'The amended ticket does not match the current menu. Reopen it and try again.',
+  'correction:OFFLINE_TOTAL_MISMATCH':
+    'The offline correction does not add up to the amount recorded on this device.',
 
   'validation:INVALID_REQUEST': 'Something about that request was not valid.',
   'server:UNEXPECTED': 'Something went wrong. The sale was not recorded — try again.',

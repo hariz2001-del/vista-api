@@ -11,8 +11,8 @@ const closeBody = z.object({
   pin: z.string().min(4).max(8),
   declared_bank_total_sen: z.number().int().min(0),
   /**
-   * How many sales the device is still holding. The server cannot see a sale
-   * that has not reached it, so this is the only signal available — a safety
+   * How many financial records the device is still holding. The server cannot
+   * see a sale or correction that has not reached it, so this is the only signal — a safety
    * net against closing a shift with money still on the tablet, not a security
    * control.
    */
@@ -73,12 +73,25 @@ export async function shiftRoutes(app: FastifyInstance): Promise<void> {
         // compares like-for-like against what the bank actually received —
         // comparing a pre-discount figure would show a phantom variance equal
         // to the day's discounts on every single shift.
-        const totals = await tx.order.aggregate({
-          where: { shiftId: shift.id },
-          _sum: { totalAmountSen: true },
-          _count: true,
-        })
-        const systemNetSalesSen = totals._sum.totalAmountSen ?? 0
+        const [totals, ledgerTotals] = await Promise.all([
+          tx.order.aggregate({
+            where: { shiftId: shift.id },
+            _count: true,
+          }),
+          tx.ledgerEntry.groupBy({
+            by: ['direction'],
+            where: {
+              shiftId: shift.id,
+              category: { in: ['REVENUE', 'REFUND'] },
+            },
+            _sum: { amountSen: true },
+          }),
+        ])
+        const systemNetSalesSen = ledgerTotals.reduce(
+          (sum, row) =>
+            sum + (row.direction === 'MONEY_IN' ? 1 : -1) * (row._sum.amountSen ?? 0),
+          0,
+        )
         const varianceSen = body.declared_bank_total_sen - systemNetSalesSen
 
         const updated = await tx.shift.update({

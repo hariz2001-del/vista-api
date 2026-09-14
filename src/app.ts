@@ -7,6 +7,7 @@ import { DomainError, messageFor } from './errors.ts'
 import { authRoutes } from './routes/auth.ts'
 import { bootstrapRoutes } from './routes/bootstrap.ts'
 import { checkoutRoutes } from './routes/checkout.ts'
+import { correctionRoutes } from './routes/corrections.ts'
 import { shiftRoutes } from './routes/shifts.ts'
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -60,6 +61,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(bootstrapRoutes)
   await app.register(shiftRoutes)
   await app.register(checkoutRoutes)
+  await app.register(correctionRoutes)
 
   return app
 }

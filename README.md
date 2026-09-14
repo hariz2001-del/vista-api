@@ -1,7 +1,7 @@
 # api-vista
 
 Fastify + Postgres backend for Vista. This round covers the **money path** only:
-authentication, the catalogue bootstrap, shift open/close, and checkout.
+authentication, the catalogue bootstrap, shift open/close, checkout, and paid-sale corrections.
 
 Expenses, the cashflow ledger reporting, partner settlement and period closure are not built yet.
 
@@ -29,20 +29,28 @@ Demo credentials come from the seed: `demo@vistahub.my` / `vista`, counter PIN `
 | `POST` | `/shifts/open` | PIN; resolves the business date; refuses if one is already open |
 | `POST` | `/shifts/:id/close` | PIN; aggregates takings server-side; records the variance |
 | `POST` | `/checkout` | Idempotent. The money path. |
+| `POST` | `/corrections` | Idempotent cancel or exchange against an immutable paid sale. |
 
 ## The rules this service enforces
 
 **Money is integer sen, everywhere.** Not because Postgres `numeric` is inexact — it isn't — but
 because it stops being exact the moment Node reads it.
 
-**The server prices everything.** The request carries product ids, quantities, modifier ids and
-discounts. It does not carry prices. Everything payable is read from the catalogue, so there is
-nothing for a client to lie about. The client's *claimed* total is compared against the server's
-own and a mismatch aborts with `checkout:GROSS_MISMATCH`.
+**The server prices every online checkout.** The request carries product ids, quantities,
+modifier ids and discounts; everything payable is read from the catalogue. Offline sync also
+carries the cached price snapshot already charged. The server validates that snapshot's
+arithmetic, books the money that actually moved, and stores its current-menu computation beside
+it. An incoherent snapshot aborts with `checkout:OFFLINE_TOTAL_MISMATCH`.
 
 **A replayed sale is not a second sale.** Every checkout carries a `client_txn_id` minted once on
 the device and reused across retries, behind a unique constraint. A double tap, a retry after a
 timeout, or an offline sale flushed hours later all return the *original* order.
+
+**Paid sales are corrected, never rewritten.** `POST /corrections` locks the original order,
+rebuilds its outstanding value from the sale plus prior corrections, and computes the new
+per-brand split server-side. A cancel writes `MONEY_OUT / REFUND`; an exchange writes the exact
+positive and negative brand entries needed. The client-provided delta is only a consistency
+check. The endpoint has its own idempotency key, so a retried refund cannot be posted twice.
 
 **Checkout and shift close take the same row lock.** Without it, a sale committing while a shift
 closes lands in a closed shift and sits outside its totals — real money missing from the books.
@@ -52,10 +60,10 @@ Both do `SELECT … FOR UPDATE` on the shift, so they serialise.
 read-then-increment gap. A rolled-back checkout leaves no hole.
 
 **An offline sale is never dropped and never silently repriced.** A tablet that priced from a
-cached menu cannot be blamed for a price that changed since. Such a sale is accepted at the
-server's price and flagged `needs_review` for the owner. A sale that syncs after its shift closed
-is also accepted, and flips that shift back to `UNRECONCILED` so the owner sees its totals moved.
-Refusing would destroy a sale where money was already collected.
+cached menu cannot be blamed for a later price change. The amount charged is the revenue booked;
+the current menu price is retained separately so divergence stays reportable. A sale that syncs
+after its shift closed is also accepted, and flips that shift back to `UNRECONCILED` so the owner
+sees its totals moved. Refusing would destroy a sale where money was already collected.
 
 **Every discount lands on a brand.** Line discounts belong to their own line. The order-wide
 discount is apportioned across brands first, then across the lines within each brand, both by
@@ -92,10 +100,12 @@ row locks it cannot express).
 npm test
 ```
 
-40 tests. The ones worth knowing about: idempotent replay both sequentially and concurrently,
+51 tests. The ones worth knowing about: idempotent sale and correction replay, both sequentially and concurrently,
 eight simultaneous checkouts producing eight distinct sequential queue numbers, an under-claimed
-total being rejected online and accepted-but-flagged offline, a sale syncing into a closed shift,
-the one-open-shift constraint holding when the route is bypassed entirely, and the business date
+total being rejected online, a coherent charged snapshot being preserved offline, a sale syncing into a closed shift,
+sequential exchange-then-cancel refunding only the outstanding amount, same-price exchanges moving
+brand attribution, corrections flowing into shift close, the one-open-shift constraint holding
+when the route is bypassed entirely, and the business date
 rolling at 5am rather than midnight across month and year boundaries.
 
 `test/money-vectors.test.ts` runs against `../money-vectors.json`, shared with the POS. Because

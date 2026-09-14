@@ -17,6 +17,15 @@ const itemSchema = z.object({
   quantity: z.number().int().positive(),
   discount_sen: z.number().int().min(0).default(0),
   modifiers: z.array(modifierSchema).default([]),
+  /**
+   * What the device actually charged for this line. For an `OFFLINE_SYNC` only.
+   *
+   * An offline tablet priced from a cached menu, so only it knows what the
+   * customer handed over. Ignored for an online checkout, where the server's own
+   * price is the price.
+   */
+  charged_unit_price_sen: z.number().int().min(0).optional(),
+  charged_modifier_total_sen: z.number().int().min(0).optional(),
 })
 
 const checkoutBody = z.object({
@@ -75,6 +84,7 @@ function serialise(order: NonNullable<Awaited<ReturnType<typeof loadExisting>>>,
     offline_label: order.offlineLabel,
     business_date: order.businessDate.toISOString().slice(0, 10),
     total_amount_sen: order.totalAmountSen,
+    menu_price_sen: order.menuPriceSen,
     item_count: order.items.reduce((sum, item) => sum + item.quantity, 0),
     needs_review: order.needsReview,
     review_reason: order.reviewReason,
@@ -114,8 +124,16 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
   // shift whose totals have already been counted.
   // Ids are text columns, not Postgres uuid — no cast, or the comparison
   // becomes uuid = text and Postgres refuses it.
-  const shifts = await tx.$queryRaw<Array<{ id: string; status: string }>>`
-    SELECT id, status FROM shifts WHERE id = ${body.shift_id} FOR UPDATE
+  const shifts = await tx.$queryRaw<
+    Array<{
+      id: string
+      status: string
+      system_net_sales_sen: number | null
+      declared_bank_total_sen: number | null
+    }>
+  >`
+    SELECT id, status, system_net_sales_sen, declared_bank_total_sen
+      FROM shifts WHERE id = ${body.shift_id} FOR UPDATE
   `
   const shift = shifts[0]
   if (!shift) throw notFound('shift:NOT_FOUND')
@@ -171,6 +189,12 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
   let needsReview = false
   let reviewReason: string | null = null
 
+  // What actually gets written. For an online sale this is the server's own
+  // pricing, full stop. For an offline sale it becomes what the customer paid,
+  // with the server's figure kept beside it — see below.
+  let recorded = priced
+  let repriced = false
+
   if (priced.totalAmountSen !== body.claimed_total_sen) {
     if (body.origin === 'ONLINE') {
       throw badRequest(
@@ -178,16 +202,52 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
         `claimed ${body.claimed_total_sen} sen, server computed ${priced.totalAmountSen} sen`,
       )
     }
-    // An offline tablet priced from a cached menu and cannot be blamed for a
-    // price that changed since. Accept the sale, keep the server's figure, and
-    // put it in front of the owner. Never silently reprice, never drop it.
-    needsReview = true
-    reviewReason = `Priced offline at ${body.claimed_total_sen} sen; current menu gives ${priced.totalAmountSen} sen.`
+
+    /*
+     * An offline tablet priced from a cached menu. The money has already moved,
+     * so the books must record the amount that moved — not what the same basket
+     * would cost today. Recording the current menu price here would book revenue
+     * that never arrived and leave that shift permanently unreconcilable.
+     *
+     * So the device's own prices become the historical snapshot for this order,
+     * and the server's recomputation is kept alongside as `menu_price_sen`. The
+     * divergence is stored and reportable rather than discarded: a device
+     * claiming implausible offline prices shows up in a report instead of being
+     * silently trusted.
+     *
+     * The client is still not trusted on arithmetic. Its own basket has to add up
+     * to the total it says it charged, or there is no coherent snapshot to record
+     * and the sale is refused outright.
+     */
+    const chargedInputs: PricedLineInput[] = resolved.map((line, index) => {
+      const item = body.cart_items[index]
+      if (!item) throw badRequest('server:UNEXPECTED', 'cart item missing')
+      return {
+        brandId: line.product.brandId,
+        unitPriceSen: item.charged_unit_price_sen ?? line.product.basePriceSen,
+        modifierTotalSen: item.charged_modifier_total_sen ?? line.modifierTotalSen,
+        quantity: item.quantity,
+        requestedLineDiscountSen: item.discount_sen,
+      }
+    })
+
+    const charged = priceOrder(chargedInputs, body.cart_discount_sen)
+    if (charged.totalAmountSen !== body.claimed_total_sen) {
+      throw badRequest(
+        'checkout:OFFLINE_TOTAL_MISMATCH',
+        `claimed ${body.claimed_total_sen} sen, but the prices sent add up to ${charged.totalAmountSen} sen`,
+      )
+    }
+
+    recorded = charged
+    repriced = true
   }
 
   if (lateSync) {
+    // Not an approval queue — nothing waits on the owner. This exists because a
+    // closed shift's totals just moved, which reopens its reconciliation below.
     needsReview = true
-    reviewReason = [reviewReason, 'Synced after the shift was closed.'].filter(Boolean).join(' ')
+    reviewReason = 'Synced after the shift was closed.'
   }
 
   // ---- Write ----
@@ -204,10 +264,13 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
       offlineLabel: body.offline_label ?? null,
       clientTxnId: body.client_txn_id,
       origin: body.origin,
-      grossSen: priced.grossSen,
-      lineDiscountSen: priced.lineDiscountSen,
-      orderDiscountSen: priced.orderDiscountSen,
-      totalAmountSen: priced.totalAmountSen,
+      grossSen: recorded.grossSen,
+      lineDiscountSen: recorded.lineDiscountSen,
+      orderDiscountSen: recorded.orderDiscountSen,
+      totalAmountSen: recorded.totalAmountSen,
+      // Equal to the total for an online sale; different only when an offline
+      // sale was priced against a menu that has since moved.
+      menuPriceSen: priced.totalAmountSen,
       confirmedById: userId,
       confirmedAt: now,
       completedAt: now,
@@ -215,16 +278,25 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
       reviewReason,
       items: {
         create: resolved.map((line, index) => {
-          const pricedLine = priced.lines[index]
+          const pricedLine = recorded.lines[index]
           if (!pricedLine) throw badRequest('server:UNEXPECTED', 'priced line missing')
+          const item = body.cart_items[index]
           return {
             productId: line.product.id,
             brandId: line.product.brandId,
             categoryId: line.product.categoryId,
             productName: line.product.name,
             quantity: line.quantity,
-            unitPriceSen: line.product.basePriceSen,
-            modifierTotalSen: line.modifierTotalSen,
+            // The price this line was actually sold at: the catalogue price
+            // online, what the device charged offline. Either way the stored
+            // lines add up to the stored total, which `orders_total_adds_up`
+            // enforces at the database level.
+            unitPriceSen: repriced
+              ? (item?.charged_unit_price_sen ?? line.product.basePriceSen)
+              : line.product.basePriceSen,
+            modifierTotalSen: repriced
+              ? (item?.charged_modifier_total_sen ?? line.modifierTotalSen)
+              : line.modifierTotalSen,
             lineDiscountSen: pricedLine.lineDiscountSen,
             allocatedOrderDiscountSen: pricedLine.allocatedOrderDiscountSen,
             modifiers: {
@@ -246,7 +318,7 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
   // brand attribution the partner settlement is built on. A fully discounted
   // order writes none: no money moved, and the order row is the audit trail.
   const netByBrand = new Map<string, number>()
-  priced.lines.forEach((line) => {
+  recorded.lines.forEach((line) => {
     netByBrand.set(line.brandId, (netByBrand.get(line.brandId) ?? 0) + line.netSen)
   })
 
@@ -267,9 +339,17 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
   }
 
   if (lateSync) {
+    const systemNetSalesSen = (shift.system_net_sales_sen ?? 0) + order.totalAmountSen
     await tx.shift.update({
       where: { id: shift.id },
-      data: { reconciliationStatus: 'UNRECONCILED' },
+      data: {
+        systemNetSalesSen,
+        varianceSen:
+          shift.declared_bank_total_sen == null
+            ? null
+            : shift.declared_bank_total_sen - systemNetSalesSen,
+        reconciliationStatus: 'UNRECONCILED',
+      },
     })
   }
 

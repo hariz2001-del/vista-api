@@ -66,6 +66,11 @@ enum OrderOrigin {
   OFFLINE_SYNC
 }
 
+enum CorrectionKind {
+  CANCEL
+  EXCHANGE
+}
+
 /// Raised by the cashier, resolved by the owner. Cashiers cannot void a paid
 /// sale; flagging is the only thing they can do to one.
 enum FlagStatus {
@@ -108,9 +113,10 @@ model User {
   isActive     Boolean  @default(true) @map("is_active")
   createdAt    DateTime @default(now()) @map("created_at")
 
-  shiftsOpened    Shift[] @relation("ShiftsOpened")
-  shiftsClosed    Shift[] @relation("ShiftsClosed")
-  ordersConfirmed Order[] @relation("OrdersConfirmed")
+  shiftsOpened       Shift[]          @relation("ShiftsOpened")
+  shiftsClosed       Shift[]          @relation("ShiftsClosed")
+  ordersConfirmed    Order[]          @relation("OrdersConfirmed")
+  correctionsCreated SaleCorrection[] @relation("CorrectionsCreated")
 
   @@map("users")
 }
@@ -130,10 +136,11 @@ model Brand {
   sortOrder  Int      @default(0) @map("sort_order")
   createdAt  DateTime @default(now()) @map("created_at")
 
-  categories    Category[]
-  products      Product[]
-  orderItems    OrderItem[]
-  ledgerEntries LedgerEntry[]
+  categories       Category[]
+  products         Product[]
+  orderItems       OrderItem[]
+  ledgerEntries    LedgerEntry[]
+  correctionDeltas CorrectionBrandDelta[]
 
   @@map("brands")
 }
@@ -231,18 +238,19 @@ model Shift {
 
   /// What the cashier says the bank actually received, entered at close.
   declaredBankTotalSen Int? @map("declared_bank_total_sen")
-  /// Sum of orders.totalAmountSen for this shift, computed server-side at close.
-  /// Net of discounts, so it compares like-for-like against the declared total.
+  /// Net MONEY_IN revenue less MONEY_OUT refunds for this shift, computed
+  /// server-side at close and updated when an offline record arrives late.
   systemNetSalesSen    Int? @map("system_net_sales_sen")
   /// declared − system. Positive is a surplus, negative a shortfall.
   varianceSen          Int? @map("variance_sen")
 
   reconciliationStatus ReconciliationStatus @default(NOT_REQUIRED) @map("reconciliation_status")
 
-  openedBy      User          @relation("ShiftsOpened", fields: [openedById], references: [id])
-  closedBy      User?         @relation("ShiftsClosed", fields: [closedById], references: [id])
+  openedBy      User             @relation("ShiftsOpened", fields: [openedById], references: [id])
+  closedBy      User?            @relation("ShiftsClosed", fields: [closedById], references: [id])
   orders        Order[]
   ledgerEntries LedgerEntry[]
+  corrections   SaleCorrection[]
 
   @@index([businessDate])
   @@index([status])
@@ -270,7 +278,7 @@ model Order {
   businessDate DateTime @map("business_date") @db.Date
 
   /// `#042`. Unique within a business date.
-  queueNumber String @map("queue_number")
+  queueNumber  String  @map("queue_number")
   /// The `#OFF-01` the kitchen was actually told, when this sale was rung up
   /// offline. Kept after syncing: it is the only way to trace a disputed order
   /// back to what the customer was called.
@@ -282,10 +290,18 @@ model Order {
   origin      OrderOrigin @default(ONLINE)
 
   /// Server-recomputed. grossSen − orderDiscountSen − sum(line discounts) = totalAmountSen.
-  grossSen          Int @map("gross_sen")
-  lineDiscountSen   Int @default(0) @map("line_discount_sen")
-  orderDiscountSen  Int @default(0) @map("order_discount_sen")
-  totalAmountSen    Int @map("total_amount_sen")
+  grossSen         Int @map("gross_sen")
+  lineDiscountSen  Int @default(0) @map("line_discount_sen")
+  orderDiscountSen Int @default(0) @map("order_discount_sen")
+  /// What the customer actually paid. For an offline sale this is the figure the
+  /// device charged, which is the money that moved; it is never overwritten with
+  /// a later menu price.
+  totalAmountSen   Int @map("total_amount_sen")
+  /// What the same basket comes to at the catalogue prices in force when the
+  /// sale reached the server. Equal to `totalAmountSen` except for an offline
+  /// sale priced against a menu that has since moved — the divergence is kept so
+  /// it can be reported on rather than silently trusted or silently discarded.
+  menuPriceSen     Int @map("menu_price_sen")
 
   paymentStatus OrderPaymentStatus @default(MANUALLY_CONFIRMED) @map("payment_status")
   paymentMode   String             @default("DUITNOW_QR") @map("payment_mode")
@@ -310,16 +326,69 @@ model Order {
   completedAt DateTime @map("completed_at")
   createdAt   DateTime @default(now()) @map("created_at")
 
-  shift         Shift         @relation(fields: [shiftId], references: [id], onDelete: Restrict)
-  confirmedBy   User          @relation("OrdersConfirmed", fields: [confirmedById], references: [id])
+  shift         Shift            @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  confirmedBy   User             @relation("OrdersConfirmed", fields: [confirmedById], references: [id])
   items         OrderItem[]
   ledgerEntries LedgerEntry[]
+  corrections   SaleCorrection[]
 
   @@unique([businessDate, queueNumber])
   @@index([shiftId])
   @@index([businessDate])
   @@index([needsReview])
   @@map("orders")
+}
+
+// ---------------------------------------------------------------------------
+// Paid-sale corrections
+// ---------------------------------------------------------------------------
+
+/// Append-only counter correction. The paid order remains untouched; this row
+/// and its brand deltas describe the value that moved afterwards.
+model SaleCorrection {
+  id                         String         @id @default(uuid())
+  clientTxnId                String         @unique @map("client_txn_id")
+  originalOrderId            String         @map("original_order_id")
+  shiftId                    String         @map("shift_id")
+  businessDate               DateTime       @map("business_date") @db.Date
+  kind                       CorrectionKind
+  reason                     String
+  /// Signed: negative is money returned; positive is additional money received.
+  deltaSen                   Int            @map("delta_sen")
+  /// Full server-resolved ticket after an exchange. Null for a cancellation.
+  replacementItems           Json?          @map("replacement_items")
+  replacementCartDiscountSen Int?           @map("replacement_cart_discount_sen")
+  replacementTotalSen        Int?           @map("replacement_total_sen")
+  replacementMenuPriceSen    Int?           @map("replacement_menu_price_sen")
+  createdById                String         @map("created_by_id")
+  createdAt                  DateTime       @default(now()) @map("created_at")
+
+  originalOrder Order                  @relation(fields: [originalOrderId], references: [id], onDelete: Restrict)
+  shift         Shift                  @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  createdBy     User                   @relation("CorrectionsCreated", fields: [createdById], references: [id], onDelete: Restrict)
+  brandDeltas   CorrectionBrandDelta[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([originalOrderId, createdAt])
+  @@index([shiftId])
+  @@index([businessDate])
+  @@map("sale_corrections")
+}
+
+/// Signed per-brand component of a correction. Kept as rows because settlement
+/// and the ledger both report by brand, and JSON would make those sums fragile.
+model CorrectionBrandDelta {
+  id           BigInt @id @default(autoincrement())
+  correctionId String @map("correction_id")
+  brandId      String @map("brand_id")
+  deltaSen     Int    @map("delta_sen")
+
+  correction SaleCorrection @relation(fields: [correctionId], references: [id], onDelete: Cascade)
+  brand      Brand          @relation(fields: [brandId], references: [id], onDelete: Restrict)
+
+  @@unique([correctionId, brandId])
+  @@index([brandId])
+  @@map("correction_brand_deltas")
 }
 
 model OrderItem {
@@ -340,7 +409,7 @@ model OrderItem {
   modifierTotalSen Int @default(0) @map("modifier_total_sen")
 
   /// A discount applied to this line specifically.
-  lineDiscountSen Int @default(0) @map("line_discount_sen")
+  lineDiscountSen           Int @default(0) @map("line_discount_sen")
   /// This line's share of the order-wide discount, apportioned server-side by
   /// largest remainder. Stored rather than recomputed at report time, so
   /// per-brand net sales is a plain SUM and can never drift.
@@ -394,27 +463,30 @@ model LedgerEntry {
   businessDate DateTime @map("business_date") @db.Date
   entryAt      DateTime @default(now()) @map("entry_at")
 
-  direction LedgerDirection
-  amountSen Int             @map("amount_sen")
-  category  LedgerCategory
+  direction   LedgerDirection
+  amountSen   Int             @map("amount_sen")
+  category    LedgerCategory
   description String
 
   /// Null means the entry is shared across brands rather than belonging to one.
   brandId String? @map("brand_id")
 
-  orderId String? @map("order_id")
+  orderId      String? @map("order_id")
   /// Set on entries produced by resolving a shift's unreconciled variance, so
   /// the owner can trace any adjustment back to the close that caused it.
-  shiftId String? @map("shift_id")
+  shiftId      String? @map("shift_id")
+  correctionId String? @map("correction_id")
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  brand Brand? @relation(fields: [brandId], references: [id], onDelete: Restrict)
-  order Order? @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  shift Shift? @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  brand      Brand?          @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  order      Order?          @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  shift      Shift?          @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  correction SaleCorrection? @relation(fields: [correctionId], references: [id], onDelete: Restrict)
 
   @@index([businessDate, id])
   @@index([orderId])
   @@index([shiftId])
+  @@index([correctionId])
   @@map("ledger_entries")
 }
