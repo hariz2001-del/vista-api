@@ -117,6 +117,8 @@ model User {
   shiftsClosed       Shift[]          @relation("ShiftsClosed")
   ordersConfirmed    Order[]          @relation("OrdersConfirmed")
   correctionsCreated SaleCorrection[] @relation("CorrectionsCreated")
+  expensesCreated    Expense[]        @relation("ExpensesCreated")
+  periodsClosed      PeriodClosure[]  @relation("PeriodsClosed")
 
   @@map("users")
 }
@@ -141,6 +143,7 @@ model Brand {
   orderItems       OrderItem[]
   ledgerEntries    LedgerEntry[]
   correctionDeltas CorrectionBrandDelta[]
+  expenses         Expense[]
 
   @@map("brands")
 }
@@ -514,4 +517,102 @@ model AccountSettings {
   updatedAt             DateTime @updatedAt @map("updated_at")
 
   @@map("account_settings")
+}
+
+// ---------------------------------------------------------------------------
+// Owner books — expenses, settled periods, and the counter's heartbeat
+// ---------------------------------------------------------------------------
+
+enum ExpenseCategory {
+  RAW_MATERIALS
+  PACKAGING
+  RENT
+  UTILITIES
+  OPERATIONS
+  MAINTENANCE
+  CAPITAL_ASSET
+}
+
+/// Who actually paid. A partner paying out of pocket creates a debt to them,
+/// not an outflow from the stall — nothing reaches the ledger until the stall
+/// reimburses them.
+enum PaymentSource {
+  STALL_FUNDS
+  PARTNER_FOOD
+  PARTNER_DRINKS
+}
+
+/// A cost the stall incurred.
+///
+/// The food/drinks split is a SNAPSHOT taken when the expense is logged, so a
+/// later change to the overhead ratio can never rewrite a past period. CHECK
+/// constraints in the migration make the two shares always sum to the amount.
+model Expense {
+  id              String          @id @default(uuid())
+  businessDate    DateTime        @map("business_date") @db.Date
+  amountSen       Int             @map("amount_sen")
+  category        ExpenseCategory
+  paidBy          PaymentSource   @map("paid_by")
+  /// Null means shared between brands, apportioned by the split below.
+  brandId         String?         @map("brand_id")
+  foodSplitPct    Int             @map("food_split_pct")
+  foodAmountSen   Int             @map("food_amount_sen")
+  drinksAmountSen Int             @map("drinks_amount_sen")
+  description     String
+  receiptUrl      String?         @map("receipt_url")
+  /// For a partner-paid expense: has the stall reimbursed them yet?
+  isSettled       Boolean         @default(false) @map("is_settled")
+  /// Set once the containing period has been closed and settled.
+  isLocked        Boolean         @default(false) @map("is_locked")
+  createdById     String          @map("created_by_id")
+  createdAt       DateTime        @default(now()) @map("created_at")
+
+  brand     Brand? @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  createdBy User   @relation("ExpensesCreated", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([businessDate])
+  @@index([paidBy, isSettled])
+  @@map("expenses")
+}
+
+/// A settled period, frozen at the figures both partners were paid against.
+///
+/// Never recomputed. The next period's opening deficit is read from here, so
+/// a locked month stays exactly as agreed. An exclusion constraint in the
+/// migration makes two settled periods overlapping impossible.
+model PeriodClosure {
+  id                    String   @id @default(uuid())
+  startDate             DateTime @map("start_date") @db.Date
+  endDate               DateTime @map("end_date") @db.Date
+  closedAt              DateTime @default(now()) @map("closed_at")
+  closedById            String   @map("closed_by_id")
+  foodNetSalesSen       Int      @map("food_net_sales_sen")
+  foodDirectExpensesSen Int      @map("food_direct_expenses_sen")
+  foodOverheadShareSen  Int      @map("food_overhead_share_sen")
+  foodNetResultSen      Int      @map("food_net_result_sen")
+  openingIouSen         Int      @map("opening_iou_sen")
+  hostCommissionSen     Int      @map("host_commission_sen")
+  closingIouSen         Int      @map("closing_iou_sen")
+  foodPayoutSen         Int      @map("food_payout_sen")
+  drinksPayoutSen       Int      @map("drinks_payout_sen")
+
+  closedBy User @relation("PeriodsClosed", fields: [closedById], references: [id], onDelete: Restrict)
+
+  @@index([endDate])
+  @@map("period_closures")
+}
+
+/// What the owner can know about the counter tablet. One row (`id = 1`).
+///
+/// Written only by the tablet's heartbeat. The server cannot see a tablet that
+/// has stopped calling, so silence is the only offline signal there is.
+model TerminalStatus {
+  id                      Int       @id @default(1)
+  lastSeenAt              DateTime? @map("last_seen_at")
+  /// Flush attempts in a row that failed to send something, as the tablet reports.
+  consecutiveSyncFailures Int       @default(0) @map("consecutive_sync_failures")
+  lastSeenById            String?   @map("last_seen_by_id")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  @@map("terminal_status")
 }

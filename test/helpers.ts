@@ -9,6 +9,9 @@ export const DEMO = { email: 'demo@vistahub.my', password: 'vista', pin: '1234' 
  * is seeded once by `npm run seed`, and tests assert against its real prices.
  */
 export async function resetTransactional(): Promise<void> {
+  await prisma.expense.deleteMany()
+  await prisma.periodClosure.deleteMany()
+  await prisma.terminalStatus.deleteMany()
   await prisma.ledgerEntry.deleteMany()
   await prisma.correctionBrandDelta.deleteMany()
   await prisma.saleCorrection.deleteMany()
@@ -25,11 +28,22 @@ export async function makeApp(): Promise<FastifyInstance> {
   return app
 }
 
+/** The Food partner — an owner account, for the RMS routes. */
+export const OWNER = { email: 'food@vistahub.my', password: 'vista' }
+
 export async function login(app: FastifyInstance): Promise<string> {
+  return loginAs(app, DEMO.email, DEMO.password)
+}
+
+export async function loginAs(
+  app: FastifyInstance,
+  email: string,
+  password: string,
+): Promise<string> {
   const response = await app.inject({
     method: 'POST',
     url: '/auth/login',
-    payload: { email: DEMO.email, password: DEMO.password },
+    payload: { email, password },
   })
   if (response.statusCode !== 200) {
     throw new Error(`login failed (${response.statusCode}): ${response.body}`)

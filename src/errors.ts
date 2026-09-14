@@ -50,6 +50,20 @@ export const MESSAGES: Record<string, string> = {
   'correction:OFFLINE_TOTAL_MISMATCH':
     'The offline correction does not add up to the amount recorded on this device.',
 
+  'auth:FORBIDDEN': 'This account cannot open the owner dashboard.',
+
+  'rms:INVALID_RANGE': 'The start date must be on or before the end date.',
+  'rms:PERIOD_LOCKED': 'That date falls in a period that has already been settled.',
+  'rms:PERIOD_OVERLAPS': 'Part of that range has already been settled.',
+  'rms:SHIFT_STILL_OPEN': 'A shift in that range is still open. Close it before settling.',
+  'rms:SHIFT_NOT_OPEN': 'That shift is not open.',
+  'rms:EXPENSE_NOT_FOUND': 'That expense no longer exists.',
+  'rms:NOT_AN_ADVANCE': 'Only a cost a partner paid out of pocket can be settled.',
+  'rms:ALREADY_SETTLED': 'That payment has already been settled.',
+  'rms:UNKNOWN_BRAND': 'That brand does not exist.',
+  'rms:PRODUCT_NOT_FOUND': 'That item is no longer on the menu.',
+  'rms:NOTHING_TO_CHANGE': 'Nothing to change.',
+
   'validation:INVALID_REQUEST': 'Something about that request was not valid.',
   'server:UNEXPECTED': 'Something went wrong. The sale was not recorded — try again.',
 }
@@ -63,6 +77,9 @@ export const badRequest = (code: string, detail?: string) =>
 
 export const unauthorized = (code: string, detail?: string) =>
   new DomainError(code, 401, messageFor(code), detail)
+
+export const forbidden = (code: string, detail?: string) =>
+  new DomainError(code, 403, messageFor(code), detail)
 
 export const notFound = (code: string, detail?: string) =>
   new DomainError(code, 404, messageFor(code), detail)

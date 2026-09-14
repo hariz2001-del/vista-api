@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { requireUser, verifySecret } from '../auth.ts'
-import { prisma } from '../db.ts'
+import { prisma, type Tx } from '../db.ts'
 import { businessDateToUtc, getBusinessDate } from '../domain/business-date.ts'
 import { badRequest, conflict, notFound, unauthorized } from '../errors.ts'
 
@@ -26,6 +26,30 @@ const closeBody = z.object({
    */
   device_pending_count: z.number().int().min(0).default(0),
 })
+
+/**
+ * A shift's takings: revenue less refunds on its ledger rows, net of discounts.
+ * Computed from the ledger rather than taken from anyone, and shared by the
+ * cashier's close and the owner's force-close so the two can never disagree.
+ */
+export async function shiftTakings(
+  tx: Tx,
+  shiftId: string,
+): Promise<{ orderCount: number; systemNetSalesSen: number }> {
+  const [orderCount, ledgerTotals] = await Promise.all([
+    tx.order.count({ where: { shiftId } }),
+    tx.ledgerEntry.groupBy({
+      by: ['direction'],
+      where: { shiftId, category: { in: ['REVENUE', 'REFUND'] } },
+      _sum: { amountSen: true },
+    }),
+  ])
+  const systemNetSalesSen = ledgerTotals.reduce(
+    (sum, row) => sum + (row.direction === 'MONEY_IN' ? 1 : -1) * (row._sum.amountSen ?? 0),
+    0,
+  )
+  return { orderCount, systemNetSalesSen }
+}
 
 async function assertPin(userId: string, pin: string): Promise<void> {
   const user = await prisma.user.findUnique({ where: { id: userId } })
@@ -77,28 +101,9 @@ export async function shiftRoutes(app: FastifyInstance): Promise<void> {
         if (!shift) throw notFound('shift:NOT_FOUND')
         if (shift.status !== 'OPEN') throw conflict('shift:ALREADY_CLOSED')
 
-        // Computed here, never taken from the client: revenue less refunds for
-        // this shift, net of discounts. This is the figure the owner later checks
-        // against the bank statement.
-        const [totals, ledgerTotals] = await Promise.all([
-          tx.order.aggregate({
-            where: { shiftId: shift.id },
-            _count: true,
-          }),
-          tx.ledgerEntry.groupBy({
-            by: ['direction'],
-            where: {
-              shiftId: shift.id,
-              category: { in: ['REVENUE', 'REFUND'] },
-            },
-            _sum: { amountSen: true },
-          }),
-        ])
-        const systemNetSalesSen = ledgerTotals.reduce(
-          (sum, row) =>
-            sum + (row.direction === 'MONEY_IN' ? 1 : -1) * (row._sum.amountSen ?? 0),
-          0,
-        )
+        // Computed here, never taken from the client. This is the figure the
+        // owner later checks against the bank statement.
+        const { orderCount, systemNetSalesSen } = await shiftTakings(tx, shift.id)
         const updated = await tx.shift.update({
           where: { id: shift.id },
           data: {
@@ -118,7 +123,7 @@ export async function shiftRoutes(app: FastifyInstance): Promise<void> {
         return {
           id: updated.id,
           business_date: updated.businessDate.toISOString().slice(0, 10),
-          order_count: totals._count,
+          order_count: orderCount,
           system_net_sales_sen: systemNetSalesSen,
           reconciliation_status: updated.reconciliationStatus,
         }

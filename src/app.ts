@@ -8,7 +8,9 @@ import { authRoutes } from './routes/auth.ts'
 import { bootstrapRoutes } from './routes/bootstrap.ts'
 import { checkoutRoutes } from './routes/checkout.ts'
 import { correctionRoutes } from './routes/corrections.ts'
+import { rmsRoutes } from './routes/rms.ts'
 import { shiftRoutes } from './routes/shifts.ts'
+import { terminalRoutes } from './routes/terminal.ts'
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -17,7 +19,15 @@ export async function buildApp(): Promise<FastifyInstance> {
     trustProxy: true,
   })
 
-  await app.register(cors, { origin: true, credentials: true })
+  // The methods must be listed: @fastify/cors defaults to GET, HEAD and POST
+  // only, so a browser's preflight for the RMS's PUT (settings) and PATCH (menu)
+  // is refused and the request never leaves the page. Server-side tests use
+  // inject(), which skips CORS entirely — test/cors.test.ts covers that gap.
+  await app.register(cors, {
+    origin: true,
+    credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
+  })
   await app.register(jwt, { secret: env.JWT_SECRET, sign: { expiresIn: '12h' } })
 
   /**
@@ -62,6 +72,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(shiftRoutes)
   await app.register(checkoutRoutes)
   await app.register(correctionRoutes)
+  await app.register(terminalRoutes)
+  await app.register(rmsRoutes)
 
   return app
 }

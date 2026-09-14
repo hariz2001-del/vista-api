@@ -143,6 +143,10 @@ async function main(): Promise<void> {
   // Order matters: children before parents, and every sale-bearing table is
   // Restrict-on-delete, so a reseed on a database with orders will refuse
   // rather than quietly destroying history.
+  // Owner books reference users and brands, so they go before either.
+  await prisma.expense.deleteMany()
+  await prisma.periodClosure.deleteMany()
+  await prisma.terminalStatus.deleteMany()
   await prisma.ledgerEntry.deleteMany()
   // Corrections point at orders, so they go first or the order delete refuses.
   await prisma.correctionBrandDelta.deleteMany()

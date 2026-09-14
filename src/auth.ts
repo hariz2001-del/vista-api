@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs'
 import type { FastifyReply, FastifyRequest } from 'fastify'
-import { unauthorized } from './errors.ts'
+import { forbidden, unauthorized } from './errors.ts'
 
 const ROUNDS = 10
 
@@ -34,5 +34,17 @@ export async function requireUser(request: FastifyRequest, _reply: FastifyReply)
     await request.jwtVerify()
   } catch {
     throw unauthorized('auth:UNAUTHORIZED')
+  }
+}
+
+/**
+ * Owner-only routes. The cashier's token is refused even though it is valid: a
+ * tablet at the counter must never be able to read the partners' books or move
+ * money outside a sale.
+ */
+export async function requireOwner(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  await requireUser(request, reply)
+  if (request.user.role !== 'OWNER_FOOD' && request.user.role !== 'OWNER_DRINKS') {
+    throw forbidden('auth:FORBIDDEN')
   }
 }
