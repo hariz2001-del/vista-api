@@ -70,10 +70,17 @@ discount is apportioned across brands first, then across the lines within each b
 largest remainder — so the parts sum to the whole exactly, no brand can be pushed negative, and
 the per-brand totals agree with what the POS displayed. Partner settlement depends on this.
 
-**Shift close never touches the ledger.** It records what the cashier declared and the resulting
-variance, and leaves a non-zero gap as `UNRECONCILED`. The owner says what the gap was from the
-RMS, and *that* action writes the ledger entry. The cashier is not asked to make an accounting
-judgement mid-service.
+**Shift close takes only the PIN and never touches the ledger.** The cashier declares no bank
+figure — they cannot see the account. The server records its own takings (revenue less refunds,
+net of discounts). Checking that against the bank is the owner's job in the RMS: a gap is closed
+with Adjust Balance, which writes one `RECONCILIATION_ADJUSTMENT` entry. A sale or correction
+that syncs after close updates the stored takings and marks the shift `UNRECONCILED`, meaning
+*changed after close*.
+
+**Tests use their own database.** `npm test` runs against `<database>_test` (created, migrated
+and seeded by `test/global-setup.ts`), because the suite wipes orders, shifts and the ledger
+before every test. The development database — and whatever you are trying out by hand in the
+POS or RMS — is never touched.
 
 **The database enforces the arithmetic.** `orders_total_adds_up` and `order_items_net_non_negative`
 are CHECK constraints, not application conventions — a bug in the checkout transaction fails the

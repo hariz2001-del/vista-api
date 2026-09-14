@@ -490,3 +490,28 @@ model LedgerEntry {
   @@index([correctionId])
   @@map("ledger_entries")
 }
+
+// ---------------------------------------------------------------------------
+// Account
+// ---------------------------------------------------------------------------
+
+/// The business profile and the partner split. Exactly one row (`id = 1`,
+/// enforced by a CHECK in the migration).
+///
+/// The percentages are read at the moment they are used — each expense
+/// snapshots its own split when it is logged — so changing them here never
+/// rewrites a past period.
+model AccountSettings {
+  id                    Int      @id @default(1)
+  businessName          String   @map("business_name")
+  outletName            String   @map("outlet_name")
+  /// Share of shared overheads borne by Food, 0–100. Drinks takes the rest.
+  sharedOverheadFoodPct Int      @map("shared_overhead_food_pct")
+  /// The host's cut of the Food net result, 0–100.
+  hostCommissionPct     Int      @map("host_commission_pct")
+  /// Food's share of shared equipment, 0–100. Separate from the overhead split.
+  capitalAssetFoodPct   Int      @map("capital_asset_food_pct")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@map("account_settings")
+}

@@ -144,6 +144,9 @@ async function main(): Promise<void> {
   // Restrict-on-delete, so a reseed on a database with orders will refuse
   // rather than quietly destroying history.
   await prisma.ledgerEntry.deleteMany()
+  // Corrections point at orders, so they go first or the order delete refuses.
+  await prisma.correctionBrandDelta.deleteMany()
+  await prisma.saleCorrection.deleteMany()
   await prisma.orderItemModifier.deleteMany()
   await prisma.orderItem.deleteMany()
   await prisma.order.deleteMany()
@@ -164,9 +167,25 @@ async function main(): Promise<void> {
   await prisma.user.createMany({
     data: [
       { id: '10000000-0000-4000-8000-000000000001', email: 'demo@vistahub.my', name: 'Aina (Demo)', role: 'CASHIER', passwordHash, pinHash },
-      { id: '10000000-0000-4000-8000-000000000002', email: 'food@vistahub.my', name: 'Food Partner', role: 'OWNER_FOOD', passwordHash, pinHash },
-      { id: '10000000-0000-4000-8000-000000000003', email: 'drinks@vistahub.my', name: 'Drinks Partner', role: 'OWNER_DRINKS', passwordHash, pinHash },
+      // The same two partners the RMS demo shows: Hariz owns Food, Iman hosts
+      // the stall and owns Drinks.
+      { id: '10000000-0000-4000-8000-000000000002', email: 'food@vistahub.my', name: 'Hariz', role: 'OWNER_FOOD', passwordHash, pinHash },
+      { id: '10000000-0000-4000-8000-000000000003', email: 'drinks@vistahub.my', name: 'Iman', role: 'OWNER_DRINKS', passwordHash, pinHash },
     ],
+  })
+
+  // The business profile and split the POS and RMS demos use.
+  const settings = {
+    businessName: 'Vista Demo Enterprise',
+    outletName: 'Vista Counter · Section 7',
+    sharedOverheadFoodPct: 70,
+    hostCommissionPct: 30,
+    capitalAssetFoodPct: 50,
+  }
+  await prisma.accountSettings.upsert({
+    where: { id: 1 },
+    update: settings,
+    create: { id: 1, ...settings },
   })
 
   await prisma.brand.createMany({
@@ -230,6 +249,7 @@ async function main(): Promise<void> {
     products: await prisma.product.count(),
     modifierGroups: await prisma.modifierGroup.count(),
     modifierItems: await prisma.modifierItem.count(),
+    accountSettings: await prisma.accountSettings.count(),
   }
   console.log('Seeded:', counts)
 }
