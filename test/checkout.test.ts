@@ -336,7 +336,7 @@ describe('checkout — offline sync', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234', declared_bank_total_sen: 0 },
+      payload: { pin: '1234' },
     })
     const closed = await prisma.shift.findUniqueOrThrow({ where: { id: shiftId } })
     expect(closed.status).toBe('CLOSED')
@@ -360,7 +360,8 @@ describe('checkout — offline sync', () => {
     const reopened = await prisma.shift.findUniqueOrThrow({ where: { id: shiftId } })
     expect(reopened.reconciliationStatus).toBe('UNRECONCILED')
     expect(reopened.systemNetSalesSen).toBe(800)
-    expect(reopened.varianceSen).toBe(-800)
+    // Nothing was declared at close, so there is still no variance to recompute.
+    expect(reopened.varianceSen).toBeNull()
   })
 
   it('refuses an online sale into a closed shift', async () => {
@@ -370,7 +371,7 @@ describe('checkout — offline sync', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234', declared_bank_total_sen: 0 },
+      payload: { pin: '1234' },
     })
 
     const response = await checkout(

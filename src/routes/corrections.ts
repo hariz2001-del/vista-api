@@ -264,14 +264,9 @@ async function runCorrection(tx: Tx, body: CorrectionBody, userId: string) {
   // Shift close takes this same lock. Corrections and close therefore cannot
   // cross after the declared total has been compared but before status changes.
   const shifts = await tx.$queryRaw<
-    Array<{
-      id: string
-      status: string
-      system_net_sales_sen: number | null
-      declared_bank_total_sen: number | null
-    }>
+    Array<{ id: string; status: string; system_net_sales_sen: number | null }>
   >`
-    SELECT id, status, system_net_sales_sen, declared_bank_total_sen
+    SELECT id, status, system_net_sales_sen
       FROM shifts WHERE id = ${orderRef.shiftId} FOR UPDATE
   `
   const shift = shifts[0]
@@ -390,16 +385,15 @@ async function runCorrection(tx: Tx, body: CorrectionBody, userId: string) {
     })
   }
 
+  // A correction that arrives after close moves a total that was already
+  // recorded. Keep the stored figure true, and mark the shift so the owner can
+  // see its takings changed after the fact. There is no declared bank figure to
+  // recompute a variance against — shift close no longer takes one.
   if (shift.status !== 'OPEN') {
-    const systemNetSalesSen = (shift.system_net_sales_sen ?? 0) + deltaSen
     await tx.shift.update({
       where: { id: shift.id },
       data: {
-        systemNetSalesSen,
-        varianceSen:
-          shift.declared_bank_total_sen == null
-            ? null
-            : shift.declared_bank_total_sen - systemNetSalesSen,
+        systemNetSalesSen: (shift.system_net_sales_sen ?? 0) + deltaSen,
         reconciliationStatus: 'UNRECONCILED',
       },
     })

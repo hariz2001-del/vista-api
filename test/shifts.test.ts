@@ -29,7 +29,7 @@ afterAll(async () => {
 
 beforeEach(resetTransactional)
 
-type CloseRequest = { pin: string; declared_bank_total_sen: number; device_pending_count?: number }
+type CloseRequest = { pin: string; device_pending_count?: number }
 
 function close(shiftId: string, payload: CloseRequest) {
   return app.inject({
@@ -81,7 +81,7 @@ describe('shift open', () => {
 })
 
 describe('shift close', () => {
-  it('computes takings itself rather than trusting the declared figure', async () => {
+  it('computes takings itself from the ledger', async () => {
     const shiftId = await openShift(app, token)
     const product = await productByName('Ayam Goreng Berempah') // 800 sen
 
@@ -100,18 +100,17 @@ describe('shift close', () => {
       })
     }
 
-    const response = await close(shiftId, { pin: '1234', declared_bank_total_sen: 2400 })
+    const response = await close(shiftId, { pin: '1234' })
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({
       order_count: 3,
       system_net_sales_sen: 2400,
-      variance_sen: 0,
       reconciliation_status: 'NOT_REQUIRED',
     })
   })
 
-  it('leaves a shift unreconciled when the bank total does not match', async () => {
+  it('records no bank figure and no variance at close', async () => {
     const shiftId = await openShift(app, token)
     const product = await productByName('Ayam Goreng Berempah')
 
@@ -128,24 +127,31 @@ describe('shift close', () => {
       }),
     })
 
-    const response = await close(shiftId, { pin: '1234', declared_bank_total_sen: 750 })
+    // An older client may still send a declared figure. It is accepted and ignored.
+    const response = await close(shiftId, {
+      pin: '1234',
+      declared_bank_total_sen: 750,
+    } as CloseRequest)
 
+    expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({
       system_net_sales_sen: 800,
-      declared_bank_total_sen: 750,
-      variance_sen: -50,
-      reconciliation_status: 'UNRECONCILED',
+      reconciliation_status: 'NOT_REQUIRED',
     })
 
-    // The gap is never absorbed into the ledger here — the owner declares what
-    // it was from the RMS, and that action writes the entry.
+    const stored = await prisma.shift.findUniqueOrThrow({ where: { id: shiftId } })
+    expect(stored.declaredBankTotalSen).toBeNull()
+    expect(stored.varianceSen).toBeNull()
+
+    // Nothing is absorbed into the ledger at close. A gap the owner finds later
+    // is closed by Adjust Balance in the RMS, which writes its own entry.
     const adjustments = await prisma.ledgerEntry.count({
       where: { category: 'RECONCILIATION_ADJUSTMENT' },
     })
     expect(adjustments).toBe(0)
   })
 
-  it('compares against net sales, so discounts do not look like a shortfall', async () => {
+  it('records takings net of discounts', async () => {
     const shiftId = await openShift(app, token)
     const product = await productByName('Ayam Goreng Berempah') // 800
 
@@ -163,16 +169,16 @@ describe('shift close', () => {
       }),
     })
 
-    // The bank received the discounted amount, and so should the comparison.
-    const response = await close(shiftId, { pin: '1234', declared_bank_total_sen: 600 })
-    expect(response.json()).toMatchObject({ system_net_sales_sen: 600, variance_sen: 0 })
+    // The bank received the discounted amount, so that is the figure recorded.
+    const response = await close(shiftId, { pin: '1234' })
+    expect(response.json()).toMatchObject({ system_net_sales_sen: 600 })
   })
 
   it('refuses a second close', async () => {
     const shiftId = await openShift(app, token)
-    await close(shiftId, { pin: '1234', declared_bank_total_sen: 0 })
+    await close(shiftId, { pin: '1234' })
 
-    const response = await close(shiftId, { pin: '1234', declared_bank_total_sen: 0 })
+    const response = await close(shiftId, { pin: '1234' })
     expect(response.statusCode).toBe(409)
     expect(response.json()).toMatchObject({ error: 'shift:ALREADY_CLOSED' })
   })
@@ -182,7 +188,6 @@ describe('shift close', () => {
 
     const response = await close(shiftId, {
       pin: '1234',
-      declared_bank_total_sen: 0,
       device_pending_count: 2,
     })
 
@@ -195,7 +200,7 @@ describe('shift close', () => {
 
   it('refuses a wrong PIN', async () => {
     const shiftId = await openShift(app, token)
-    const response = await close(shiftId, { pin: '0000', declared_bank_total_sen: 0 })
+    const response = await close(shiftId, { pin: '0000' })
     expect(response.statusCode).toBe(401)
   })
 })

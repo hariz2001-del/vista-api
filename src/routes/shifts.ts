@@ -7,9 +7,17 @@ import { badRequest, conflict, notFound, unauthorized } from '../errors.ts'
 
 const openBody = z.object({ pin: z.string().min(4).max(8) })
 
+/**
+ * Closing takes the PIN and nothing else. The cashier is not asked what the bank
+ * received: they cannot see the account, and a figure typed in at 2am is a guess.
+ * The server records its own total; checking it against the bank is the owner's
+ * job in the RMS, through Adjust Balance, when they choose to.
+ *
+ * An older client that still sends `declared_bank_total_sen` is not refused —
+ * unknown keys are stripped — but the figure is ignored.
+ */
 const closeBody = z.object({
   pin: z.string().min(4).max(8),
-  declared_bank_total_sen: z.number().int().min(0),
   /**
    * How many financial records the device is still holding. The server cannot
    * see a sale or correction that has not reached it, so this is the only signal — a safety
@@ -69,10 +77,9 @@ export async function shiftRoutes(app: FastifyInstance): Promise<void> {
         if (!shift) throw notFound('shift:NOT_FOUND')
         if (shift.status !== 'OPEN') throw conflict('shift:ALREADY_CLOSED')
 
-        // Computed here, never taken from the client. Net of discounts, so it
-        // compares like-for-like against what the bank actually received —
-        // comparing a pre-discount figure would show a phantom variance equal
-        // to the day's discounts on every single shift.
+        // Computed here, never taken from the client: revenue less refunds for
+        // this shift, net of discounts. This is the figure the owner later checks
+        // against the bank statement.
         const [totals, ledgerTotals] = await Promise.all([
           tx.order.aggregate({
             where: { shiftId: shift.id },
@@ -92,20 +99,19 @@ export async function shiftRoutes(app: FastifyInstance): Promise<void> {
             sum + (row.direction === 'MONEY_IN' ? 1 : -1) * (row._sum.amountSen ?? 0),
           0,
         )
-        const varianceSen = body.declared_bank_total_sen - systemNetSalesSen
-
         const updated = await tx.shift.update({
           where: { id: shift.id },
           data: {
             status: 'CLOSED',
             closedAt: new Date(),
             closedById: request.user.id,
-            declaredBankTotalSen: body.declared_bank_total_sen,
+            // Nothing was declared, so there is nothing to compare and no
+            // variance to record. A gap the owner finds later is closed with a
+            // RECONCILIATION_ADJUSTMENT entry from the RMS.
+            declaredBankTotalSen: null,
             systemNetSalesSen,
-            varianceSen,
-            // A gap is never silently absorbed. It stays visible until the
-            // owner says what it was, and that action writes the ledger entry.
-            reconciliationStatus: varianceSen === 0 ? 'NOT_REQUIRED' : 'UNRECONCILED',
+            varianceSen: null,
+            reconciliationStatus: 'NOT_REQUIRED',
           },
         })
 
@@ -114,8 +120,6 @@ export async function shiftRoutes(app: FastifyInstance): Promise<void> {
           business_date: updated.businessDate.toISOString().slice(0, 10),
           order_count: totals._count,
           system_net_sales_sen: systemNetSalesSen,
-          declared_bank_total_sen: body.declared_bank_total_sen,
-          variance_sen: varianceSen,
           reconciliation_status: updated.reconciliationStatus,
         }
       })

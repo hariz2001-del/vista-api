@@ -125,14 +125,9 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
   // Ids are text columns, not Postgres uuid — no cast, or the comparison
   // becomes uuid = text and Postgres refuses it.
   const shifts = await tx.$queryRaw<
-    Array<{
-      id: string
-      status: string
-      system_net_sales_sen: number | null
-      declared_bank_total_sen: number | null
-    }>
+    Array<{ id: string; status: string; system_net_sales_sen: number | null }>
   >`
-    SELECT id, status, system_net_sales_sen, declared_bank_total_sen
+    SELECT id, status, system_net_sales_sen
       FROM shifts WHERE id = ${body.shift_id} FOR UPDATE
   `
   const shift = shifts[0]
@@ -338,16 +333,13 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
     })
   }
 
+  // Keep the closed shift's stored takings true, and mark it changed-after-close.
+  // No bank figure was declared at close, so there is no variance to recompute.
   if (lateSync) {
-    const systemNetSalesSen = (shift.system_net_sales_sen ?? 0) + order.totalAmountSen
     await tx.shift.update({
       where: { id: shift.id },
       data: {
-        systemNetSalesSen,
-        varianceSen:
-          shift.declared_bank_total_sen == null
-            ? null
-            : shift.declared_bank_total_sen - systemNetSalesSen,
+        systemNetSalesSen: (shift.system_net_sales_sen ?? 0) + order.totalAmountSen,
         reconciliationStatus: 'UNRECONCILED',
       },
     })

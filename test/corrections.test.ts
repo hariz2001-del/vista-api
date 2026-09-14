@@ -241,24 +241,23 @@ describe('paid-sale corrections', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234', declared_bank_total_sen: 800 },
+      payload: { pin: '1234' },
     })
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({
       system_net_sales_sen: 800,
-      variance_sen: 0,
       reconciliation_status: 'NOT_REQUIRED',
     })
   })
 
-  it('accepts a queued correction after close and reopens the stored reconciliation', async () => {
+  it('accepts a queued correction after close and keeps the stored takings true', async () => {
     const original = await makeSale('Ayam Goreng Berempah', 800)
     const close = await app.inject({
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234', declared_bank_total_sen: 800 },
+      payload: { pin: '1234' },
     })
     expect(close.statusCode).toBe(200)
 
@@ -282,7 +281,8 @@ describe('paid-sale corrections', () => {
     expect(reopened).toMatchObject({
       status: 'CLOSED',
       systemNetSalesSen: 500,
-      varianceSen: 300,
+      // No bank figure was ever declared, so there is still nothing to compare.
+      varianceSen: null,
       reconciliationStatus: 'UNRECONCILED',
     })
   })
@@ -293,7 +293,7 @@ describe('paid-sale corrections', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234', declared_bank_total_sen: 800 },
+      payload: { pin: '1234' },
     })
 
     const response = await correct(
