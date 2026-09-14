@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
+import { attemptLimitConfig, type AttemptOptions } from '../attempts.ts'
 import { requireUser, verifySecret } from '../auth.ts'
 import { prisma, type Tx } from '../db.ts'
 import { businessDateToUtc, getBusinessDate } from '../domain/business-date.ts'
@@ -57,8 +58,12 @@ async function assertPin(userId: string, pin: string): Promise<void> {
   if (!(await verifySecret(pin, user.pinHash))) throw unauthorized('auth:INVALID_PIN')
 }
 
-export async function shiftRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/shifts/open', { preHandler: requireUser }, async (request) => {
+export async function shiftRoutes(app: FastifyInstance, options: AttemptOptions): Promise<void> {
+  // The PIN guards shift open and close. A 4-digit PIN has 10,000 values, so
+  // each route allows at most 10 attempts per 15 minutes per client.
+  const pinAttempts = attemptLimitConfig(options)
+
+  app.post('/shifts/open', { preHandler: requireUser, config: pinAttempts }, async (request) => {
     const { pin } = openBody.parse(request.body)
     await assertPin(request.user.id, pin)
 
@@ -83,7 +88,7 @@ export async function shiftRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{ Params: { id: string } }>(
     '/shifts/:id/close',
-    { preHandler: requireUser },
+    { preHandler: requireUser, config: pinAttempts },
     async (request) => {
       const body = closeBody.parse(request.body)
       await assertPin(request.user.id, body.pin)

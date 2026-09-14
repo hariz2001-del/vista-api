@@ -24,6 +24,7 @@ export const MESSAGES: Record<string, string> = {
   'auth:INVALID_PIN': 'Wrong PIN. Try again.',
   'auth:NO_PIN_SET': 'This account has no counter PIN set.',
   'auth:UNAUTHORIZED': 'Please sign in again.',
+  'auth:TOO_MANY_ATTEMPTS': 'Too many attempts. Wait 15 minutes and try again.',
 
   'shift:ALREADY_OPEN': 'A shift is already open. Close it before opening another.',
   'shift:NOT_FOUND': 'That shift no longer exists.',

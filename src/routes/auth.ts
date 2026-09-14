@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
+import { attemptLimitConfig, type AttemptOptions } from '../attempts.ts'
 import { OWNER_SESSION_TTL, verifySecret } from '../auth.ts'
 import { prisma } from '../db.ts'
 import { unauthorized } from '../errors.ts'
@@ -14,8 +15,10 @@ const loginBody = z.object({
   scope: z.enum(['COUNTER', 'OWNER']).default('COUNTER'),
 })
 
-export async function authRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/auth/login', async (request) => {
+export async function authRoutes(app: FastifyInstance, options: AttemptOptions): Promise<void> {
+  // At most 10 sign-in attempts per 15 minutes per client. The business has one
+  // account, so this password is the whole business.
+  app.post('/auth/login', { config: attemptLimitConfig(options) }, async (request) => {
     const { email, password, scope } = loginBody.parse(request.body)
 
     const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } })

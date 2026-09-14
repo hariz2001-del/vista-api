@@ -23,7 +23,9 @@ export async function resetTransactional(): Promise<void> {
 }
 
 export async function makeApp(): Promise<FastifyInstance> {
-  const app = await buildApp()
+  // The suites log in and open shifts far more than 10 times; the real limit is
+  // exercised on its own in attempts.test.ts.
+  const app = await buildApp({ attemptLimit: 1_000 })
   await app.ready()
   return app
 }

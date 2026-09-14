@@ -49,4 +49,20 @@ describe('cors preflight', () => {
       .map((name) => name.trim())
     expect(allowed).toContain(method)
   })
+
+  it('gives a page on any other site nothing to work with', async () => {
+    const response = await app.inject({
+      method: 'OPTIONS',
+      url: '/rms/snapshot',
+      headers: {
+        origin: 'https://not-vista.example',
+        'access-control-request-method': 'GET',
+        'access-control-request-headers': 'authorization',
+      },
+    })
+
+    const allowedOrigin = response.headers['access-control-allow-origin']
+    expect(allowedOrigin).not.toBe('https://not-vista.example')
+    expect(allowedOrigin).not.toBe('*')
+  })
 })

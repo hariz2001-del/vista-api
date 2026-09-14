@@ -32,7 +32,7 @@ type Vector = {
   }
 }
 
-const vectorsPath = fileURLToPath(new URL('../../money-vectors.json', import.meta.url))
+const vectorsPath = fileURLToPath(new URL('./fixtures/money-vectors.json', import.meta.url))
 const vectors = JSON.parse(readFileSync(vectorsPath, 'utf8')) as { cases: Vector[] }
 
 function toInput(line: VectorLine): PricedLineInput {
