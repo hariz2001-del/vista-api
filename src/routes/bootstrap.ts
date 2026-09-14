@@ -11,8 +11,8 @@ import { getBusinessDate } from '../domain/business-date.ts'
  * able to grey out an item it could not otherwise know about.
  */
 export async function bootstrapRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/bootstrap', { preHandler: requireUser }, async () => {
-    const [brands, categories, products, openShift] = await Promise.all([
+  app.get('/bootstrap', { preHandler: requireUser }, async (request) => {
+    const [brands, categories, products, openShift, settings, user] = await Promise.all([
       prisma.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
       prisma.category.findMany({ orderBy: [{ brandId: 'asc' }, { sortOrder: 'asc' }] }),
       prisma.product.findMany({
@@ -26,10 +26,18 @@ export async function bootstrapRoutes(app: FastifyInstance): Promise<void> {
         },
       }),
       prisma.shift.findFirst({ where: { status: 'OPEN' } }),
+      prisma.accountSettings.findUnique({ where: { id: 1 } }),
+      prisma.user.findUnique({ where: { id: request.user.id } }),
     ])
 
     return {
       business_date: getBusinessDate(new Date()),
+      // Who is signed in, so the counter can show their name without asking again.
+      user: user ? { id: user.id, name: user.name, role: user.role } : null,
+      // The business profile, so the sign-in and shift screens name the real outlet.
+      account: settings
+        ? { business_name: settings.businessName, outlet_name: settings.outletName }
+        : null,
       open_shift: openShift
         ? {
             id: openShift.id,
