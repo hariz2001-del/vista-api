@@ -1,3 +1,6 @@
+# Local Postgres. The password comes from .env, which Compose loads from this
+# directory automatically, so a plain `docker compose up -d` picks it up.
+
 services:
   db:
     image: postgres:16-alpine
@@ -5,7 +8,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: vista
-      POSTGRES_PASSWORD: vista_local_dev
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: vista
       # Deterministic collation, so ORDER BY does not depend on the host locale.
       POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
