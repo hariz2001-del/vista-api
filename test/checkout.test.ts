@@ -244,7 +244,7 @@ describe('checkout — queue numbers', () => {
 })
 
 describe('checkout — offline sync', () => {
-  it('accepts a stale offline price and flags it instead of dropping the sale', async () => {
+  it('records what the customer paid, not what the menu says now', async () => {
     const product = await productByName('Ayam Goreng Berempah') // now 800
 
     const response = await checkout(
@@ -255,18 +255,78 @@ describe('checkout — offline sync', () => {
         claimedTotalSen: 750, // what the cached menu said last night
         origin: 'OFFLINE_SYNC',
         offlineLabel: '#OFF-01',
-        items: [{ product_id: product.id, quantity: 1 }],
+        items: [{ product_id: product.id, quantity: 1, charged_unit_price_sen: 750 }],
       }),
     )
 
     expect(response.statusCode).toBe(200)
     const body = response.json()
-    expect(body.needs_review).toBe(true)
-    expect(body.review_reason).toContain('750')
-    // The server's own figure stands.
-    expect(body.total_amount_sen).toBe(800)
+    // The money that actually moved is what gets booked. Recording 800 here
+    // would invent 50 sen of revenue the bank never received.
+    expect(body.total_amount_sen).toBe(750)
+    // The server's own figure is kept beside it, so the drift is reportable.
+    expect(body.menu_price_sen).toBe(800)
+    // Nothing waits on the owner: a completed sale is not a decision.
+    expect(body.needs_review).toBe(false)
     // And the number the kitchen was actually told survives.
     expect(body.offline_label).toBe('#OFF-01')
+  })
+
+  it('books the stored lines so they add up to the price charged', async () => {
+    const product = await productByName('Ayam Goreng Berempah') // now 800
+    const clientTxnId = randomUUID()
+
+    await checkout(
+      checkoutPayload({
+        shiftId,
+        businessDate,
+        clientTxnId,
+        claimedTotalSen: 1500,
+        origin: 'OFFLINE_SYNC',
+        items: [{ product_id: product.id, quantity: 2, charged_unit_price_sen: 750 }],
+      }),
+    )
+
+    const order = await prisma.order.findUniqueOrThrow({
+      where: { clientTxnId },
+      include: { items: true },
+    })
+
+    expect(order.totalAmountSen).toBe(1500)
+    expect(order.items[0]?.unitPriceSen).toBe(750)
+    // The header has to be derivable from the lines, which is what
+    // `orders_total_adds_up` enforces in the database.
+    const grossSen = order.items.reduce(
+      (sum, item) => sum + (item.unitPriceSen + item.modifierTotalSen) * item.quantity,
+      0,
+    )
+    expect(grossSen - order.lineDiscountSen - order.orderDiscountSen).toBe(order.totalAmountSen)
+
+    // The ledger follows the money that moved, not the menu.
+    const revenue = await prisma.ledgerEntry.findMany({
+      where: { orderId: order.id, category: 'REVENUE' },
+    })
+    expect(revenue.reduce((sum, entry) => sum + entry.amountSen, 0)).toBe(1500)
+  })
+
+  it('refuses an offline sale whose own prices do not add up to what it claims', async () => {
+    const product = await productByName('Ayam Goreng Berempah')
+
+    const response = await checkout(
+      checkoutPayload({
+        shiftId,
+        businessDate,
+        clientTxnId: randomUUID(),
+        claimedTotalSen: 100, // not what 750 x 1 comes to
+        origin: 'OFFLINE_SYNC',
+        items: [{ product_id: product.id, quantity: 1, charged_unit_price_sen: 750 }],
+      }),
+    )
+
+    // Trusting the device on its own prices is not the same as trusting it on
+    // arithmetic. Without a coherent snapshot there is nothing safe to record.
+    expect(response.statusCode).toBe(400)
+    expect(response.json().error).toBe('checkout:OFFLINE_TOTAL_MISMATCH')
   })
 
   it('accepts a sale that syncs after its shift closed, and reopens reconciliation', async () => {
@@ -276,7 +336,7 @@ describe('checkout — offline sync', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234', declared_bank_total_sen: 0 },
+      payload: { pin: '1234' },
     })
     const closed = await prisma.shift.findUniqueOrThrow({ where: { id: shiftId } })
     expect(closed.status).toBe('CLOSED')
@@ -295,11 +355,13 @@ describe('checkout — offline sync', () => {
     )
 
     expect(response.statusCode).toBe(200)
-    expect(response.json().needs_review).toBe(true)
     expect(response.json().review_reason).toContain('closed')
 
     const reopened = await prisma.shift.findUniqueOrThrow({ where: { id: shiftId } })
     expect(reopened.reconciliationStatus).toBe('UNRECONCILED')
+    expect(reopened.systemNetSalesSen).toBe(800)
+    // Nothing was declared at close, so there is still no variance to recompute.
+    expect(reopened.varianceSen).toBeNull()
   })
 
   it('refuses an online sale into a closed shift', async () => {
@@ -309,7 +371,7 @@ describe('checkout — offline sync', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234', declared_bank_total_sen: 0 },
+      payload: { pin: '1234' },
     })
 
     const response = await checkout(

@@ -1,0 +1,27 @@
+# Production Postgres for Vista.
+#
+#   docker compose --env-file /opt/vista/api/.env -f deploy/docker-compose.prod.yml up -d
+#
+# Bound to loopback only: nothing off this machine can reach the database. The
+# password comes from the server's .env and nowhere else; data lives outside the
+# container so a rebuild never touches it.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: vista-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vista
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in /opt/vista/api/.env}
+      POSTGRES_DB: vista
+      # Deterministic collation, so ORDER BY does not depend on the host locale.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - /opt/vista/db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vista -d vista"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

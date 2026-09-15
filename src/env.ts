@@ -16,6 +16,20 @@ const schema = z.object({
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
   PORT: z.coerce.number().int().positive().default(3000),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  /**
+   * The only sites whose pages may call this API from a browser, comma
+   * separated. Defaults to the local dev servers; production sets the counter
+   * and dashboard domains.
+   */
+  CORS_ORIGINS: z
+    .string()
+    .default('http://localhost:5173,http://localhost:5174,http://localhost:5180,http://localhost:5182')
+    .transform((value) =>
+      value
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    ),
 })
 
 const parsed = schema.safeParse(process.env)

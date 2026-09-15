@@ -1,0 +1,188 @@
+{
+  "$comment": [
+    "Shared money test vectors for Vista.",
+    "",
+    "Because the POS sells offline, the cart arithmetic exists twice: once in",
+    "TypeScript on the tablet (pos-vista/src/domain/cart.ts) and once on the",
+    "server (api-vista/src/domain/cart.ts). If they ever disagree, the cashier",
+    "sees one total while the ledger records another, and nobody finds out until",
+    "month-end reconciliation.",
+    "",
+    "Both test suites load this file. Drift fails a test in both projects.",
+    "",
+    "All amounts are integer sen. Every case must satisfy:",
+    "  grossSen - lineDiscountSen - orderDiscountSen == totalAmountSen",
+    "  sum(brands[].netSen) == totalAmountSen",
+    "  sum(brands[].cartDiscountSen) == orderDiscountSen",
+    "  every brands[].netSen >= 0"
+  ],
+  "cases": [
+    {
+      "name": "single line, no discount",
+      "orderDiscountSen": 0,
+      "lines": [
+        { "brandId": "food", "unitPriceSen": 1200, "modifierTotalSen": 200, "quantity": 1, "lineDiscountSen": 0 }
+      ],
+      "expect": {
+        "grossSen": 1400,
+        "lineDiscountSen": 0,
+        "orderDiscountSen": 0,
+        "totalAmountSen": 1400,
+        "brands": [
+          { "brandId": "food", "grossSen": 1400, "lineDiscountSen": 0, "cartDiscountSen": 0, "netSen": 1400 }
+        ]
+      }
+    },
+    {
+      "name": "quantity multiplies base and modifiers together",
+      "orderDiscountSen": 0,
+      "lines": [
+        { "brandId": "food", "unitPriceSen": 1200, "modifierTotalSen": 200, "quantity": 2, "lineDiscountSen": 0 }
+      ],
+      "expect": {
+        "grossSen": 2800,
+        "lineDiscountSen": 0,
+        "orderDiscountSen": 0,
+        "totalAmountSen": 2800,
+        "brands": [
+          { "brandId": "food", "grossSen": 2800, "lineDiscountSen": 0, "cartDiscountSen": 0, "netSen": 2800 }
+        ]
+      }
+    },
+    {
+      "name": "a line discount belongs to its own line's brand",
+      "orderDiscountSen": 0,
+      "lines": [
+        { "brandId": "food", "unitPriceSen": 1200, "modifierTotalSen": 200, "quantity": 2, "lineDiscountSen": 300 },
+        { "brandId": "drinks", "unitPriceSen": 550, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 0 }
+      ],
+      "expect": {
+        "grossSen": 3350,
+        "lineDiscountSen": 300,
+        "orderDiscountSen": 0,
+        "totalAmountSen": 3050,
+        "brands": [
+          { "brandId": "food", "grossSen": 2800, "lineDiscountSen": 300, "cartDiscountSen": 0, "netSen": 2500 },
+          { "brandId": "drinks", "grossSen": 550, "lineDiscountSen": 0, "cartDiscountSen": 0, "netSen": 550 }
+        ]
+      }
+    },
+    {
+      "name": "order discount splits across brands by remaining value",
+      "orderDiscountSen": 150,
+      "lines": [
+        { "brandId": "food", "unitPriceSen": 1200, "modifierTotalSen": 200, "quantity": 1, "lineDiscountSen": 200 },
+        { "brandId": "drinks", "unitPriceSen": 800, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 0 }
+      ],
+      "expect": {
+        "grossSen": 2200,
+        "lineDiscountSen": 200,
+        "orderDiscountSen": 150,
+        "totalAmountSen": 1850,
+        "brands": [
+          { "brandId": "food", "grossSen": 1400, "lineDiscountSen": 200, "cartDiscountSen": 90, "netSen": 1110 },
+          { "brandId": "drinks", "grossSen": 800, "lineDiscountSen": 0, "cartDiscountSen": 60, "netSen": 740 }
+        ]
+      }
+    },
+    {
+      "name": "one sen across an uneven split loses nothing",
+      "orderDiscountSen": 1,
+      "lines": [
+        { "brandId": "food", "unitPriceSen": 333, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 0 },
+        { "brandId": "drinks", "unitPriceSen": 667, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 0 }
+      ],
+      "expect": {
+        "grossSen": 1000,
+        "lineDiscountSen": 0,
+        "orderDiscountSen": 1,
+        "totalAmountSen": 999,
+        "brands": [
+          { "brandId": "food", "grossSen": 333, "lineDiscountSen": 0, "cartDiscountSen": 0, "netSen": 333 },
+          { "brandId": "drinks", "grossSen": 667, "lineDiscountSen": 0, "cartDiscountSen": 1, "netSen": 666 }
+        ]
+      }
+    },
+    {
+      "name": "a brand given away on the line absorbs none of the order discount",
+      "orderDiscountSen": 500,
+      "lines": [
+        { "brandId": "food", "unitPriceSen": 1000, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 1000 },
+        { "brandId": "drinks", "unitPriceSen": 1000, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 0 }
+      ],
+      "expect": {
+        "grossSen": 2000,
+        "lineDiscountSen": 1000,
+        "orderDiscountSen": 500,
+        "totalAmountSen": 500,
+        "brands": [
+          { "brandId": "food", "grossSen": 1000, "lineDiscountSen": 1000, "cartDiscountSen": 0, "netSen": 0 },
+          { "brandId": "drinks", "grossSen": 1000, "lineDiscountSen": 0, "cartDiscountSen": 500, "netSen": 500 }
+        ]
+      }
+    },
+    {
+      "name": "order discount is capped at what remains after line discounts",
+      "orderDiscountSen": 9999,
+      "lines": [
+        { "brandId": "food", "unitPriceSen": 1000, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 400 }
+      ],
+      "expect": {
+        "grossSen": 1000,
+        "lineDiscountSen": 400,
+        "orderDiscountSen": 600,
+        "totalAmountSen": 0,
+        "brands": [
+          { "brandId": "food", "grossSen": 1000, "lineDiscountSen": 400, "cartDiscountSen": 600, "netSen": 0 }
+        ]
+      }
+    },
+    {
+      "name": "a line discount larger than the line is capped at the line",
+      "orderDiscountSen": 0,
+      "lines": [
+        { "brandId": "food", "unitPriceSen": 1200, "modifierTotalSen": 200, "quantity": 1, "lineDiscountSen": 99999 }
+      ],
+      "expect": {
+        "grossSen": 1400,
+        "lineDiscountSen": 1400,
+        "orderDiscountSen": 0,
+        "totalAmountSen": 0,
+        "brands": [
+          { "brandId": "food", "grossSen": 1400, "lineDiscountSen": 1400, "cartDiscountSen": 0, "netSen": 0 }
+        ]
+      }
+    },
+    {
+      "name": "several lines of one brand share that brand's slice",
+      "orderDiscountSen": 100,
+      "lines": [
+        { "brandId": "food", "unitPriceSen": 300, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 0 },
+        { "brandId": "food", "unitPriceSen": 700, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 0 },
+        { "brandId": "drinks", "unitPriceSen": 1000, "modifierTotalSen": 0, "quantity": 1, "lineDiscountSen": 0 }
+      ],
+      "expect": {
+        "grossSen": 2000,
+        "lineDiscountSen": 0,
+        "orderDiscountSen": 100,
+        "totalAmountSen": 1900,
+        "brands": [
+          { "brandId": "food", "grossSen": 1000, "lineDiscountSen": 0, "cartDiscountSen": 50, "netSen": 950 },
+          { "brandId": "drinks", "grossSen": 1000, "lineDiscountSen": 0, "cartDiscountSen": 50, "netSen": 950 }
+        ]
+      }
+    },
+    {
+      "name": "empty order",
+      "orderDiscountSen": 500,
+      "lines": [],
+      "expect": {
+        "grossSen": 0,
+        "lineDiscountSen": 0,
+        "orderDiscountSen": 0,
+        "totalAmountSen": 0,
+        "brands": []
+      }
+    }
+  ]
+}

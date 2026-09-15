@@ -9,7 +9,12 @@ export const DEMO = { email: 'demo@vistahub.my', password: 'vista', pin: '1234' 
  * is seeded once by `npm run seed`, and tests assert against its real prices.
  */
 export async function resetTransactional(): Promise<void> {
+  await prisma.expense.deleteMany()
+  await prisma.periodClosure.deleteMany()
+  await prisma.terminalStatus.deleteMany()
   await prisma.ledgerEntry.deleteMany()
+  await prisma.correctionBrandDelta.deleteMany()
+  await prisma.saleCorrection.deleteMany()
   await prisma.orderItemModifier.deleteMany()
   await prisma.orderItem.deleteMany()
   await prisma.order.deleteMany()
@@ -18,16 +23,33 @@ export async function resetTransactional(): Promise<void> {
 }
 
 export async function makeApp(): Promise<FastifyInstance> {
-  const app = await buildApp()
+  // The suites log in and open shifts far more than 10 times; the real limit is
+  // exercised on its own in attempts.test.ts.
+  const app = await buildApp({ attemptLimit: 1_000 })
   await app.ready()
   return app
 }
 
+/** A counter session, as the POS signs in. Sales, corrections and shifts only. */
 export async function login(app: FastifyInstance): Promise<string> {
+  return loginAs(app, DEMO.email, DEMO.password, 'COUNTER')
+}
+
+/** The same single account, signed in the way the RMS does: an owner session. */
+export async function loginOwner(app: FastifyInstance): Promise<string> {
+  return loginAs(app, DEMO.email, DEMO.password, 'OWNER')
+}
+
+export async function loginAs(
+  app: FastifyInstance,
+  email: string,
+  password: string,
+  scope: 'COUNTER' | 'OWNER' = 'COUNTER',
+): Promise<string> {
   const response = await app.inject({
     method: 'POST',
     url: '/auth/login',
-    payload: { email: DEMO.email, password: DEMO.password },
+    payload: { email, password, scope },
   })
   if (response.statusCode !== 200) {
     throw new Error(`login failed (${response.statusCode}): ${response.body}`)
@@ -75,6 +97,9 @@ export type CheckoutLine = {
   quantity: number
   discount_sen?: number
   modifiers?: Array<{ modifier_id: string }>
+  /** What the device charged, for an offline sale priced against a stale menu. */
+  charged_unit_price_sen?: number
+  charged_modifier_total_sen?: number
 }
 
 export function checkoutPayload(input: {
@@ -100,6 +125,38 @@ export function checkoutPayload(input: {
       quantity: item.quantity,
       discount_sen: item.discount_sen ?? 0,
       modifiers: item.modifiers ?? [],
+      charged_unit_price_sen: item.charged_unit_price_sen,
+      charged_modifier_total_sen: item.charged_modifier_total_sen,
     })),
+  }
+}
+
+export function correctionPayload(input: {
+  clientTxnId: string
+  originalClientTxnId: string
+  kind: 'CANCEL' | 'EXCHANGE'
+  reason?: string
+  claimedDeltaSen: number
+  origin?: 'ONLINE' | 'OFFLINE_SYNC'
+  replacementCartDiscountSen?: number | null
+  replacementItems?: CheckoutLine[] | null
+}) {
+  return {
+    client_txn_id: input.clientTxnId,
+    original_client_txn_id: input.originalClientTxnId,
+    kind: input.kind,
+    reason: input.reason ?? 'Cashier corrected the paid ticket',
+    origin: input.origin ?? 'ONLINE',
+    claimed_delta_sen: input.claimedDeltaSen,
+    replacement_cart_discount_sen: input.replacementCartDiscountSen ?? null,
+    replacement_items:
+      input.replacementItems?.map((item) => ({
+        product_id: item.product_id,
+        quantity: item.quantity,
+        discount_sen: item.discount_sen ?? 0,
+        modifiers: item.modifiers ?? [],
+        charged_unit_price_sen: item.charged_unit_price_sen,
+        charged_modifier_total_sen: item.charged_modifier_total_sen,
+      })) ?? null,
   }
 }

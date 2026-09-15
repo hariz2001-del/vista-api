@@ -1,23 +1,56 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
+import { attemptLimitConfig, type AttemptOptions } from '../attempts.ts'
 import { requireUser, verifySecret } from '../auth.ts'
-import { prisma } from '../db.ts'
+import { prisma, type Tx } from '../db.ts'
 import { businessDateToUtc, getBusinessDate } from '../domain/business-date.ts'
 import { badRequest, conflict, notFound, unauthorized } from '../errors.ts'
 
 const openBody = z.object({ pin: z.string().min(4).max(8) })
 
+/**
+ * Closing takes the PIN and nothing else. The cashier is not asked what the bank
+ * received: they cannot see the account, and a figure typed in at 2am is a guess.
+ * The server records its own total; checking it against the bank is the owner's
+ * job in the RMS, through Adjust Balance, when they choose to.
+ *
+ * An older client that still sends `declared_bank_total_sen` is not refused —
+ * unknown keys are stripped — but the figure is ignored.
+ */
 const closeBody = z.object({
   pin: z.string().min(4).max(8),
-  declared_bank_total_sen: z.number().int().min(0),
   /**
-   * How many sales the device is still holding. The server cannot see a sale
-   * that has not reached it, so this is the only signal available — a safety
+   * How many financial records the device is still holding. The server cannot
+   * see a sale or correction that has not reached it, so this is the only signal — a safety
    * net against closing a shift with money still on the tablet, not a security
    * control.
    */
   device_pending_count: z.number().int().min(0).default(0),
 })
+
+/**
+ * A shift's takings: revenue less refunds on its ledger rows, net of discounts.
+ * Computed from the ledger rather than taken from anyone, and shared by the
+ * cashier's close and the owner's force-close so the two can never disagree.
+ */
+export async function shiftTakings(
+  tx: Tx,
+  shiftId: string,
+): Promise<{ orderCount: number; systemNetSalesSen: number }> {
+  const [orderCount, ledgerTotals] = await Promise.all([
+    tx.order.count({ where: { shiftId } }),
+    tx.ledgerEntry.groupBy({
+      by: ['direction'],
+      where: { shiftId, category: { in: ['REVENUE', 'REFUND'] } },
+      _sum: { amountSen: true },
+    }),
+  ])
+  const systemNetSalesSen = ledgerTotals.reduce(
+    (sum, row) => sum + (row.direction === 'MONEY_IN' ? 1 : -1) * (row._sum.amountSen ?? 0),
+    0,
+  )
+  return { orderCount, systemNetSalesSen }
+}
 
 async function assertPin(userId: string, pin: string): Promise<void> {
   const user = await prisma.user.findUnique({ where: { id: userId } })
@@ -25,8 +58,12 @@ async function assertPin(userId: string, pin: string): Promise<void> {
   if (!(await verifySecret(pin, user.pinHash))) throw unauthorized('auth:INVALID_PIN')
 }
 
-export async function shiftRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/shifts/open', { preHandler: requireUser }, async (request) => {
+export async function shiftRoutes(app: FastifyInstance, options: AttemptOptions): Promise<void> {
+  // The PIN guards shift open and close. A 4-digit PIN has 10,000 values, so
+  // each route allows at most 10 attempts per 15 minutes per client.
+  const pinAttempts = attemptLimitConfig(options)
+
+  app.post('/shifts/open', { preHandler: requireUser, config: pinAttempts }, async (request) => {
     const { pin } = openBody.parse(request.body)
     await assertPin(request.user.id, pin)
 
@@ -51,7 +88,7 @@ export async function shiftRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{ Params: { id: string } }>(
     '/shifts/:id/close',
-    { preHandler: requireUser },
+    { preHandler: requireUser, config: pinAttempts },
     async (request) => {
       const body = closeBody.parse(request.body)
       await assertPin(request.user.id, body.pin)
@@ -69,40 +106,30 @@ export async function shiftRoutes(app: FastifyInstance): Promise<void> {
         if (!shift) throw notFound('shift:NOT_FOUND')
         if (shift.status !== 'OPEN') throw conflict('shift:ALREADY_CLOSED')
 
-        // Computed here, never taken from the client. Net of discounts, so it
-        // compares like-for-like against what the bank actually received —
-        // comparing a pre-discount figure would show a phantom variance equal
-        // to the day's discounts on every single shift.
-        const totals = await tx.order.aggregate({
-          where: { shiftId: shift.id },
-          _sum: { totalAmountSen: true },
-          _count: true,
-        })
-        const systemNetSalesSen = totals._sum.totalAmountSen ?? 0
-        const varianceSen = body.declared_bank_total_sen - systemNetSalesSen
-
+        // Computed here, never taken from the client. This is the figure the
+        // owner later checks against the bank statement.
+        const { orderCount, systemNetSalesSen } = await shiftTakings(tx, shift.id)
         const updated = await tx.shift.update({
           where: { id: shift.id },
           data: {
             status: 'CLOSED',
             closedAt: new Date(),
             closedById: request.user.id,
-            declaredBankTotalSen: body.declared_bank_total_sen,
+            // Nothing was declared, so there is nothing to compare and no
+            // variance to record. A gap the owner finds later is closed with a
+            // RECONCILIATION_ADJUSTMENT entry from the RMS.
+            declaredBankTotalSen: null,
             systemNetSalesSen,
-            varianceSen,
-            // A gap is never silently absorbed. It stays visible until the
-            // owner says what it was, and that action writes the ledger entry.
-            reconciliationStatus: varianceSen === 0 ? 'NOT_REQUIRED' : 'UNRECONCILED',
+            varianceSen: null,
+            reconciliationStatus: 'NOT_REQUIRED',
           },
         })
 
         return {
           id: updated.id,
           business_date: updated.businessDate.toISOString().slice(0, 10),
-          order_count: totals._count,
+          order_count: orderCount,
           system_net_sales_sen: systemNetSalesSen,
-          declared_bank_total_sen: body.declared_bank_total_sen,
-          variance_sen: varianceSen,
           reconciliation_status: updated.reconciliationStatus,
         }
       })
