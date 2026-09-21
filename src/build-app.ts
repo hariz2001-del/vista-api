@@ -3,7 +3,7 @@ import jwt from '@fastify/jwt'
 import rateLimit from '@fastify/rate-limit'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { ZodError } from 'zod'
-import { ATTEMPT_LIMIT } from './attempts.ts'
+import { ATTEMPT_LIMIT, AttemptStore } from './attempts.ts'
 import { env } from './env.ts'
 import { DomainError, messageFor } from './errors.ts'
 import { authRoutes } from './routes/auth.ts'
@@ -28,7 +28,8 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
 
   const app = Fastify({
     logger: env.NODE_ENV === 'test' ? false : { level: 'info' },
-    // Behind Nginx, so the client address comes from the proxy header.
+    // Behind Vercel's edge, so the client address comes from X-Forwarded-For,
+    // which Vercel sets and overwrites — a client cannot supply its own.
     trustProxy: true,
   })
 
@@ -55,6 +56,8 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   // as everything else and the counter shows a plain-language message.
   await app.register(rateLimit, {
     global: false,
+    // Counted in Postgres: serverless copies share no memory (src/attempts.ts).
+    store: AttemptStore,
     errorResponseBuilder: () =>
       new DomainError('auth:TOO_MANY_ATTEMPTS', 429, messageFor('auth:TOO_MANY_ATTEMPTS')),
   })

@@ -6,8 +6,7 @@ import bcrypt from 'bcryptjs'
  *
  *   npx tsx scripts/set-credentials.ts <email> <password> <4-digit-pin>
  *
- * Run on a server straight after seeding, so the demo password written in the
- * README never works on a public machine. Every signed-in device is signed out,
+ * Changes them after the seed has run. Every signed-in device is signed out,
  * because its session was issued under the old password.
  */
 

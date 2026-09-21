@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { buildApp } from '../src/app.ts'
+import { buildApp } from '../src/build-app.ts'
 import { prisma } from '../src/db.ts'
 import { authed, DEMO } from './helpers.ts'
 
@@ -12,6 +12,9 @@ import { authed, DEMO } from './helpers.ts'
 let app: FastifyInstance
 
 beforeAll(async () => {
+  // Counts are kept in the database, so a run within the last 15 minutes would
+  // otherwise start these clients already blocked.
+  await prisma.attemptCounter.deleteMany()
   app = await buildApp()
   await app.ready()
 })
@@ -21,9 +24,12 @@ afterAll(async () => {
   await prisma.$disconnect()
 })
 
-/** Each test guesses from its own address, so one test's block cannot leak into another. */
+/**
+ * Each test guesses from its own address, so one test's block cannot leak into
+ * another. On Vercel this header is set by the platform, never by the client.
+ */
 function from(address: string) {
-  return { 'cf-connecting-ip': address }
+  return { 'x-forwarded-for': address }
 }
 
 function signIn(password: string, address: string) {

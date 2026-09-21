@@ -12,6 +12,9 @@
     "moduleDetection": "force",
     "erasableSyntaxOnly": true,
     "allowImportingTsExtensions": true,
+    /* Vercel compiles each file to .js; this turns `./x.ts` imports into `./x.js`
+       in that output, or the deployed function cannot find its own modules. */
+    "rewriteRelativeImportExtensions": true,
 
     /* This service handles money. Every one of these stays on. */
     "strict": true,

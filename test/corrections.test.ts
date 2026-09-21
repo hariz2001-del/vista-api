@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { prisma } from '../src/db.ts'
 import { getBusinessDate } from '../src/domain/business-date.ts'
 import {
+  DEMO,
   authed,
   checkoutPayload,
   correctionPayload,
@@ -241,7 +242,7 @@ describe('paid-sale corrections', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234' },
+      payload: { pin: DEMO.pin },
     })
 
     expect(response.statusCode).toBe(200)
@@ -257,7 +258,7 @@ describe('paid-sale corrections', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234' },
+      payload: { pin: DEMO.pin },
     })
     expect(close.statusCode).toBe(200)
 
@@ -293,7 +294,7 @@ describe('paid-sale corrections', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234' },
+      payload: { pin: DEMO.pin },
     })
 
     const response = await correct(

@@ -9,6 +9,14 @@ import bcrypt from 'bcryptjs'
  * Everything around them is English.
  */
 
+// The repository holds no credentials. The account's first password and
+// counter PIN come from SEED_PASSWORD and SEED_PIN in the environment.
+try {
+  process.loadEnvFile()
+} catch {
+  // No .env — CI and the server supply the variables directly.
+}
+
 const prisma = new PrismaClient()
 
 const BRAND_FOOD = 'a1000000-0000-4000-8000-000000000001'
@@ -166,9 +174,14 @@ async function main(): Promise<void> {
   await prisma.brand.deleteMany()
   await prisma.user.deleteMany()
 
+  const seedPassword = process.env.SEED_PASSWORD
+  const seedPin = process.env.SEED_PIN
+  if (!seedPassword) throw new Error('SEED_PASSWORD is not set — see .env.example.')
+  if (!seedPin || !/^\d{4}$/.test(seedPin)) throw new Error('SEED_PIN must be exactly 4 digits — see .env.example.')
+
   const [passwordHash, pinHash] = await Promise.all([
-    bcrypt.hash('vista', 10),
-    bcrypt.hash('1234', 10),
+    bcrypt.hash(seedPassword, 10),
+    bcrypt.hash(seedPin, 10),
   ])
 
   await prisma.user.createMany({

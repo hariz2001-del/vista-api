@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { prisma } from '../src/db.ts'
 import { getBusinessDate } from '../src/domain/business-date.ts'
 import {
+  DEMO,
   authed,
   checkoutPayload,
   login,
@@ -336,7 +337,7 @@ describe('checkout — offline sync', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234' },
+      payload: { pin: DEMO.pin },
     })
     const closed = await prisma.shift.findUniqueOrThrow({ where: { id: shiftId } })
     expect(closed.status).toBe('CLOSED')
@@ -371,7 +372,7 @@ describe('checkout — offline sync', () => {
       method: 'POST',
       url: `/shifts/${shiftId}/close`,
       headers: authed(token),
-      payload: { pin: '1234' },
+      payload: { pin: DEMO.pin },
     })
 
     const response = await checkout(

@@ -1,0 +1,55 @@
+# Nightly database backup: dump Supabase, copy the dump to Cloudflare R2.
+#
+# Supabase keeps its own daily backups on the Pro plan; this is the copy that
+# lives outside Supabase. The R2 token is write-only, so a leaked token can add
+# backups but never delete or overwrite them.
+#
+# Repository secrets (Settings → Secrets and variables → Actions):
+#   SUPABASE_DIRECT_URL   the session-pooler URL (DIRECT_URL on Vercel)
+#   R2_ENDPOINT           https://<account-id>.r2.cloudflarestorage.com
+#   R2_BUCKET             vista-backups
+#   R2_ACCESS_KEY_ID      the R2 token's access key  (Object Write, this bucket only)
+#   R2_SECRET_ACCESS_KEY  the R2 token's secret
+#
+# GitHub pauses scheduled workflows in a repository with no commits for 60 days.
+# If that happens, it emails you; re-enable it from the Actions tab.
+
+name: Nightly database backup
+
+on:
+  schedule:
+    - cron: '30 21 * * *' # 05:30 Malaysia time, just after the trading day rolls
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Install pg_dump 17
+        # Must be at least the server's major version. Supabase runs 15 or 17.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Dump and upload
+        env:
+          DIRECT_URL: ${{ secrets.SUPABASE_DIRECT_URL }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+        run: |
+          set -euo pipefail
+          FILE="vista-$(date -u +%Y-%m-%dT%H%M%SZ).sql.gz"
+          # Only Vista's schema — not Supabase's own auth/storage schemas.
+          /usr/lib/postgresql/17/bin/pg_dump "$DIRECT_URL" --schema=public --no-owner --no-privileges \
+            | gzip -9 > "$FILE"
+          aws s3 cp "$FILE" "s3://$R2_BUCKET/vista/$FILE" --endpoint-url "$R2_ENDPOINT" --only-show-errors
+          echo "backup ok: $FILE ($(du -h "$FILE" | cut -f1))"
