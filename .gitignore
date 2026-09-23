@@ -6,3 +6,5 @@ dist/
 *.log
 *.tsbuildinfo
 .vercel
+
+.env*

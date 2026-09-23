@@ -1,0 +1,9 @@
+# Never ship local secrets or the local Postgres data directory to Vercel.
+# Production values come from the project's Environment Variables.
+.env
+.env.*
+.pgdata/
+node_modules
+dist
+test
+docker-compose.yml
