@@ -1,5 +1,7 @@
 # api-vista
 
+Part of the Vista system: [vista-pos](https://github.com/hariz2001-del/vista-pos) (cashier) · [vista-rms](https://github.com/hariz2001-del/vista-rms) (owner dashboard) · **vista-api** (backend).
+
 Fastify + Postgres backend for Vista. This round covers the **money path** only:
 authentication, the catalogue bootstrap, shift open/close, checkout, and paid-sale corrections.
 
