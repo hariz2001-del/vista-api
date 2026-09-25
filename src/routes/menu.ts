@@ -36,6 +36,31 @@ const productCreate = z.object({
   imageUrl: z.string().trim().url().max(500).nullish(),
   /** Option groups of other items to copy onto the new one, e.g. the category's usual sizes. */
   copyGroupIds: z.array(ID).max(20).default([]),
+  /** Brand-new option groups, made up on the spot for this item. */
+  newGroups: z
+    .array(
+      z
+        .object({
+          name: NAME,
+          minSelect: z.number().int().min(0).max(20),
+          maxSelect: z.number().int().min(1).max(20),
+          options: z
+            .array(
+              z.object({
+                name: NAME,
+                priceSen: PRICE.default(0),
+                type: z.enum(['ADD_ON', 'REMOVAL']).optional(),
+              }),
+            )
+            .max(50)
+            .default([]),
+        })
+        .refine((group) => group.minSelect <= group.maxSelect, {
+          message: 'The minimum cannot be more than the maximum.',
+        }),
+    )
+    .max(20)
+    .default([]),
 })
 
 const groupCopy = z.object({ groupId: ID })
@@ -261,6 +286,29 @@ export async function menuRoutes(app: FastifyInstance): Promise<void> {
         .catch(translate)
       for (const groupId of new Set(body.copyGroupIds)) {
         await copyGroup(tx, businessId, groupId, product.id)
+      }
+      let position = await tx.modifierGroup.count({ where: { productId: product.id } })
+      for (const group of body.newGroups) {
+        position += 1
+        await tx.modifierGroup.create({
+          data: {
+            businessId,
+            productId: product.id,
+            name: group.name,
+            minSelect: group.minSelect,
+            maxSelect: group.maxSelect,
+            sortOrder: position,
+            items: {
+              create: group.options.map((option, index) => ({
+                name: option.name,
+                priceSen: option.priceSen,
+                // An extra charge is an add-on; a free choice ("No ice") is not.
+                type: option.type ?? (option.priceSen > 0 ? 'ADD_ON' : 'REMOVAL'),
+                sortOrder: index + 1,
+              })),
+            },
+          },
+        })
       }
       return { id: product.id }
     })

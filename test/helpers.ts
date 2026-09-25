@@ -29,6 +29,7 @@ export async function resetTransactional(): Promise<void> {
   await prisma.shift.deleteMany()
   await prisma.queueCounter.deleteMany()
   await prisma.handoffCode.deleteMany()
+  await prisma.promotion.deleteMany()
   // Guessing limits live in the database now, so they outlast a test run.
   await prisma.attemptCounter.deleteMany()
 

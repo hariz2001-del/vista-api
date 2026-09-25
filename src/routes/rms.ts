@@ -2,9 +2,10 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { requireOwner } from '../auth.ts'
 import type { Tx } from '../db.ts'
-import { businessDateToUtc, getBusinessDate } from '../domain/business-date.ts'
+import { businessDateToUtc, businessToday } from '../domain/business-date.ts'
 import { openingDeficitFor, settlePeriod, splitShared } from '../domain/settlement.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
+import { serialisePromotion } from './promotions.ts'
 import { shiftTakings } from './shifts.ts'
 
 /**
@@ -27,6 +28,7 @@ const DEFAULT_SETTINGS = {
   businessName: 'Vista',
   outletName: '',
   settlementEnabled: false,
+  dayRolloverHour: 5,
   sharedOverheadFoodPct: 70,
   hostCommissionPct: 30,
   capitalAssetFoodPct: 50,
@@ -97,12 +99,22 @@ const settingsBody = z.object({
   outletName: z.string().trim().min(1).max(80),
   /** Left out by an older dashboard, which then leaves the switch as it is. */
   settlementEnabled: z.boolean().optional(),
+  /** Hour of the morning a trading day ends, 0–12. Left out, it stays as it is. */
+  dayRolloverHour: z.number().int().min(0).max(12).optional(),
   sharedOverheadFoodPct: z.number().int().min(0).max(100),
   hostCommissionPct: z.number().int().min(0).max(100),
   capitalAssetFoodPct: z.number().int().min(0).max(100),
 })
 
-const partnerBody = z.object({ name: z.string().trim().min(1).max(60) })
+const partnerBody = z
+  .object({
+    name: z.string().trim().min(1).max(60).optional(),
+    /** The brand this partner should own. The other partner takes the brand this one had. */
+    brandId: ID.optional(),
+  })
+  .refine((body) => body.name !== undefined || body.brandId !== undefined, {
+    message: 'Nothing to change.',
+  })
 
 /** Only the window. Any figures a browser sends alongside are stripped and ignored. */
 const periodBody = z.object({ startDate: DATE, endDate: DATE })
@@ -134,6 +146,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       closures,
       terminal,
       counterSessions,
+      promotions,
     ] = await Promise.all([
       db.accountSettings.findUnique({ where: { businessId } }),
       db.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
@@ -162,16 +175,18 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         where: { scope: 'COUNTER', revokedAt: null },
         orderBy: { createdAt: 'asc' },
       }),
+      db.promotion.findMany({ orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] }),
     ])
 
     const current = settings ?? DEFAULT_SETTINGS
 
     return {
-      businessDate: getBusinessDate(new Date()),
+      businessDate: await businessToday(db, businessId),
       settings: {
         businessName: current.businessName,
         outletName: current.outletName,
         settlementEnabled: current.settlementEnabled,
+        dayRolloverHour: current.dayRolloverHour,
         sharedOverheadFoodPct: current.sharedOverheadFoodPct,
         hostCommissionPct: current.hostCommissionPct,
         capitalAssetFoodPct: current.capitalAssetFoodPct,
@@ -318,6 +333,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         // Unknowable from here: a disconnected tablet cannot report what it holds.
         unsentSaleCount: 0,
       },
+      promotions: promotions.map(serialisePromotion),
       // Counter tablets signed in right now. Settings lets the owner sign them out.
       counterSessions: counterSessions.map((session) => ({
         id: session.id,
@@ -420,7 +436,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         if (!expense) throw notFound('rms:EXPENSE_NOT_FOUND')
         if (expense.paidBy === 'STALL_FUNDS') throw badRequest('rms:NOT_AN_ADVANCE')
 
-        const today = getBusinessDate(new Date())
+        const today = await businessToday(tx, businessId)
         await assertNotLocked(tx, today)
 
         const flipped = await tx.expense.updateMany({
@@ -575,6 +591,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         businessName: body.businessName,
         outletName: body.outletName,
         settlementEnabled: enable,
+        dayRolloverHour: body.dayRolloverHour ?? current?.dayRolloverHour ?? 5,
         sharedOverheadFoodPct: body.sharedOverheadFoodPct,
         hostCommissionPct: body.hostCommissionPct,
         capitalAssetFoodPct: body.capitalAssetFoodPct,
@@ -588,7 +605,14 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
     })
   })
 
-  /** Rename a partner. Names only: which brand each partner owns is fixed. */
+  /**
+   * Rename a partner, or say which brand they own.
+   *
+   * Settlement's roles belong to the brands, not the people: the first brand's
+   * owner, and the second brand's owner who hosts the stall and takes the host
+   * commission. So giving a partner the other brand swaps the two partners'
+   * names between those two places — the roles stay with their brands.
+   */
   app.put<{ Params: { id: string } }>(
     '/rms/partners/:id',
     { preHandler: requireOwner },
@@ -597,11 +621,22 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       const body = partnerBody.parse(request.body)
       const { db } = request
 
-      const partner = await db.partner.findUnique({ where: { id } })
-      if (!partner) throw notFound('rms:PARTNER_NOT_FOUND')
+      return db.$transaction(async (tx) => {
+        const partner = await tx.partner.findUnique({ where: { id } })
+        if (!partner) throw notFound('rms:PARTNER_NOT_FOUND')
+        const name = body.name ?? partner.name
 
-      await db.partner.update({ where: { id }, data: { name: body.name } })
-      return { id }
+        if (body.brandId === undefined || body.brandId === partner.brandId) {
+          await tx.partner.update({ where: { id }, data: { name } })
+          return { id }
+        }
+
+        const other = await tx.partner.findFirst({ where: { brandId: body.brandId } })
+        if (!other) throw badRequest('rms:UNKNOWN_BRAND')
+        await tx.partner.update({ where: { id: other.id }, data: { name } })
+        await tx.partner.update({ where: { id }, data: { name: other.name } })
+        return { id: other.id }
+      })
     },
   )
 

@@ -12,6 +12,7 @@ import { bootstrapRoutes } from './routes/bootstrap.ts'
 import { checkoutRoutes } from './routes/checkout.ts'
 import { correctionRoutes } from './routes/corrections.ts'
 import { menuRoutes } from './routes/menu.ts'
+import { promotionRoutes } from './routes/promotions.ts'
 import { rmsRoutes } from './routes/rms.ts'
 import { shiftRoutes } from './routes/shifts.ts'
 import { terminalRoutes } from './routes/terminal.ts'
@@ -127,6 +128,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(terminalRoutes)
   await app.register(rmsRoutes)
   await app.register(menuRoutes)
+  await app.register(promotionRoutes)
 
   return app
 }

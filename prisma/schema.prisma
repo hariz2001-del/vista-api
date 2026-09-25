@@ -136,8 +136,49 @@ model Business {
   settings       AccountSettings?
   terminalStatus TerminalStatus?
   handoffCodes   HandoffCode[]
+  promotions     Promotion[]
 
   @@map("businesses")
+}
+
+// ---------------------------------------------------------------------------
+// Promotions
+// ---------------------------------------------------------------------------
+
+enum PromotionKind {
+  /** `value` is a percentage, 1–100, of whatever it is applied to. */
+  PERCENT
+  /** `value` is sen off, never more than what it is applied to. */
+  AMOUNT
+}
+
+/**
+ * A discount preset the owner sets up for a promo — "Merdeka 10%", "RM 2 off".
+ * The cashier picks one from the discount screen for an item or the whole
+ * order; it is offered only on business dates inside its range.
+ *
+ * A preset only works out the amount. What is recorded on the sale is the
+ * discount itself, checked by the server like any other, so editing or
+ * deleting a promo never changes a past sale.
+ */
+model Promotion {
+  id         String        @id @default(uuid())
+  businessId String        @map("business_id")
+  name       String
+  kind       PromotionKind
+  value      Int
+  /** First business date it runs on. */
+  startsOn   DateTime      @map("starts_on") @db.Date
+  /** Last business date it runs on, inclusive. Null runs until switched off. */
+  endsOn     DateTime?     @map("ends_on") @db.Date
+  isActive   Boolean       @default(true) @map("is_active")
+  sortOrder  Int           @default(0) @map("sort_order")
+  createdAt  DateTime      @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@index([businessId, startsOn])
+  @@map("promotions")
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +633,9 @@ model AccountSettings {
   /// Partner settlement: two brands, each owned by a partner, with a monthly
   /// payout between them. Off for a new business; a solo shop never sees it.
   settlementEnabled     Boolean  @default(false) @map("settlement_enabled")
+  /// When one trading day ends and the next begins, 0–12 (hour of the morning,
+  /// Malaysia time). A 1am sale with the default 5 counts for the night before.
+  dayRolloverHour       Int      @default(5) @map("day_rollover_hour")
   /// Share of shared overheads borne by Food, 0–100. Drinks takes the rest.
   sharedOverheadFoodPct Int      @map("shared_overhead_food_pct")
   /// The host's cut of the Food net result, 0–100.

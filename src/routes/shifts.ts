@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { attemptLimitConfig, type AttemptOptions } from '../attempts.ts'
 import { requireUser, verifySecret } from '../auth.ts'
 import type { Tx } from '../db.ts'
-import { businessDateToUtc, getBusinessDate } from '../domain/business-date.ts'
+import { businessDateToUtc, businessToday } from '../domain/business-date.ts'
 import { badRequest, conflict, notFound, unauthorized } from '../errors.ts'
 
 const openBody = z.object({ pin: z.string().min(4).max(8) })
@@ -71,7 +71,7 @@ export async function shiftRoutes(app: FastifyInstance, options: AttemptOptions)
     const existing = await db.shift.findFirst({ where: { status: 'OPEN' } })
     if (existing) throw conflict('shift:ALREADY_OPEN')
 
-    const businessDate = getBusinessDate(new Date())
+    const businessDate = await businessToday(db, request.businessId)
     const shift = await db.shift.create({
       data: {
         businessId: request.businessId,
