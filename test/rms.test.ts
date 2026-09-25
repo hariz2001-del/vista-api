@@ -288,7 +288,9 @@ describe('rms — menu and settings', () => {
   })
 
   it('refuses a split outside 0–100 and saves a valid one', async () => {
-    const before = await prisma.accountSettings.findUniqueOrThrow({ where: { id: 1 } })
+    const before = await prisma.accountSettings.findUniqueOrThrow({
+      where: { businessId: DEMO.businessId },
+    })
     const valid = {
       businessName: before.businessName,
       outletName: before.outletName,
@@ -305,7 +307,7 @@ describe('rms — menu and settings', () => {
       expect((await snapshot()).settings.hostCommissionPct).toBe(25)
     } finally {
       await prisma.accountSettings.update({
-        where: { id: 1 },
+        where: { businessId: DEMO.businessId },
         data: {
           sharedOverheadFoodPct: before.sharedOverheadFoodPct,
           hostCommissionPct: before.hostCommissionPct,

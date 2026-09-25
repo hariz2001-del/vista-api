@@ -1,7 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { requireUser } from '../auth.ts'
-import { prisma } from '../db.ts'
 
 const heartbeatBody = z.object({
   /** Flush attempts in a row that failed to send something, as the tablet counts them. */
@@ -23,10 +22,10 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
       consecutiveSyncFailures: body.consecutive_sync_failures,
       lastSeenById: request.user.id,
     }
-    await prisma.terminalStatus.upsert({
-      where: { id: 1 },
+    await request.db.terminalStatus.upsert({
+      where: { businessId: request.businessId },
       update: data,
-      create: { id: 1, ...data },
+      create: { businessId: request.businessId, ...data },
     })
     return { ok: true }
   })

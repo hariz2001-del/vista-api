@@ -19,6 +19,9 @@ try {
 
 const prisma = new PrismaClient()
 
+/** The demo business. Everything below belongs to it. */
+const BUSINESS = 'c1000000-0000-4000-8000-000000000001'
+
 const BRAND_FOOD = 'a1000000-0000-4000-8000-000000000001'
 const BRAND_DRINKS = 'a1000000-0000-4000-8000-000000000002'
 
@@ -152,7 +155,9 @@ async function main(): Promise<void> {
   // Restrict-on-delete, so a reseed on a database with orders will refuse
   // rather than quietly destroying history.
   // Owner books, sessions and partners reference users and brands, so they go
-  // before either.
+  // before either. This clears every business, not only the demo one: the seed
+  // is for a development or test database, never a live one.
+  await prisma.handoffCode.deleteMany()
   await prisma.session.deleteMany()
   await prisma.partner.deleteMany()
   await prisma.expense.deleteMany()
@@ -172,7 +177,9 @@ async function main(): Promise<void> {
   await prisma.product.deleteMany()
   await prisma.category.deleteMany()
   await prisma.brand.deleteMany()
+  await prisma.accountSettings.deleteMany()
   await prisma.user.deleteMany()
+  await prisma.business.deleteMany()
 
   const seedPassword = process.env.SEED_PASSWORD
   const seedPin = process.env.SEED_PIN
@@ -184,32 +191,33 @@ async function main(): Promise<void> {
     bcrypt.hash(seedPin, 10),
   ])
 
-  await prisma.user.createMany({
-    data: [
-      // The business's one account. It signs in to the counter (which then stays
-      // signed in) and to the owner dashboard. The PIN is the counter PIN.
-      { id: '10000000-0000-4000-8000-000000000001', email: 'demo@vistahub.my', name: 'Vista Demo', role: 'OWNER', passwordHash, pinHash },
-    ],
-  })
-
   // The business profile and split the POS and RMS demos use.
   const settings = {
     businessName: 'Vista Demo Enterprise',
     outletName: 'Vista Counter · Section 7',
+    // The demo is the stall partner settlement was built for.
+    settlementEnabled: true,
     sharedOverheadFoodPct: 70,
     hostCommissionPct: 30,
     capitalAssetFoodPct: 50,
   }
-  await prisma.accountSettings.upsert({
-    where: { id: 1 },
-    update: settings,
-    create: { id: 1, ...settings },
+
+  await prisma.business.create({ data: { id: BUSINESS, name: settings.businessName } })
+
+  await prisma.user.createMany({
+    data: [
+      // The business's one account. It signs in to the counter (which then stays
+      // signed in) and to the owner dashboard. The PIN is the counter PIN.
+      { id: '10000000-0000-4000-8000-000000000001', businessId: BUSINESS, email: 'demo@vistahub.my', name: 'Vista Demo', role: 'OWNER', passwordHash, pinHash },
+    ],
   })
+
+  await prisma.accountSettings.create({ data: { businessId: BUSINESS, ...settings } })
 
   await prisma.brand.createMany({
     data: [
-      { id: BRAND_FOOD, name: 'Food', colour: '#ef6c35', softColour: '#fff0e8', sortOrder: 1 },
-      { id: BRAND_DRINKS, name: 'Drinks', colour: '#087f8c', softColour: '#e4f6f7', sortOrder: 2 },
+      { id: BRAND_FOOD, businessId: BUSINESS, name: 'Food', colour: '#ef6c35', softColour: '#fff0e8', sortOrder: 1 },
+      { id: BRAND_DRINKS, businessId: BUSINESS, name: 'Drinks', colour: '#087f8c', softColour: '#e4f6f7', sortOrder: 2 },
     ],
   })
 
@@ -217,20 +225,20 @@ async function main(): Promise<void> {
   // the stall and owns Drinks. Renamed from RMS Settings.
   await prisma.partner.createMany({
     data: [
-      { name: 'Hariz', brandId: BRAND_FOOD, role: 'FOOD_OWNER' },
-      { name: 'Iman', brandId: BRAND_DRINKS, role: 'STALL_HOST' },
+      { businessId: BUSINESS, name: 'Hariz', brandId: BRAND_FOOD, role: 'FOOD_OWNER' },
+      { businessId: BUSINESS, name: 'Iman', brandId: BRAND_DRINKS, role: 'STALL_HOST' },
     ],
   })
 
   await prisma.category.createMany({
     data: [
-      { id: CAT.rice, brandId: BRAND_FOOD, name: 'Rice', sortOrder: 1 },
-      { id: CAT.burgers, brandId: BRAND_FOOD, name: 'Burgers', sortOrder: 2 },
-      { id: CAT.noodles, brandId: BRAND_FOOD, name: 'Noodles', sortOrder: 3 },
-      { id: CAT.sides, brandId: BRAND_FOOD, name: 'Sides', sortOrder: 4 },
-      { id: CAT.coffee, brandId: BRAND_DRINKS, name: 'Coffee', sortOrder: 5 },
-      { id: CAT.tea, brandId: BRAND_DRINKS, name: 'Tea', sortOrder: 6 },
-      { id: CAT.cold, brandId: BRAND_DRINKS, name: 'Cold Drinks', sortOrder: 7 },
+      { id: CAT.rice, businessId: BUSINESS, brandId: BRAND_FOOD, name: 'Rice', sortOrder: 1 },
+      { id: CAT.burgers, businessId: BUSINESS, brandId: BRAND_FOOD, name: 'Burgers', sortOrder: 2 },
+      { id: CAT.noodles, businessId: BUSINESS, brandId: BRAND_FOOD, name: 'Noodles', sortOrder: 3 },
+      { id: CAT.sides, businessId: BUSINESS, brandId: BRAND_FOOD, name: 'Sides', sortOrder: 4 },
+      { id: CAT.coffee, businessId: BUSINESS, brandId: BRAND_DRINKS, name: 'Coffee', sortOrder: 5 },
+      { id: CAT.tea, businessId: BUSINESS, brandId: BRAND_DRINKS, name: 'Tea', sortOrder: 6 },
+      { id: CAT.cold, businessId: BUSINESS, brandId: BRAND_DRINKS, name: 'Cold Drinks', sortOrder: 7 },
     ],
   })
 
@@ -238,6 +246,7 @@ async function main(): Promise<void> {
     await prisma.product.create({
       data: {
         id: product.id,
+        businessId: BUSINESS,
         brandId: product.brandId,
         categoryId: product.categoryId,
         name: product.name,

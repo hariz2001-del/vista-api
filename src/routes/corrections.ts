@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { requireUser } from '../auth.ts'
-import { prisma, type Tx } from '../db.ts'
+import type { Tx } from '../db.ts'
 import { priceOrder, type PricedLineInput, type PricedOrder } from '../domain/cart.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
 
@@ -65,7 +65,7 @@ type ResolvedLine = {
   menuModifierTotalSen: number
 }
 
-async function loadExisting(client: Tx | typeof prisma, clientTxnId: string) {
+async function loadExisting(client: Tx, clientTxnId: string) {
   return client.saleCorrection.findUnique({
     where: { clientTxnId },
     include: { brandDeltas: true },
@@ -234,24 +234,28 @@ async function priceReplacement(
 export async function correctionRoutes(app: FastifyInstance): Promise<void> {
   app.post('/corrections', { preHandler: requireUser }, async (request) => {
     const body = correctionBody.parse(request.body)
-    const existing = await loadExisting(prisma, body.client_txn_id)
+    const { db, businessId } = request
+    const existing = await loadExisting(db, body.client_txn_id)
     if (existing) return serialise(existing, true)
 
     try {
-      return await prisma.$transaction((tx) => runCorrection(tx, body, request.user.id), {
-        timeout: 15_000,
-      })
+      return await db.$transaction(
+        (tx) => runCorrection(tx, body, request.user.id, businessId),
+        { timeout: 15_000 },
+      )
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        const winner = await loadExisting(prisma, body.client_txn_id)
+        const winner = await loadExisting(db, body.client_txn_id)
         if (winner) return serialise(winner, true)
+        // Taken by another business: never answer with its correction.
+        throw conflict('correction:DUPLICATE_TRANSACTION')
       }
       throw error
     }
   })
 }
 
-async function runCorrection(tx: Tx, body: CorrectionBody, userId: string) {
+async function runCorrection(tx: Tx, body: CorrectionBody, userId: string, businessId: string) {
   const replay = await loadExisting(tx, body.client_txn_id)
   if (replay) return serialise(replay, true)
 
@@ -263,11 +267,12 @@ async function runCorrection(tx: Tx, body: CorrectionBody, userId: string) {
 
   // Shift close takes this same lock. Corrections and close therefore cannot
   // cross after the declared total has been compared but before status changes.
+  // Raw SQL is not scoped by the client, so both locks name the business.
   const shifts = await tx.$queryRaw<
     Array<{ id: string; status: string; system_net_sales_sen: number | null }>
   >`
     SELECT id, status, system_net_sales_sen
-      FROM shifts WHERE id = ${orderRef.shiftId} FOR UPDATE
+      FROM shifts WHERE id = ${orderRef.shiftId} AND business_id = ${businessId} FOR UPDATE
   `
   const shift = shifts[0]
   if (!shift) throw notFound('shift:NOT_FOUND')
@@ -275,7 +280,9 @@ async function runCorrection(tx: Tx, body: CorrectionBody, userId: string) {
     throw conflict('correction:SHIFT_NOT_OPEN')
   }
 
-  await tx.$queryRaw`SELECT id FROM orders WHERE id = ${orderRef.id} FOR UPDATE`
+  await tx.$queryRaw`
+    SELECT id FROM orders WHERE id = ${orderRef.id} AND business_id = ${businessId} FOR UPDATE
+  `
   // A same-key request may have been waiting behind the first request's shift
   // lock. Re-check only after that lock is ours, before interpreting the first
   // correction as prior business history and accidentally returning "already cancelled".
@@ -352,6 +359,7 @@ async function runCorrection(tx: Tx, body: CorrectionBody, userId: string) {
 
   const correction = await tx.saleCorrection.create({
     data: {
+      businessId,
       clientTxnId: body.client_txn_id,
       originalOrderId: order.id,
       shiftId: order.shiftId,
@@ -372,6 +380,7 @@ async function runCorrection(tx: Tx, body: CorrectionBody, userId: string) {
   for (const delta of brandDeltas) {
     await tx.ledgerEntry.create({
       data: {
+        businessId,
         businessDate: order.businessDate,
         direction: delta.deltaSen > 0 ? 'MONEY_IN' : 'MONEY_OUT',
         amountSen: Math.abs(delta.deltaSen),

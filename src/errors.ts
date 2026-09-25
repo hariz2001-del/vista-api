@@ -25,6 +25,8 @@ export const MESSAGES: Record<string, string> = {
   'auth:NO_PIN_SET': 'This account has no counter PIN set.',
   'auth:UNAUTHORIZED': 'Please sign in again.',
   'auth:TOO_MANY_ATTEMPTS': 'Too many attempts. Wait 15 minutes and try again.',
+  'auth:EMAIL_TAKEN': 'An account with that email already exists. Sign in instead.',
+  'auth:HANDOFF_INVALID': 'That sign-in link has expired. Go back to vistahub.my and choose again.',
 
   'shift:ALREADY_OPEN': 'A shift is already open. Close it before opening another.',
   'shift:NOT_FOUND': 'That shift no longer exists.',
@@ -39,6 +41,10 @@ export const MESSAGES: Record<string, string> = {
     'The total does not match the current menu prices. Rebuild the order and try again.',
   'checkout:SHIFT_NOT_OPEN': 'No shift is open. Open a shift before taking payment.',
   'checkout:PERIOD_LOCKED': 'That business date is in a month that has already been settled.',
+  'checkout:DUPLICATE_TRANSACTION':
+    'This sale could not be recorded. Start a new order and take payment again.',
+  'correction:DUPLICATE_TRANSACTION':
+    'This correction could not be recorded. Reopen the sale and try again.',
 
   'correction:ORDER_NOT_FOUND': 'That paid sale could not be found.',
   'correction:SHIFT_NOT_OPEN': 'That shift is already closed.',
@@ -65,6 +71,19 @@ export const MESSAGES: Record<string, string> = {
   'rms:PRODUCT_NOT_FOUND': 'That item is no longer on the menu.',
   'rms:NOTHING_TO_CHANGE': 'Nothing to change.',
   'rms:PARTNER_NOT_FOUND': 'That partner no longer exists.',
+  'rms:SETTLEMENT_OFF':
+    'Partner settlement is switched off for this business. Turn it on in Settings first.',
+  'rms:SETTLEMENT_NEEDS_TWO_BRANDS':
+    'Partner settlement needs exactly two brands, one for each partner. Set them up in Menu first.',
+
+  'menu:BRAND_NOT_FOUND': 'That brand no longer exists.',
+  'menu:CATEGORY_NOT_FOUND': 'That category no longer exists.',
+  'menu:GROUP_NOT_FOUND': 'That option group no longer exists.',
+  'menu:OPTION_NOT_FOUND': 'That option no longer exists.',
+  'menu:NAME_TAKEN': 'Something with that name already exists here.',
+  'menu:IN_USE': 'That has been sold or still has items in it, so it cannot be deleted. Hide it instead.',
+  'menu:LAST_BRAND': 'A business needs at least one brand.',
+  'menu:INVALID_SELECTION': 'The minimum cannot be more than the maximum.',
 
   'validation:INVALID_REQUEST': 'Something about that request was not valid.',
   'server:UNEXPECTED': 'Something went wrong. The sale was not recorded — try again.',
