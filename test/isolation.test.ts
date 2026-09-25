@@ -732,6 +732,79 @@ describe('menu builder', () => {
     expect(moved).toMatchObject({ categoryId: coldId, brandId: drinksId })
   })
 
+  it('saves the order of categories, items, option groups and options, and the counter follows it', async () => {
+    const b = await makeBusiness(app)
+    const snap0 = await snapshotOf(b.ownerToken)
+    const first = snap0.categories[0]!.id
+    const second = (
+      (await call(b.ownerToken, 'POST', '/rms/categories', { brandId: snap0.brands[0]!.id, name: 'Drinks' })).json() as { id: string }
+    ).id
+    const a = await stockMenu(b, 100)
+    const c = await stockMenu(b, 300)
+    const bId = (
+      (await call(b.ownerToken, 'POST', '/rms/products', { categoryId: first, name: 'B', basePriceSen: 200 })).json() as { id: string }
+    ).id
+
+    // Categories: Drinks first.
+    expect((await call(b.ownerToken, 'PUT', '/rms/categories/order', { ids: [second, first] })).statusCode).toBe(200)
+    // Items: c, B, a in the first category.
+    expect((await call(b.ownerToken, 'PUT', `/rms/categories/${first}/products`, { ids: [c, bId, a] })).statusCode).toBe(200)
+
+    // Option groups and options.
+    const g1 = ((await call(b.ownerToken, 'POST', `/rms/products/${c}/groups`, { name: 'G1', minSelect: 0, maxSelect: 1 })).json() as { id: string }).id
+    const g2 = ((await call(b.ownerToken, 'POST', `/rms/products/${c}/groups`, { name: 'G2', minSelect: 0, maxSelect: 1 })).json() as { id: string }).id
+    const o1 = ((await call(b.ownerToken, 'POST', `/rms/groups/${g1}/options`, { name: 'O1' })).json() as { id: string }).id
+    const o2 = ((await call(b.ownerToken, 'POST', `/rms/groups/${g1}/options`, { name: 'O2' })).json() as { id: string }).id
+    expect((await call(b.ownerToken, 'PUT', `/rms/products/${c}/groups/order`, { ids: [g2, g1] })).statusCode).toBe(200)
+    expect((await call(b.ownerToken, 'PUT', `/rms/groups/${g1}/options/order`, { ids: [o2, o1] })).statusCode).toBe(200)
+
+    type Boot = {
+      categories: Array<{ id: string }>
+      products: Array<{ id: string; modifier_groups: Array<{ id: string; options: Array<{ id: string }> }> }>
+    }
+    const boot = (await call(b.counterToken, 'GET', '/bootstrap')).json() as Boot
+    expect(boot.categories.map((row) => row.id)).toEqual([second, first])
+    expect(boot.products.map((row) => row.id)).toEqual([c, bId, a])
+    const cItem = boot.products[0]!
+    expect(cItem.modifier_groups.map((group) => group.id)).toEqual([g2, g1])
+    expect(cItem.modifier_groups[1]!.options.map((option) => option.id)).toEqual([o2, o1])
+  })
+
+  it('moves an item by dropping it into another category’s list', async () => {
+    const b = await makeBusiness(app)
+    const item = await stockMenu(b)
+    const drinks = ((await call(b.ownerToken, 'POST', '/rms/brands', { name: 'Drinks', colour: '#087f8c' })).json() as { id: string }).id
+    const cold = ((await call(b.ownerToken, 'POST', '/rms/categories', { brandId: drinks, name: 'Cold' })).json() as { id: string }).id
+
+    const drop = await call(b.ownerToken, 'PUT', `/rms/categories/${cold}/products`, { ids: [item] })
+    expect(drop.statusCode).toBe(200)
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: item } })).toMatchObject({
+      categoryId: cold,
+      brandId: drinks,
+    })
+  })
+
+  it('refuses an order that leaves something out, repeats it, or reaches into another business', async () => {
+    const b = await makeBusiness(app)
+    const first = (await snapshotOf(b.ownerToken)).categories[0]!.id
+    const one = await stockMenu(b)
+    const two = await stockMenu(b)
+    const demoProduct = await productByName('Ayam Goreng Berempah')
+    const demoCategory = demoProduct.categoryId
+
+    for (const ids of [[one], [one, one], [one, two, demoProduct.id]]) {
+      const response = await call(b.ownerToken, 'PUT', `/rms/categories/${first}/products`, { ids })
+      expect(response.statusCode, JSON.stringify(ids)).toBe(400)
+      expect(response.json()).toMatchObject({ error: 'menu:ORDER_MISMATCH' })
+    }
+    // The demo product was not pulled into B's category.
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: demoProduct.id } })).businessId).toBe(DEMO.businessId)
+
+    expect((await call(b.ownerToken, 'PUT', `/rms/categories/${demoCategory}/products`, { ids: [one, two] })).statusCode).toBe(404)
+    const all = await call(b.ownerToken, 'PUT', '/rms/categories/order', { ids: [first, demoCategory] })
+    expect(all.statusCode).toBe(400)
+  })
+
   it('will not delete the last brand', async () => {
     const b = await makeBusiness(app)
     const brand = (await snapshotOf(b.ownerToken)).brands[0]

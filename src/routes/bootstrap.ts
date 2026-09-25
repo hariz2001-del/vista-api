@@ -14,10 +14,11 @@ export async function bootstrapRoutes(app: FastifyInstance): Promise<void> {
     const db = request.db
     const [brands, categories, products, openShift, settings, user] = await Promise.all([
       db.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
-      db.category.findMany({ orderBy: [{ brandId: 'asc' }, { sortOrder: 'asc' }] }),
+      db.category.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] }),
       db.product.findMany({
         where: { isActive: true },
-        orderBy: { sortOrder: 'asc' },
+        // The owner's order: categories as arranged in the RMS, then items within each.
+        orderBy: [{ category: { sortOrder: 'asc' } }, { sortOrder: 'asc' }],
         include: {
           modifierGroups: {
             orderBy: { sortOrder: 'asc' },

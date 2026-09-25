@@ -422,4 +422,106 @@ export async function menuRoutes(app: FastifyInstance): Promise<void> {
     await db.modifierItem.delete({ where: { id } })
     return { id }
   })
+
+  // -------------------------------------------------------------------------
+  // Order — what drag and drop in the menu builder saves
+  // -------------------------------------------------------------------------
+
+  /** Categories, in the order the counter shows them. Every category, each once. */
+  app.put('/rms/categories/order', owner, async (request) => {
+    const { ids } = orderBody.parse(request.body)
+    const { db } = request
+    return db.$transaction(async (tx) => {
+      const existing = await tx.category.findMany({ select: { id: true } })
+      assertSameSet(ids, existing.map((row) => row.id))
+      await saveOrder(ids, (id, sortOrder) => tx.category.update({ where: { id }, data: { sortOrder } }))
+      return { ids }
+    })
+  })
+
+  /**
+   * The items of one category, in order. An item from another category in the
+   * list moves here — dragged across — and with it to this category's brand,
+   * for future sales only. Every item already here must be in the list, so a
+   * stale screen cannot drop one by leaving it out.
+   */
+  app.put<Params>('/rms/categories/:id/products', owner, async (request) => {
+    const categoryId = ID.parse(request.params.id)
+    const { ids } = orderBody.parse(request.body)
+    const { db } = request
+    return db.$transaction(async (tx) => {
+      const category = await tx.category.findUnique({ where: { id: categoryId } })
+      if (!category) throw notFound('menu:CATEGORY_NOT_FOUND')
+
+      const listed = await tx.product.findMany({ where: { id: { in: ids } }, select: { id: true } })
+      if (listed.length !== new Set(ids).size || listed.length !== ids.length) {
+        throw badRequest('menu:ORDER_MISMATCH')
+      }
+      const here = await tx.product.findMany({ where: { categoryId }, select: { id: true } })
+      const inList = new Set(ids)
+      if (here.some((row) => !inList.has(row.id))) throw badRequest('menu:ORDER_MISMATCH')
+
+      await saveOrder(ids, (id, sortOrder) =>
+        tx.product.update({
+          where: { id },
+          data: { sortOrder, categoryId: category.id, brandId: category.brandId },
+        }),
+      )
+      return { ids }
+    })
+  })
+
+  /** An item's option groups, in order. */
+  app.put<Params>('/rms/products/:id/groups/order', owner, async (request) => {
+    const productId = ID.parse(request.params.id)
+    const { ids } = orderBody.parse(request.body)
+    const { db } = request
+    return db.$transaction(async (tx) => {
+      if (!(await tx.product.findUnique({ where: { id: productId } }))) {
+        throw notFound('rms:PRODUCT_NOT_FOUND')
+      }
+      const existing = await tx.modifierGroup.findMany({ where: { productId }, select: { id: true } })
+      assertSameSet(ids, existing.map((row) => row.id))
+      await saveOrder(ids, (id, sortOrder) => tx.modifierGroup.update({ where: { id }, data: { sortOrder } }))
+      return { ids }
+    })
+  })
+
+  /** A group's options, in order. */
+  app.put<Params>('/rms/groups/:id/options/order', owner, async (request) => {
+    const modifierGroupId = ID.parse(request.params.id)
+    const { ids } = orderBody.parse(request.body)
+    const { db } = request
+    return db.$transaction(async (tx) => {
+      if (!(await tx.modifierGroup.findUnique({ where: { id: modifierGroupId } }))) {
+        throw notFound('menu:GROUP_NOT_FOUND')
+      }
+      const existing = await tx.modifierItem.findMany({ where: { modifierGroupId }, select: { id: true } })
+      assertSameSet(ids, existing.map((row) => row.id))
+      await saveOrder(ids, (id, sortOrder) => tx.modifierItem.update({ where: { id }, data: { sortOrder } }))
+      return { ids }
+    })
+  })
+}
+
+const orderBody = z.object({ ids: z.array(ID).min(1).max(500) })
+
+/** The new order must name exactly what is there: nothing added, nothing left out, nothing twice. */
+function assertSameSet(ids: string[], existing: string[]): void {
+  const listed = new Set(ids)
+  if (
+    listed.size !== ids.length ||
+    listed.size !== existing.length ||
+    existing.some((id) => !listed.has(id))
+  ) {
+    throw badRequest('menu:ORDER_MISMATCH')
+  }
+}
+
+/** Positions from 1, in list order. One at a time: they share a transaction. */
+async function saveOrder(
+  ids: string[],
+  write: (id: string, sortOrder: number) => Promise<unknown>,
+): Promise<void> {
+  for (const [index, id] of ids.entries()) await write(id, index + 1)
 }
