@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildApp } from '../src/build-app.ts'
 import { prisma } from '../src/db.ts'
-import { authed, DEMO } from './helpers.ts'
+import { authed, DEMO, resetTransactional } from './helpers.ts'
 
 /**
  * The real guessing limit: 10 attempts per 15 minutes per client. Built with
@@ -87,5 +87,31 @@ describe('guessing limits', () => {
     expect(blocked.json()).toMatchObject({ error: 'auth:TOO_MANY_ATTEMPTS' })
     // Nothing was opened by any of it.
     expect(await prisma.shift.count({ where: { status: 'OPEN' } })).toBe(openBefore)
+  })
+
+  it('allows five new businesses an hour from one address', async () => {
+    const address = '203.0.113.30'
+    const register = (n: number) =>
+      app.inject({
+        method: 'POST',
+        url: '/auth/register',
+        headers: from(address),
+        payload: {
+          businessName: `Limit ${n}`,
+          email: `limit${n}.${Date.now()}@example.test`,
+          password: 'correct horse battery staple',
+          pin: '1111',
+        },
+      })
+
+    try {
+      for (let n = 1; n <= 5; n += 1) expect((await register(n)).statusCode).toBe(200)
+
+      const blocked = await register(6)
+      expect(blocked.statusCode).toBe(429)
+      expect(blocked.json()).toMatchObject({ error: 'auth:TOO_MANY_ATTEMPTS' })
+    } finally {
+      await resetTransactional()
+    }
   })
 })

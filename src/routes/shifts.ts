@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { attemptLimitConfig, type AttemptOptions } from '../attempts.ts'
 import { requireUser, verifySecret } from '../auth.ts'
-import { prisma, type Tx } from '../db.ts'
+import type { Tx } from '../db.ts'
 import { businessDateToUtc, getBusinessDate } from '../domain/business-date.ts'
 import { badRequest, conflict, notFound, unauthorized } from '../errors.ts'
 
@@ -52,8 +52,8 @@ export async function shiftTakings(
   return { orderCount, systemNetSalesSen }
 }
 
-async function assertPin(userId: string, pin: string): Promise<void> {
-  const user = await prisma.user.findUnique({ where: { id: userId } })
+async function assertPin(db: Tx, userId: string, pin: string): Promise<void> {
+  const user = await db.user.findUnique({ where: { id: userId } })
   if (!user?.pinHash) throw badRequest('auth:NO_PIN_SET')
   if (!(await verifySecret(pin, user.pinHash))) throw unauthorized('auth:INVALID_PIN')
 }
@@ -65,14 +65,16 @@ export async function shiftRoutes(app: FastifyInstance, options: AttemptOptions)
 
   app.post('/shifts/open', { preHandler: requireUser, config: pinAttempts }, async (request) => {
     const { pin } = openBody.parse(request.body)
-    await assertPin(request.user.id, pin)
+    const db = request.db
+    await assertPin(db, request.user.id, pin)
 
-    const existing = await prisma.shift.findFirst({ where: { status: 'OPEN' } })
+    const existing = await db.shift.findFirst({ where: { status: 'OPEN' } })
     if (existing) throw conflict('shift:ALREADY_OPEN')
 
     const businessDate = getBusinessDate(new Date())
-    const shift = await prisma.shift.create({
+    const shift = await db.shift.create({
       data: {
+        businessId: request.businessId,
         businessDate: businessDateToUtc(businessDate),
         status: 'OPEN',
         openedById: request.user.id,
@@ -91,16 +93,20 @@ export async function shiftRoutes(app: FastifyInstance, options: AttemptOptions)
     { preHandler: requireUser, config: pinAttempts },
     async (request) => {
       const body = closeBody.parse(request.body)
-      await assertPin(request.user.id, body.pin)
+      const db = request.db
+      await assertPin(db, request.user.id, body.pin)
 
       if (body.device_pending_count > 0) throw conflict('shift:UNSYNCED_ORDERS')
 
-      return prisma.$transaction(async (tx) => {
+      return db.$transaction(async (tx) => {
         // Lock the shift for the duration. Checkout takes the same lock, so the
         // two serialise: a sale cannot land in this shift after its totals have
-        // been counted but before it is marked closed.
+        // been counted but before it is marked closed. Raw SQL is not scoped by
+        // the client, so it filters on the business itself.
         const locked = await tx.$queryRaw<Array<{ id: string; status: string }>>`
-          SELECT id, status FROM shifts WHERE id = ${request.params.id} FOR UPDATE
+          SELECT id, status FROM shifts
+           WHERE id = ${request.params.id} AND business_id = ${request.businessId}
+             FOR UPDATE
         `
         const shift = locked[0]
         if (!shift) throw notFound('shift:NOT_FOUND')

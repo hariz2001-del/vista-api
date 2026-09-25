@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { requireOwner } from '../auth.ts'
-import { prisma, type Tx } from '../db.ts'
+import type { Tx } from '../db.ts'
 import { businessDateToUtc, getBusinessDate } from '../domain/business-date.ts'
 import { openingDeficitFor, settlePeriod, splitShared } from '../domain/settlement.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
@@ -26,9 +26,16 @@ const ID = z.string().uuid()
 const DEFAULT_SETTINGS = {
   businessName: 'Vista',
   outletName: '',
+  settlementEnabled: false,
   sharedOverheadFoodPct: 70,
   hostCommissionPct: 30,
   capitalAssetFoodPct: 50,
+}
+
+/** Is partner settlement switched on for this business? Off unless it says so. */
+async function settlementEnabled(client: Tx, businessId: string): Promise<boolean> {
+  const settings = await client.accountSettings.findUnique({ where: { businessId } })
+  return settings?.settlementEnabled ?? false
 }
 
 /** `YYYY-MM-DD` for a Postgres DATE, which Prisma hands back as UTC midnight. */
@@ -85,14 +92,11 @@ const adjustmentBody = z.object({
   shiftId: ID.nullable(),
 })
 
-const productBody = z.object({
-  basePriceSen: z.number().int().min(0).optional(),
-  isSoldOut: z.boolean().optional(),
-})
-
 const settingsBody = z.object({
   businessName: z.string().trim().min(1).max(80),
   outletName: z.string().trim().min(1).max(80),
+  /** Left out by an older dashboard, which then leaves the switch as it is. */
+  settlementEnabled: z.boolean().optional(),
   sharedOverheadFoodPct: z.number().int().min(0).max(100),
   hostCommissionPct: z.number().int().min(0).max(100),
   capitalAssetFoodPct: z.number().int().min(0).max(100),
@@ -114,7 +118,8 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
    * a single stall that is small. The dashboard polls this, which is how a sale
    * rung at the counter appears on the owner's screen within seconds.
    */
-  app.get('/rms/snapshot', { preHandler: requireOwner }, async () => {
+  app.get('/rms/snapshot', { preHandler: requireOwner }, async (request) => {
+    const { db, businessId } = request
     const [
       settings,
       brands,
@@ -130,22 +135,30 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       terminal,
       counterSessions,
     ] = await Promise.all([
-      prisma.accountSettings.findUnique({ where: { id: 1 } }),
-      prisma.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
-      prisma.category.findMany({ orderBy: [{ brandId: 'asc' }, { sortOrder: 'asc' }] }),
-      prisma.product.findMany({ orderBy: { sortOrder: 'asc' } }),
-      prisma.partner.findMany({ include: { brand: { select: { sortOrder: true } } } }),
-      prisma.shift.findMany({ orderBy: { openedAt: 'asc' } }),
-      prisma.order.findMany({ orderBy: { completedAt: 'asc' }, include: { items: true } }),
-      prisma.saleCorrection.findMany({
+      db.accountSettings.findUnique({ where: { businessId } }),
+      db.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
+      db.category.findMany({ orderBy: [{ brandId: 'asc' }, { sortOrder: 'asc' }] }),
+      db.product.findMany({
+        orderBy: { sortOrder: 'asc' },
+        include: {
+          modifierGroups: {
+            orderBy: { sortOrder: 'asc' },
+            include: { items: { orderBy: { sortOrder: 'asc' } } },
+          },
+        },
+      }),
+      db.partner.findMany({ include: { brand: { select: { sortOrder: true } } } }),
+      db.shift.findMany({ orderBy: { openedAt: 'asc' } }),
+      db.order.findMany({ orderBy: { completedAt: 'asc' }, include: { items: true } }),
+      db.saleCorrection.findMany({
         orderBy: { createdAt: 'asc' },
         include: { brandDeltas: true, originalOrder: { select: { queueNumber: true } } },
       }),
-      prisma.ledgerEntry.findMany({ orderBy: [{ businessDate: 'asc' }, { id: 'asc' }] }),
-      prisma.expense.findMany({ orderBy: [{ businessDate: 'desc' }, { createdAt: 'desc' }] }),
-      prisma.periodClosure.findMany({ orderBy: { endDate: 'asc' } }),
-      prisma.terminalStatus.findUnique({ where: { id: 1 } }),
-      prisma.session.findMany({
+      db.ledgerEntry.findMany({ orderBy: [{ businessDate: 'asc' }, { id: 'asc' }] }),
+      db.expense.findMany({ orderBy: [{ businessDate: 'desc' }, { createdAt: 'desc' }] }),
+      db.periodClosure.findMany({ orderBy: { endDate: 'asc' } }),
+      db.terminalStatus.findUnique({ where: { businessId } }),
+      db.session.findMany({
         where: { scope: 'COUNTER', revokedAt: null },
         orderBy: { createdAt: 'asc' },
       }),
@@ -158,6 +171,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       settings: {
         businessName: current.businessName,
         outletName: current.outletName,
+        settlementEnabled: current.settlementEnabled,
         sharedOverheadFoodPct: current.sharedOverheadFoodPct,
         hostCommissionPct: current.hostCommissionPct,
         capitalAssetFoodPct: current.capitalAssetFoodPct,
@@ -178,10 +192,24 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         brandId: product.brandId,
         categoryId: product.categoryId,
         name: product.name,
+        description: product.description,
         basePriceSen: product.basePriceSen,
         imageUrl: product.imageUrl ?? '',
         isSoldOut: product.isSoldOut,
         isActive: product.isActive,
+        modifierGroups: product.modifierGroups.map((group) => ({
+          id: group.id,
+          name: group.name,
+          minSelect: group.minSelect,
+          maxSelect: group.maxSelect,
+          options: group.items.map((item) => ({
+            id: item.id,
+            name: item.name,
+            priceSen: item.priceSen,
+            type: item.type,
+            isSoldOut: item.isSoldOut,
+          })),
+        })),
       })),
       partners: partners
         .toSorted((a, b) => a.brand.sortOrder - b.brand.sortOrder)
@@ -307,12 +335,22 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
    * Log a cost. The food/drinks split is computed here and snapshotted on the
    * row. Only money that left the stall account reaches the ledger; a partner
    * paying out of pocket creates a debt to them instead, settled later.
+   *
+   * Without partner settlement there are no partners to owe and no split to
+   * make: the cost is paid from the business's own funds and sits whole on the
+   * first side, which nothing reads until settlement is switched on.
    */
   app.post('/rms/expenses', { preHandler: requireOwner }, async (request) => {
     const body = expenseBody.parse(request.body)
+    const { db, businessId } = request
 
-    return prisma.$transaction(async (tx) => {
+    return db.$transaction(async (tx) => {
       await assertNotLocked(tx, body.businessDate)
+
+      const withSettlement = await settlementEnabled(tx, businessId)
+      if (!withSettlement && body.paidBy !== 'STALL_FUNDS') {
+        throw badRequest('rms:SETTLEMENT_OFF')
+      }
 
       const brands = await tx.brand.findMany({ orderBy: { sortOrder: 'asc' } })
       const foodBrand = brands[0]
@@ -322,20 +360,23 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
 
       const isShared = body.brandId === null
       const isFood = body.brandId !== null && body.brandId === foodBrand?.id
-      const { foodSen, drinksSen } = isShared
-        ? splitShared(body.amountSen, body.foodSplitPct)
-        : isFood
-          ? { foodSen: body.amountSen, drinksSen: 0 }
-          : { foodSen: 0, drinksSen: body.amountSen }
+      const { foodSen, drinksSen } = !withSettlement
+        ? { foodSen: body.amountSen, drinksSen: 0 }
+        : isShared
+          ? splitShared(body.amountSen, body.foodSplitPct)
+          : isFood
+            ? { foodSen: body.amountSen, drinksSen: 0 }
+            : { foodSen: 0, drinksSen: body.amountSen }
 
       const expense = await tx.expense.create({
         data: {
+          businessId,
           businessDate: toDate(body.businessDate),
           amountSen: body.amountSen,
           category: body.category,
           paidBy: body.paidBy,
           brandId: body.brandId,
-          foodSplitPct: isShared ? body.foodSplitPct : isFood ? 100 : 0,
+          foodSplitPct: !withSettlement ? 100 : isShared ? body.foodSplitPct : isFood ? 100 : 0,
           foodAmountSen: foodSen,
           drinksAmountSen: drinksSen,
           description: body.description,
@@ -347,6 +388,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       if (body.paidBy === 'STALL_FUNDS') {
         await tx.ledgerEntry.create({
           data: {
+            businessId,
             businessDate: toDate(body.businessDate),
             direction: 'MONEY_OUT',
             amountSen: body.amountSen,
@@ -371,8 +413,9 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: requireOwner },
     async (request) => {
       const id = ID.parse(request.params.id)
+      const { db, businessId } = request
 
-      return prisma.$transaction(async (tx) => {
+      return db.$transaction(async (tx) => {
         const expense = await tx.expense.findUnique({ where: { id } })
         if (!expense) throw notFound('rms:EXPENSE_NOT_FOUND')
         if (expense.paidBy === 'STALL_FUNDS') throw badRequest('rms:NOT_AN_ADVANCE')
@@ -388,6 +431,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
 
         await tx.ledgerEntry.create({
           data: {
+            businessId,
             businessDate: toDate(today),
             direction: 'MONEY_OUT',
             amountSen: expense.amountSen,
@@ -412,8 +456,9 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
    */
   app.post('/rms/ledger/adjustments', { preHandler: requireOwner }, async (request) => {
     const body = adjustmentBody.parse(request.body)
+    const { db, businessId } = request
 
-    return prisma.$transaction(async (tx) => {
+    return db.$transaction(async (tx) => {
       await assertNotLocked(tx, body.businessDate)
 
       if (body.shiftId !== null) {
@@ -423,6 +468,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
 
       const entry = await tx.ledgerEntry.create({
         data: {
+          businessId,
           businessDate: toDate(body.businessDate),
           direction: body.direction,
           amountSen: body.amountSen,
@@ -457,10 +503,12 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: requireOwner },
     async (request) => {
       const id = ID.parse(request.params.id)
+      const { db, businessId } = request
 
-      return prisma.$transaction(async (tx) => {
+      return db.$transaction(async (tx) => {
+        // Raw SQL is not scoped by the client; name the business here.
         const locked = await tx.$queryRaw<Array<{ id: string; status: string }>>`
-          SELECT id, status FROM shifts WHERE id = ${id} FOR UPDATE
+          SELECT id, status FROM shifts WHERE id = ${id} AND business_id = ${businessId} FOR UPDATE
         `
         const shift = locked[0]
         if (!shift) throw notFound('shift:NOT_FOUND')
@@ -486,50 +534,58 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
   )
 
   // -------------------------------------------------------------------------
-  // Menu and settings
+  // Settings
   // -------------------------------------------------------------------------
 
   /**
-   * Change a price or mark an item sold out. A price change reaches the counter
-   * on its next menu refresh; a sale already rung at the old price is recorded
-   * at the price charged, never repriced.
-   */
-  app.patch<{ Params: { id: string } }>(
-    '/rms/products/:id',
-    { preHandler: requireOwner },
-    async (request) => {
-      const id = ID.parse(request.params.id)
-      const body = productBody.parse(request.body)
-      if (body.basePriceSen === undefined && body.isSoldOut === undefined) {
-        throw badRequest('rms:NOTHING_TO_CHANGE')
-      }
-
-      const product = await prisma.product.findUnique({ where: { id } })
-      if (!product) throw notFound('rms:PRODUCT_NOT_FOUND')
-
-      await prisma.product.update({
-        where: { id },
-        data: {
-          ...(body.basePriceSen === undefined ? {} : { basePriceSen: body.basePriceSen }),
-          ...(body.isSoldOut === undefined ? {} : { isSoldOut: body.isSoldOut }),
-        },
-      })
-      return { id }
-    },
-  )
-
-  /**
-   * The business profile and partner split. Changing a percentage affects only
-   * what is logged from now on: each expense keeps the split it was logged with.
+   * The business profile, the partner split, and the settlement switch.
+   * Changing a percentage affects only what is logged from now on: each expense
+   * keeps the split it was logged with.
+   *
+   * Switching settlement on needs exactly two brands — one per partner — and
+   * names a partner for each if the business has none yet. Switching it off
+   * hides it; nothing already settled is touched.
    */
   app.put('/rms/settings', { preHandler: requireOwner }, async (request) => {
     const body = settingsBody.parse(request.body)
-    await prisma.accountSettings.upsert({
-      where: { id: 1 },
-      update: body,
-      create: { id: 1, ...body },
+    const { db, businessId } = request
+
+    return db.$transaction(async (tx) => {
+      const current = await tx.accountSettings.findUnique({ where: { businessId } })
+      const enable = body.settlementEnabled ?? current?.settlementEnabled ?? false
+
+      if (enable && !current?.settlementEnabled) {
+        const brands = await tx.brand.findMany({ orderBy: { sortOrder: 'asc' } })
+        const [first, second] = brands
+        if (brands.length !== 2 || !first || !second) {
+          throw badRequest('rms:SETTLEMENT_NEEDS_TWO_BRANDS')
+        }
+        const partners = await tx.partner.count()
+        if (partners === 0) {
+          await tx.partner.createMany({
+            data: [
+              { businessId, name: 'Partner 1', brandId: first.id, role: 'FOOD_OWNER' },
+              { businessId, name: 'Partner 2', brandId: second.id, role: 'STALL_HOST' },
+            ],
+          })
+        }
+      }
+
+      const data = {
+        businessName: body.businessName,
+        outletName: body.outletName,
+        settlementEnabled: enable,
+        sharedOverheadFoodPct: body.sharedOverheadFoodPct,
+        hostCommissionPct: body.hostCommissionPct,
+        capitalAssetFoodPct: body.capitalAssetFoodPct,
+      }
+      await tx.accountSettings.upsert({
+        where: { businessId },
+        update: data,
+        create: { businessId, ...data },
+      })
+      return data
     })
-    return body
   })
 
   /** Rename a partner. Names only: which brand each partner owns is fixed. */
@@ -539,11 +595,12 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
     async (request) => {
       const id = ID.parse(request.params.id)
       const body = partnerBody.parse(request.body)
+      const { db } = request
 
-      const partner = await prisma.partner.findUnique({ where: { id } })
+      const partner = await db.partner.findUnique({ where: { id } })
       if (!partner) throw notFound('rms:PARTNER_NOT_FOUND')
 
-      await prisma.partner.update({ where: { id }, data: { name: body.name } })
+      await db.partner.update({ where: { id }, data: { name: body.name } })
       return { id }
     },
   )
@@ -553,15 +610,16 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
   // -------------------------------------------------------------------------
 
   /**
-   * Sign the counter tablet out, from the dashboard.
+   * Sign this business's counter tablet out, from the dashboard.
    *
-   * Revokes every counter session. The tablet is sent back to its sign-in
-   * screen on its next request; anything it has not sent yet stays on the device
-   * and flushes once it is signed in again. A tablet that is offline hears about
-   * this only when it reconnects — there is no way to reach it before that.
+   * Revokes every counter session of this business — and only this business.
+   * The tablet is sent back to its sign-in screen on its next request; anything
+   * it has not sent yet stays on the device and flushes once it is signed in
+   * again. A tablet that is offline hears about this only when it reconnects —
+   * there is no way to reach it before that.
    */
-  app.post('/rms/counter/sign-out', { preHandler: requireOwner }, async () => {
-    const revoked = await prisma.session.updateMany({
+  app.post('/rms/counter/sign-out', { preHandler: requireOwner }, async (request) => {
+    const revoked = await request.db.session.updateMany({
       where: { scope: 'COUNTER', revokedAt: null },
       data: { revokedAt: new Date() },
     })
@@ -577,7 +635,8 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
    *
    * The browser sends only the window. Refuses while a shift in it is still
    * open, or if any part of it is already settled — the exclusion constraint on
-   * `period_closures` makes an overlap impossible regardless.
+   * `period_closures` makes an overlap impossible regardless. Only for a
+   * business with partner settlement switched on.
    */
   app.post('/rms/periods/close', { preHandler: requireOwner }, async (request) => {
     const body = periodBody.parse(request.body)
@@ -585,11 +644,17 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
     const start = toDate(body.startDate)
     const end = toDate(body.endDate)
     const inWindow = { gte: start, lte: end }
+    const { db, businessId } = request
 
-    return prisma.$transaction(async (tx) => {
-      // One close at a time, so a race becomes a clean refusal rather than a
-      // constraint error.
-      await tx.$queryRaw`SELECT 1 AS locked FROM (SELECT pg_advisory_xact_lock(7041)) AS held`
+    return db.$transaction(async (tx) => {
+      // One close at a time per business, so a race becomes a clean refusal
+      // rather than a constraint error. Two businesses closing at once do not
+      // wait on each other.
+      await tx.$queryRaw`
+        SELECT 1 AS locked FROM (SELECT pg_advisory_xact_lock(7041, hashtext(${businessId}))) AS held
+      `
+
+      if (!(await settlementEnabled(tx, businessId))) throw badRequest('rms:SETTLEMENT_OFF')
 
       const overlap = await tx.periodClosure.findFirst({
         where: { startDate: { lte: end }, endDate: { gte: start } },
@@ -604,7 +669,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       const [brands, settings, lines, corrections, expenses, advances, drawings, closures] =
         await Promise.all([
           tx.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
-          tx.accountSettings.findUnique({ where: { id: 1 } }),
+          tx.accountSettings.findUnique({ where: { businessId } }),
           tx.orderItem.findMany({ where: { order: { businessDate: inWindow } } }),
           tx.saleCorrection.findMany({
             where: { businessDate: inWindow },
@@ -641,6 +706,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
 
       await tx.periodClosure.create({
         data: {
+          businessId,
           startDate: start,
           endDate: end,
           closedById: request.user.id,

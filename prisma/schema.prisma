@@ -10,6 +10,13 @@
 //    later cannot rewrite what an old sale reported.
 //  * `brandId` being null means "shared", rather than a SHARED enum member.
 //    A brand is a real row; sharedness is the absence of one.
+//  * Every row belongs to one business, and a row can only point at rows of the
+//    same business. Relations between business-owned tables are COMPOSITE
+//    foreign keys — `(business_id, x_id) → x(business_id, id)` — so a sale can
+//    never reference another business's product, shift or brand, even if the
+//    API has a bug. The API scopes every query too (src/db.ts); the keys are the
+//    backstop. A relation that is optional must be `onDelete: Restrict`: the
+//    default, SetNull, would try to null `business_id` along with the id.
 //
 // Prisma Migrate owns this schema. Never hand-apply DDL to the database — the
 // predecessor project kept a Prisma schema as documentation alongside manual
@@ -41,7 +48,7 @@ enum UserRole {
   OWNER_FOOD
   OWNER_DRINKS
   CASHIER
-  /// The business account. The business has one account that signs in to both
+  /// The business account. Each business has one account that signs in to both
   /// apps; what a session can reach is decided by its scope, not by this.
   OWNER
 }
@@ -111,11 +118,36 @@ enum LedgerCategory {
 }
 
 // ---------------------------------------------------------------------------
+// Businesses
+// ---------------------------------------------------------------------------
+
+/// One registered business: its own account, menu, sales and books. Nothing
+/// in one business is visible to another.
+model Business {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  users          User[]
+  brands         Brand[]
+  shifts         Shift[]
+  queueCounters  QueueCounter[]
+  ledgerEntries  LedgerEntry[]
+  settings       AccountSettings?
+  terminalStatus TerminalStatus?
+  handoffCodes   HandoffCode[]
+
+  @@map("businesses")
+}
+
+// ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
 
 model User {
   id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
+  /// Unique across every business: the email is how a sign-in finds its business.
   email        String   @unique
   passwordHash String   @map("password_hash")
   /// Bcrypt hash of the 4-digit shift PIN. Never sent to a client.
@@ -125,6 +157,7 @@ model User {
   isActive     Boolean  @default(true) @map("is_active")
   createdAt    DateTime @default(now()) @map("created_at")
 
+  business           Business         @relation(fields: [businessId], references: [id], onDelete: Restrict)
   shiftsOpened       Shift[]          @relation("ShiftsOpened")
   shiftsClosed       Shift[]          @relation("ShiftsClosed")
   ordersConfirmed    Order[]          @relation("OrdersConfirmed")
@@ -132,7 +165,9 @@ model User {
   expensesCreated    Expense[]        @relation("ExpensesCreated")
   periodsClosed      PeriodClosure[]  @relation("PeriodsClosed")
   sessions           Session[]
+  handoffCodes       HandoffCode[]
 
+  @@unique([businessId, id])
   @@map("users")
 }
 
@@ -145,12 +180,14 @@ model User {
 /// third brand is never a code change.
 model Brand {
   id         String   @id @default(uuid())
-  name       String   @unique
+  businessId String   @map("business_id")
+  name       String
   colour     String
   softColour String   @map("soft_colour")
   sortOrder  Int      @default(0) @map("sort_order")
   createdAt  DateTime @default(now()) @map("created_at")
 
+  business         Business               @relation(fields: [businessId], references: [id], onDelete: Restrict)
   categories       Category[]
   products         Product[]
   orderItems       OrderItem[]
@@ -159,26 +196,31 @@ model Brand {
   expenses         Expense[]
   partner          Partner?
 
+  @@unique([businessId, id])
+  @@unique([businessId, name])
   @@map("brands")
 }
 
 model Category {
-  id        String   @id @default(uuid())
-  brandId   String   @map("brand_id")
-  name      String
-  sortOrder Int      @default(0) @map("sort_order")
-  createdAt DateTime @default(now()) @map("created_at")
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  brandId    String   @map("brand_id")
+  name       String
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdAt  DateTime @default(now()) @map("created_at")
 
-  brand      Brand       @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  brand      Brand       @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
   products   Product[]
   orderItems OrderItem[]
 
+  @@unique([businessId, id])
   @@unique([brandId, name])
   @@map("categories")
 }
 
 model Product {
   id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
   brandId      String   @map("brand_id")
   categoryId   String   @map("category_id")
   name         String
@@ -191,11 +233,12 @@ model Product {
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  brand          Brand           @relation(fields: [brandId], references: [id], onDelete: Restrict)
-  category       Category        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  brand          Brand           @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+  category       Category        @relation(fields: [businessId, categoryId], references: [businessId, id], onDelete: Restrict)
   modifierGroups ModifierGroup[]
   orderItems     OrderItem[]
 
+  @@unique([businessId, id])
   @@index([brandId])
   @@index([categoryId])
   @@map("products")
@@ -203,6 +246,7 @@ model Product {
 
 model ModifierGroup {
   id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
   productId   String   @map("product_id")
   name        String
   description String?
@@ -213,15 +257,17 @@ model ModifierGroup {
   sortOrder   Int      @default(0) @map("sort_order")
   createdAt   DateTime @default(now()) @map("created_at")
 
-  product Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product Product        @relation(fields: [businessId, productId], references: [businessId, id], onDelete: Cascade)
   items   ModifierItem[]
 
+  @@unique([businessId, id])
   @@index([productId])
   @@map("modifier_groups")
 }
 
 model ModifierItem {
   id              String       @id @default(uuid())
+  businessId      String       @map("business_id")
   modifierGroupId String       @map("modifier_group_id")
   name            String
   priceSen        Int          @default(0) @map("price_sen")
@@ -230,9 +276,10 @@ model ModifierItem {
   sortOrder       Int          @default(0) @map("sort_order")
   createdAt       DateTime     @default(now()) @map("created_at")
 
-  group              ModifierGroup       @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  group              ModifierGroup       @relation(fields: [businessId, modifierGroupId], references: [businessId, id], onDelete: Cascade)
   orderItemModifiers OrderItemModifier[]
 
+  @@unique([businessId, id])
   @@index([modifierGroupId])
   @@map("modifier_items")
 }
@@ -243,6 +290,7 @@ model ModifierItem {
 
 model Shift {
   id           String      @id @default(uuid())
+  businessId   String      @map("business_id")
   /// The trading evening this shift belongs to. A shift opened at 8pm and still
   /// running at 1am keeps the date it opened on, so a post-midnight sale reports
   /// against the night it was actually made.
@@ -263,25 +311,31 @@ model Shift {
 
   reconciliationStatus ReconciliationStatus @default(NOT_REQUIRED) @map("reconciliation_status")
 
-  openedBy      User             @relation("ShiftsOpened", fields: [openedById], references: [id])
-  closedBy      User?            @relation("ShiftsClosed", fields: [closedById], references: [id])
+  business      Business         @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  openedBy      User             @relation("ShiftsOpened", fields: [businessId, openedById], references: [businessId, id], onDelete: Restrict)
+  closedBy      User?            @relation("ShiftsClosed", fields: [businessId, closedById], references: [businessId, id], onDelete: Restrict)
   orders        Order[]
   ledgerEntries LedgerEntry[]
   corrections   SaleCorrection[]
 
-  @@index([businessDate])
-  @@index([status])
+  @@unique([businessId, id])
+  @@index([businessId, businessDate])
+  @@index([businessId, status])
   @@map("shifts")
 }
 
-/// One row per trading day. The queue number resets daily and is allocated by
-/// `UPDATE … RETURNING`, which takes the row lock itself — so there is no
-/// read-then-increment gap for two terminals to fall into.
+/// One row per business per trading day. The queue number resets daily and is
+/// allocated by `UPDATE … RETURNING`, which takes the row lock itself — so
+/// there is no read-then-increment gap for two terminals to fall into.
 model QueueCounter {
-  businessDate DateTime @id @map("business_date") @db.Date
+  businessId   String   @map("business_id")
+  businessDate DateTime @map("business_date") @db.Date
   currentVal   Int      @default(0) @map("current_val")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@id([businessId, businessDate])
   @@map("queue_counters")
 }
 
@@ -291,10 +345,11 @@ model QueueCounter {
 
 model Order {
   id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
   shiftId      String   @map("shift_id")
   businessDate DateTime @map("business_date") @db.Date
 
-  /// `#042`. Unique within a business date.
+  /// `#042`. Unique within a business and business date.
   queueNumber  String  @map("queue_number")
   /// The `#OFF-01` the kitchen was actually told, when this sale was rung up
   /// offline. Kept after syncing: it is the only way to trace a disputed order
@@ -343,15 +398,16 @@ model Order {
   completedAt DateTime @map("completed_at")
   createdAt   DateTime @default(now()) @map("created_at")
 
-  shift         Shift            @relation(fields: [shiftId], references: [id], onDelete: Restrict)
-  confirmedBy   User             @relation("OrdersConfirmed", fields: [confirmedById], references: [id])
+  shift         Shift            @relation(fields: [businessId, shiftId], references: [businessId, id], onDelete: Restrict)
+  confirmedBy   User             @relation("OrdersConfirmed", fields: [businessId, confirmedById], references: [businessId, id], onDelete: Restrict)
   items         OrderItem[]
   ledgerEntries LedgerEntry[]
   corrections   SaleCorrection[]
 
-  @@unique([businessDate, queueNumber])
+  @@unique([businessId, id])
+  @@unique([businessId, businessDate, queueNumber])
   @@index([shiftId])
-  @@index([businessDate])
+  @@index([businessId, businessDate])
   @@index([needsReview])
   @@map("orders")
 }
@@ -364,6 +420,7 @@ model Order {
 /// and its brand deltas describe the value that moved afterwards.
 model SaleCorrection {
   id                         String         @id @default(uuid())
+  businessId                 String         @map("business_id")
   clientTxnId                String         @unique @map("client_txn_id")
   originalOrderId            String         @map("original_order_id")
   shiftId                    String         @map("shift_id")
@@ -380,15 +437,16 @@ model SaleCorrection {
   createdById                String         @map("created_by_id")
   createdAt                  DateTime       @default(now()) @map("created_at")
 
-  originalOrder Order                  @relation(fields: [originalOrderId], references: [id], onDelete: Restrict)
-  shift         Shift                  @relation(fields: [shiftId], references: [id], onDelete: Restrict)
-  createdBy     User                   @relation("CorrectionsCreated", fields: [createdById], references: [id], onDelete: Restrict)
+  originalOrder Order                  @relation(fields: [businessId, originalOrderId], references: [businessId, id], onDelete: Restrict)
+  shift         Shift                  @relation(fields: [businessId, shiftId], references: [businessId, id], onDelete: Restrict)
+  createdBy     User                   @relation("CorrectionsCreated", fields: [businessId, createdById], references: [businessId, id], onDelete: Restrict)
   brandDeltas   CorrectionBrandDelta[]
   ledgerEntries LedgerEntry[]
 
+  @@unique([businessId, id])
   @@index([originalOrderId, createdAt])
   @@index([shiftId])
-  @@index([businessDate])
+  @@index([businessId, businessDate])
   @@map("sale_corrections")
 }
 
@@ -396,12 +454,13 @@ model SaleCorrection {
 /// and the ledger both report by brand, and JSON would make those sums fragile.
 model CorrectionBrandDelta {
   id           BigInt @id @default(autoincrement())
+  businessId   String @map("business_id")
   correctionId String @map("correction_id")
   brandId      String @map("brand_id")
   deltaSen     Int    @map("delta_sen")
 
-  correction SaleCorrection @relation(fields: [correctionId], references: [id], onDelete: Cascade)
-  brand      Brand          @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  correction SaleCorrection @relation(fields: [businessId, correctionId], references: [businessId, id], onDelete: Cascade)
+  brand      Brand          @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
 
   @@unique([correctionId, brandId])
   @@index([brandId])
@@ -409,8 +468,9 @@ model CorrectionBrandDelta {
 }
 
 model OrderItem {
-  id      String @id @default(uuid())
-  orderId String @map("order_id")
+  id         String @id @default(uuid())
+  businessId String @map("business_id")
+  orderId    String @map("order_id")
 
   /// Restrict, not Cascade: a product that has ever been sold cannot be deleted,
   /// only deactivated. Historical lines must keep pointing somewhere real.
@@ -432,12 +492,13 @@ model OrderItem {
   /// per-brand net sales is a plain SUM and can never drift.
   allocatedOrderDiscountSen Int @default(0) @map("allocated_order_discount_sen")
 
-  order     Order               @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  product   Product             @relation(fields: [productId], references: [id], onDelete: Restrict)
-  brand     Brand               @relation(fields: [brandId], references: [id], onDelete: Restrict)
-  category  Category            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  order     Order               @relation(fields: [businessId, orderId], references: [businessId, id], onDelete: Cascade)
+  product   Product             @relation(fields: [businessId, productId], references: [businessId, id], onDelete: Restrict)
+  brand     Brand               @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+  category  Category            @relation(fields: [businessId, categoryId], references: [businessId, id], onDelete: Restrict)
   modifiers OrderItemModifier[]
 
+  @@unique([businessId, id])
   @@index([orderId])
   @@index([brandId])
   @@map("order_items")
@@ -447,17 +508,22 @@ model OrderItem {
 /// makes it a scan-and-parse.
 model OrderItemModifier {
   id          String @id @default(uuid())
+  businessId  String @map("business_id")
   orderItemId String @map("order_item_id")
 
   /// Nullable so a modifier deleted from the catalogue does not orphan the
   /// historical line. The snapshotted name and price stand on their own.
+  ///
+  /// The one relation here that is NOT composite: deleting the modifier nulls
+  /// this column, and a composite key would null `business_id` with it. Checkout
+  /// only ever resolves modifiers through the business-scoped client.
   modifierItemId String? @map("modifier_item_id")
 
   name     String
   priceSen Int          @default(0) @map("price_sen")
   type     ModifierType @default(ADD_ON)
 
-  orderItem    OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  orderItem    OrderItem     @relation(fields: [businessId, orderItemId], references: [businessId, id], onDelete: Cascade)
   modifierItem ModifierItem? @relation(fields: [modifierItemId], references: [id], onDelete: SetNull)
 
   @@index([orderItemId])
@@ -477,6 +543,7 @@ model OrderItemModifier {
 /// bottom of the book with a meaningless balance beside it.
 model LedgerEntry {
   id           BigInt   @id @default(autoincrement())
+  businessId   String   @map("business_id")
   businessDate DateTime @map("business_date") @db.Date
   entryAt      DateTime @default(now()) @map("entry_at")
 
@@ -496,12 +563,13 @@ model LedgerEntry {
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  brand      Brand?          @relation(fields: [brandId], references: [id], onDelete: Restrict)
-  order      Order?          @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  shift      Shift?          @relation(fields: [shiftId], references: [id], onDelete: Restrict)
-  correction SaleCorrection? @relation(fields: [correctionId], references: [id], onDelete: Restrict)
+  business   Business        @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  brand      Brand?          @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+  order      Order?          @relation(fields: [businessId, orderId], references: [businessId, id], onDelete: Restrict)
+  shift      Shift?          @relation(fields: [businessId, shiftId], references: [businessId, id], onDelete: Restrict)
+  correction SaleCorrection? @relation(fields: [businessId, correctionId], references: [businessId, id], onDelete: Restrict)
 
-  @@index([businessDate, id])
+  @@index([businessId, businessDate, id])
   @@index([orderId])
   @@index([shiftId])
   @@index([correctionId])
@@ -512,16 +580,18 @@ model LedgerEntry {
 // Account
 // ---------------------------------------------------------------------------
 
-/// The business profile and the partner split. Exactly one row (`id = 1`,
-/// enforced by a CHECK in the migration).
+/// A business's profile and partner split. One row per business.
 ///
 /// The percentages are read at the moment they are used — each expense
 /// snapshots its own split when it is logged — so changing them here never
 /// rewrites a past period.
 model AccountSettings {
-  id                    Int      @id @default(1)
+  businessId            String   @id @map("business_id")
   businessName          String   @map("business_name")
   outletName            String   @map("outlet_name")
+  /// Partner settlement: two brands, each owned by a partner, with a monthly
+  /// payout between them. Off for a new business; a solo shop never sees it.
+  settlementEnabled     Boolean  @default(false) @map("settlement_enabled")
   /// Share of shared overheads borne by Food, 0–100. Drinks takes the rest.
   sharedOverheadFoodPct Int      @map("shared_overhead_food_pct")
   /// The host's cut of the Food net result, 0–100.
@@ -529,6 +599,8 @@ model AccountSettings {
   /// Food's share of shared equipment, 0–100. Separate from the overhead split.
   capitalAssetFoodPct   Int      @map("capital_asset_food_pct")
   updatedAt             DateTime @updatedAt @map("updated_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
 
   @@map("account_settings")
 }
@@ -561,8 +633,11 @@ enum PaymentSource {
 /// The food/drinks split is a SNAPSHOT taken when the expense is logged, so a
 /// later change to the overhead ratio can never rewrite a past period. CHECK
 /// constraints in the migration make the two shares always sum to the amount.
+/// With settlement off, the whole amount sits on the "food" side: the split is
+/// only ever read by settlement.
 model Expense {
   id              String          @id @default(uuid())
+  businessId      String          @map("business_id")
   businessDate    DateTime        @map("business_date") @db.Date
   amountSen       Int             @map("amount_sen")
   category        ExpenseCategory
@@ -581,10 +656,10 @@ model Expense {
   createdById     String          @map("created_by_id")
   createdAt       DateTime        @default(now()) @map("created_at")
 
-  brand     Brand? @relation(fields: [brandId], references: [id], onDelete: Restrict)
-  createdBy User   @relation("ExpensesCreated", fields: [createdById], references: [id], onDelete: Restrict)
+  brand     Brand? @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+  createdBy User   @relation("ExpensesCreated", fields: [businessId, createdById], references: [businessId, id], onDelete: Restrict)
 
-  @@index([businessDate])
+  @@index([businessId, businessDate])
   @@index([paidBy, isSettled])
   @@map("expenses")
 }
@@ -593,9 +668,10 @@ model Expense {
 ///
 /// Never recomputed. The next period's opening deficit is read from here, so
 /// a locked month stays exactly as agreed. An exclusion constraint in the
-/// migration makes two settled periods overlapping impossible.
+/// migration makes two settled periods of one business overlapping impossible.
 model PeriodClosure {
   id                    String   @id @default(uuid())
+  businessId            String   @map("business_id")
   startDate             DateTime @map("start_date") @db.Date
   endDate               DateTime @map("end_date") @db.Date
   closedAt              DateTime @default(now()) @map("closed_at")
@@ -610,23 +686,25 @@ model PeriodClosure {
   foodPayoutSen         Int      @map("food_payout_sen")
   drinksPayoutSen       Int      @map("drinks_payout_sen")
 
-  closedBy User @relation("PeriodsClosed", fields: [closedById], references: [id], onDelete: Restrict)
+  closedBy User @relation("PeriodsClosed", fields: [businessId, closedById], references: [businessId, id], onDelete: Restrict)
 
-  @@index([endDate])
+  @@index([businessId, endDate])
   @@map("period_closures")
 }
 
-/// What the owner can know about the counter tablet. One row (`id = 1`).
+/// What the owner can know about their counter tablet. One row per business.
 ///
 /// Written only by the tablet's heartbeat. The server cannot see a tablet that
 /// has stopped calling, so silence is the only offline signal there is.
 model TerminalStatus {
-  id                      Int       @id @default(1)
+  businessId              String    @id @map("business_id")
   lastSeenAt              DateTime? @map("last_seen_at")
   /// Flush attempts in a row that failed to send something, as the tablet reports.
   consecutiveSyncFailures Int       @default(0) @map("consecutive_sync_failures")
   lastSeenById            String?   @map("last_seen_by_id")
   updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
 
   @@map("terminal_status")
 }
@@ -643,22 +721,50 @@ enum SessionScope {
   COUNTER
   /// The owner dashboard: everything, including the books. Expires.
   OWNER
+  /// vistahub.my, between signing in and picking an app. Can do exactly one
+  /// thing — mint a handoff code — and lasts minutes.
+  HUB
 }
 
 /// One signed-in device. Every request checks its row, which is how signing
 /// the counter out from the RMS takes effect on the tablet's very next request.
+/// The business a request acts for is read from here, never from the request.
 model Session {
   id         String       @id @default(uuid())
+  businessId String       @map("business_id")
   userId     String       @map("user_id")
   scope      SessionScope
   createdAt  DateTime     @default(now()) @map("created_at")
   lastUsedAt DateTime     @default(now()) @map("last_used_at")
   revokedAt  DateTime?    @map("revoked_at")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [businessId, userId], references: [businessId, id], onDelete: Cascade)
 
-  @@index([scope, revokedAt])
+  @@index([businessId, scope, revokedAt])
   @@map("sessions")
+}
+
+/// A one-time pass from vistahub.my to the POS or RMS. Each app keeps its own
+/// sign-in on its own domain, so the hub cannot hand over a token directly; it
+/// hands over this instead, which the app swaps for a session of its own.
+///
+/// Only the SHA-256 of the code is stored. It lives a minute and works once.
+model HandoffCode {
+  id         String       @id @default(uuid())
+  businessId String       @map("business_id")
+  userId     String       @map("user_id")
+  codeHash   String       @unique @map("code_hash")
+  /// COUNTER for the POS, OWNER for the RMS.
+  target     SessionScope
+  expiresAt  DateTime     @map("expires_at")
+  usedAt     DateTime?    @map("used_at")
+  createdAt  DateTime     @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  user     User     @relation(fields: [businessId, userId], references: [businessId, id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("handoff_codes")
 }
 
 enum PartnerRole {
@@ -670,13 +776,16 @@ enum PartnerRole {
 /// A partner in the business — a name settlement pays, one per brand. Not a
 /// login: the business has one account.
 model Partner {
-  id      String      @id @default(uuid())
-  name    String
-  brandId String      @unique @map("brand_id")
-  role    PartnerRole @unique
+  id         String      @id @default(uuid())
+  businessId String      @map("business_id")
+  name       String
+  brandId    String      @map("brand_id")
+  role       PartnerRole
 
-  brand Brand @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  brand Brand @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
 
+  @@unique([businessId, brandId])
+  @@unique([businessId, role])
   @@map("partners")
 }
 

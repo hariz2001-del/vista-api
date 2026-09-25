@@ -18,12 +18,14 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   /**
    * The only sites whose pages may call this API from a browser, comma
-   * separated. Defaults to the local dev servers; production sets the counter
-   * and dashboard domains.
+   * separated. Defaults to the local dev servers (5176 is the vistahub.my
+   * hub); production sets the hub, counter and dashboard domains.
    */
   CORS_ORIGINS: z
     .string()
-    .default('http://localhost:5173,http://localhost:5174,http://localhost:5180,http://localhost:5182')
+    .default(
+      'http://localhost:5173,http://localhost:5174,http://localhost:5176,http://localhost:5180,http://localhost:5182',
+    )
     .transform((value) =>
       value
         .split(',')

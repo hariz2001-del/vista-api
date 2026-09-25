@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { requireUser } from '../auth.ts'
-import { prisma, type Tx } from '../db.ts'
+import type { Tx } from '../db.ts'
 import { businessDateToUtc } from '../domain/business-date.ts'
 import { priceOrder, type PricedLineInput } from '../domain/cart.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
@@ -47,22 +47,27 @@ function formatQueueNumber(value: number): string {
 }
 
 /**
- * Allocate the day's next queue number.
+ * Allocate the business's next queue number for the day.
  *
  * The UPDATE takes the row lock itself, so there is no read-then-increment gap
  * for a second terminal to slip into. A rolled-back checkout leaves no hole,
- * because the increment rolls back with it.
+ * because the increment rolls back with it. Raw SQL is not scoped by the
+ * client, so both statements name the business themselves.
  */
-async function allocateQueueNumber(tx: Tx, businessDate: string): Promise<string> {
+async function allocateQueueNumber(
+  tx: Tx,
+  businessId: string,
+  businessDate: string,
+): Promise<string> {
   await tx.$executeRaw`
-    INSERT INTO queue_counters (business_date, current_val, updated_at)
-    VALUES (${businessDate}::date, 0, now())
-    ON CONFLICT (business_date) DO NOTHING
+    INSERT INTO queue_counters (business_id, business_date, current_val, updated_at)
+    VALUES (${businessId}, ${businessDate}::date, 0, now())
+    ON CONFLICT (business_id, business_date) DO NOTHING
   `
   const rows = await tx.$queryRaw<Array<{ current_val: number }>>`
     UPDATE queue_counters
        SET current_val = current_val + 1, updated_at = now()
-     WHERE business_date = ${businessDate}::date
+     WHERE business_id = ${businessId} AND business_date = ${businessDate}::date
      RETURNING current_val
   `
   const next = rows[0]?.current_val
@@ -96,39 +101,47 @@ export async function checkoutRoutes(app: FastifyInstance): Promise<void> {
   app.post('/checkout', { preHandler: requireUser }, async (request) => {
     const body = checkoutBody.parse(request.body)
     const userId = request.user.id
+    const { db, businessId } = request
 
     // Cheap pre-check outside the transaction. The unique index is what actually
     // guarantees correctness; this just avoids doing the work twice.
-    const alreadyDone = await loadExisting(prisma, body.client_txn_id)
+    const alreadyDone = await loadExisting(db, body.client_txn_id)
     if (alreadyDone) return serialise(alreadyDone, true)
 
     try {
-      return await prisma.$transaction((tx) => runCheckout(tx, body, userId), { timeout: 15_000 })
+      return await db.$transaction((tx) => runCheckout(tx, body, userId, businessId), {
+        timeout: 15_000,
+      })
     } catch (error) {
       // Lost a race to a concurrent identical request. The other one won and
       // wrote the sale; return that rather than failing the cashier.
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        const winner = await loadExisting(prisma, body.client_txn_id)
+        const winner = await loadExisting(db, body.client_txn_id)
         if (winner) return serialise(winner, true)
+        // The id is taken, but not by this business. Transaction ids are
+        // random, so this is a forged or corrupted request — and it must never
+        // be answered with another business's sale.
+        throw conflict('checkout:DUPLICATE_TRANSACTION')
       }
       throw error
     }
   })
 }
 
-async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
+async function runCheckout(tx: Tx, body: CheckoutBody, userId: string, businessId: string) {
   const replay = await loadExisting(tx, body.client_txn_id)
   if (replay) return serialise(replay, true)
 
   // Lock the shift. Close takes the same lock, so a sale can never land in a
   // shift whose totals have already been counted.
   // Ids are text columns, not Postgres uuid — no cast, or the comparison
-  // becomes uuid = text and Postgres refuses it.
+  // becomes uuid = text and Postgres refuses it. Raw SQL is not scoped by the
+  // client: a shift of another business must read as not found.
   const shifts = await tx.$queryRaw<
     Array<{ id: string; status: string; system_net_sales_sen: number | null }>
   >`
     SELECT id, status, system_net_sales_sen
-      FROM shifts WHERE id = ${body.shift_id} FOR UPDATE
+      FROM shifts WHERE id = ${body.shift_id} AND business_id = ${businessId} FOR UPDATE
   `
   const shift = shifts[0]
   if (!shift) throw notFound('shift:NOT_FOUND')
@@ -248,11 +261,12 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
   // ---- Write ----
 
   const businessDate = businessDateToUtc(body.business_date)
-  const queueNumber = await allocateQueueNumber(tx, body.business_date)
+  const queueNumber = await allocateQueueNumber(tx, businessId, body.business_date)
   const now = new Date()
 
   const order = await tx.order.create({
     data: {
+      businessId,
       shiftId: shift.id,
       businessDate,
       queueNumber,
@@ -321,6 +335,7 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string) {
     if (netSen <= 0) continue
     await tx.ledgerEntry.create({
       data: {
+        businessId,
         businessDate,
         direction: 'MONEY_IN',
         amountSen: netSen,

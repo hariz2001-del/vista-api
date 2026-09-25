@@ -1,6 +1,5 @@
 import type { FastifyInstance } from 'fastify'
 import { requireUser } from '../auth.ts'
-import { prisma } from '../db.ts'
 import { getBusinessDate } from '../domain/business-date.ts'
 
 /**
@@ -12,10 +11,11 @@ import { getBusinessDate } from '../domain/business-date.ts'
  */
 export async function bootstrapRoutes(app: FastifyInstance): Promise<void> {
   app.get('/bootstrap', { preHandler: requireUser }, async (request) => {
+    const db = request.db
     const [brands, categories, products, openShift, settings, user] = await Promise.all([
-      prisma.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
-      prisma.category.findMany({ orderBy: [{ brandId: 'asc' }, { sortOrder: 'asc' }] }),
-      prisma.product.findMany({
+      db.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
+      db.category.findMany({ orderBy: [{ brandId: 'asc' }, { sortOrder: 'asc' }] }),
+      db.product.findMany({
         where: { isActive: true },
         orderBy: { sortOrder: 'asc' },
         include: {
@@ -25,13 +25,17 @@ export async function bootstrapRoutes(app: FastifyInstance): Promise<void> {
           },
         },
       }),
-      prisma.shift.findFirst({ where: { status: 'OPEN' } }),
-      prisma.accountSettings.findUnique({ where: { id: 1 } }),
-      prisma.user.findUnique({ where: { id: request.user.id } }),
+      db.shift.findFirst({ where: { status: 'OPEN' } }),
+      db.accountSettings.findUnique({ where: { businessId: request.businessId } }),
+      db.user.findUnique({ where: { id: request.user.id } }),
     ])
 
     return {
       business_date: getBusinessDate(new Date()),
+      // Which business this device is signed in to. The tablet files its unsent
+      // sales under it, so a device later signed in to another business never
+      // sends them into the wrong books.
+      business_id: request.businessId,
       // Who is signed in, so the counter can show their name without asking again.
       user: user ? { id: user.id, name: user.name, role: user.role } : null,
       // The business profile, so the sign-in and shift screens name the real outlet.

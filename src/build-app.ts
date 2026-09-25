@@ -1,6 +1,7 @@
 import cors from '@fastify/cors'
 import jwt from '@fastify/jwt'
 import rateLimit from '@fastify/rate-limit'
+import type { PrismaClient } from '@prisma/client'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { ZodError } from 'zod'
 import { ATTEMPT_LIMIT, AttemptStore } from './attempts.ts'
@@ -10,6 +11,7 @@ import { authRoutes } from './routes/auth.ts'
 import { bootstrapRoutes } from './routes/bootstrap.ts'
 import { checkoutRoutes } from './routes/checkout.ts'
 import { correctionRoutes } from './routes/corrections.ts'
+import { menuRoutes } from './routes/menu.ts'
 import { rmsRoutes } from './routes/rms.ts'
 import { shiftRoutes } from './routes/shifts.ts'
 import { terminalRoutes } from './routes/terminal.ts'
@@ -21,10 +23,22 @@ export type AppOptions = {
    * logins do not trip it; test/attempts.test.ts checks the real limit.
    */
   attemptLimit?: number
+  /**
+   * New businesses per hour, per client. Production uses the default; the test
+   * suites raise it because they register a business for nearly every test.
+   */
+  registrationLimit?: number
 }
+
+/** Registration is open to anyone, so one address gets a handful an hour. */
+export const REGISTRATION_LIMIT = 5
 
 export async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
   const attempts = { attemptLimit: options.attemptLimit ?? ATTEMPT_LIMIT }
+  const authOptions = {
+    ...attempts,
+    registrationLimit: options.registrationLimit ?? REGISTRATION_LIMIT,
+  }
 
   const app = Fastify({
     logger: env.NODE_ENV === 'test' ? false : { level: 'info' },
@@ -34,22 +48,28 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   })
 
   // The methods must be listed: @fastify/cors defaults to GET, HEAD and POST
-  // only, so a browser's preflight for the RMS's PUT (settings) and PATCH (menu)
-  // is refused and the request never leaves the page. Server-side tests use
-  // inject(), which skips CORS entirely — test/cors.test.ts covers that gap.
+  // only, so a browser's preflight for the RMS's PUT (settings), PATCH and
+  // DELETE (menu) is refused and the request never leaves the page. Server-side
+  // tests use inject(), which skips CORS entirely — test/cors.test.ts covers that gap.
   await app.register(cors, {
-    // Only the counter and dashboard sites (CORS_ORIGINS). A page on any other
-    // site gets no CORS headers, so the browser withholds the response from it.
-    // This is not the lock on its own — anything outside a browser can still
-    // call — the session check is. Tokens travel in a header, not a cookie, so
-    // credentials are not needed.
+    // Only the hub, counter and dashboard sites (CORS_ORIGINS). A page on any
+    // other site gets no CORS headers, so the browser withholds the response
+    // from it. This is not the lock on its own — anything outside a browser can
+    // still call — the session check is. Tokens travel in a header, not a
+    // cookie, so credentials are not needed.
     origin: env.CORS_ORIGINS,
-    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   })
   // No default expiry: a counter session must not time out mid-service. Owner
   // sessions are given their expiry where they are signed (routes/auth.ts), and
   // every token is checked against its session row, which the RMS can revoke.
   await app.register(jwt, { secret: env.JWT_SECRET })
+
+  // Filled in by the session check (src/auth.ts) on every authenticated route.
+  // Fastify refuses an object as a decorator default, so the client starts as
+  // null and is set per request.
+  app.decorateRequest('businessId', '')
+  app.decorateRequest('db', null as unknown as PrismaClient)
 
   // Off by default; only the login and PIN routes opt in (src/attempts.ts).
   // The refusal is a DomainError, so it leaves through the same error handler
@@ -99,13 +119,14 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     return { ok: true }
   })
 
-  await app.register(authRoutes, attempts)
+  await app.register(authRoutes, authOptions)
   await app.register(bootstrapRoutes)
   await app.register(shiftRoutes, attempts)
   await app.register(checkoutRoutes)
   await app.register(correctionRoutes)
   await app.register(terminalRoutes)
   await app.register(rmsRoutes)
+  await app.register(menuRoutes)
 
   return app
 }

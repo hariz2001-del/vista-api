@@ -7,11 +7,14 @@ export const DEMO = {
   email: 'demo@vistahub.my',
   password: process.env.SEED_PASSWORD as string,
   pin: process.env.SEED_PIN as string,
+  /** The seeded demo business (prisma/seed.ts). */
+  businessId: 'c1000000-0000-4000-8000-000000000001',
 }
 
 /**
- * Clear everything transactional but leave the catalogue alone — the catalogue
- * is seeded once by `npm run seed`, and tests assert against its real prices.
+ * Clear everything transactional but leave the demo catalogue alone — it is
+ * seeded once by `npm run seed`, and tests assert against its real prices.
+ * Businesses a test registered are removed entirely.
  */
 export async function resetTransactional(): Promise<void> {
   await prisma.expense.deleteMany()
@@ -25,16 +28,92 @@ export async function resetTransactional(): Promise<void> {
   await prisma.order.deleteMany()
   await prisma.shift.deleteMany()
   await prisma.queueCounter.deleteMany()
+  await prisma.handoffCode.deleteMany()
   // Guessing limits live in the database now, so they outlast a test run.
   await prisma.attemptCounter.deleteMany()
+
+  const others = { businessId: { not: DEMO.businessId } }
+  await prisma.session.deleteMany({ where: others })
+  await prisma.partner.deleteMany({ where: others })
+  await prisma.modifierItem.deleteMany({ where: others })
+  await prisma.modifierGroup.deleteMany({ where: others })
+  await prisma.product.deleteMany({ where: others })
+  await prisma.category.deleteMany({ where: others })
+  await prisma.brand.deleteMany({ where: others })
+  await prisma.accountSettings.deleteMany({ where: others })
+  await prisma.user.deleteMany({ where: others })
+  await prisma.business.deleteMany({ where: { id: { not: DEMO.businessId } } })
 }
 
 export async function makeApp(): Promise<FastifyInstance> {
-  // The suites log in and open shifts far more than 10 times; the real limit is
-  // exercised on its own in attempts.test.ts.
-  const app = await buildApp({ attemptLimit: 1_000 })
+  // The suites log in, open shifts and register businesses far more often than
+  // the real limits allow; those are exercised on their own in attempts.test.ts.
+  const app = await buildApp({ attemptLimit: 1_000, registrationLimit: 1_000 })
   await app.ready()
   return app
+}
+
+export type TestBusiness = {
+  businessId: string
+  email: string
+  password: string
+  pin: string
+  /** A session as the RMS gets one: through the hub's handoff. */
+  ownerToken: string
+  /** A session as the POS gets one: through the hub's handoff. */
+  counterToken: string
+}
+
+let registered = 0
+
+/**
+ * Register a second business the way a new owner does — vistahub.my's sign-up,
+ * then a handoff to each app — so the tests exercise the real front door.
+ */
+export async function makeBusiness(
+  app: FastifyInstance,
+  name = `Test Business ${++registered}`,
+): Promise<TestBusiness> {
+  const email = `owner${registered}.${Date.now()}@example.test`
+  const password = 'correct horse battery staple'
+  const pin = '4321'
+
+  const register = await app.inject({
+    method: 'POST',
+    url: '/auth/register',
+    payload: { businessName: name, email, password, pin },
+  })
+  if (register.statusCode !== 200) {
+    throw new Error(`register failed (${register.statusCode}): ${register.body}`)
+  }
+  const hubToken = (register.json() as { token: string }).token
+
+  const handoff = async (target: 'POS' | 'RMS'): Promise<string> => {
+    const minted = await app.inject({
+      method: 'POST',
+      url: '/auth/handoff',
+      headers: authed(hubToken),
+      payload: { target },
+    })
+    if (minted.statusCode !== 200) throw new Error(`handoff failed: ${minted.body}`)
+    const redeemed = await app.inject({
+      method: 'POST',
+      url: '/auth/handoff/redeem',
+      payload: { code: (minted.json() as { code: string }).code },
+    })
+    if (redeemed.statusCode !== 200) throw new Error(`redeem failed: ${redeemed.body}`)
+    return (redeemed.json() as { token: string }).token
+  }
+
+  const user = await prisma.user.findUniqueOrThrow({ where: { email } })
+  return {
+    businessId: user.businessId,
+    email,
+    password,
+    pin,
+    ownerToken: await handoff('RMS'),
+    counterToken: await handoff('POS'),
+  }
 }
 
 /** A counter session, as the POS signs in. Sales, corrections and shifts only. */
@@ -68,12 +147,16 @@ export function authed(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}` }
 }
 
-export async function openShift(app: FastifyInstance, token: string): Promise<string> {
+export async function openShift(
+  app: FastifyInstance,
+  token: string,
+  pin: string = DEMO.pin,
+): Promise<string> {
   const response = await app.inject({
     method: 'POST',
     url: '/shifts/open',
     headers: authed(token),
-    payload: { pin: DEMO.pin },
+    payload: { pin },
   })
   if (response.statusCode !== 200) {
     throw new Error(`open shift failed (${response.statusCode}): ${response.body}`)
@@ -81,9 +164,10 @@ export async function openShift(app: FastifyInstance, token: string): Promise<st
   return (response.json() as { id: string }).id
 }
 
+/** A seeded demo product. Other businesses' menus are never matched by name. */
 export async function productByName(name: string) {
   const product = await prisma.product.findFirstOrThrow({
-    where: { name },
+    where: { name, businessId: DEMO.businessId },
     include: { modifierGroups: { include: { items: true } } },
   })
   return product
