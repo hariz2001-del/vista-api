@@ -137,9 +137,9 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
     ] = await Promise.all([
       db.accountSettings.findUnique({ where: { businessId } }),
       db.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
-      db.category.findMany({ orderBy: [{ brandId: 'asc' }, { sortOrder: 'asc' }] }),
+      db.category.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] }),
       db.product.findMany({
-        orderBy: { sortOrder: 'asc' },
+        orderBy: [{ category: { sortOrder: 'asc' } }, { sortOrder: 'asc' }],
         include: {
           modifierGroups: {
             orderBy: { sortOrder: 'asc' },
