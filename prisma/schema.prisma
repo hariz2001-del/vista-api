@@ -35,7 +35,7 @@ datasource db {
 }
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
   // "native" for this machine; rhel-openssl-3.0.x is what Vercel's functions run.
   binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
@@ -136,8 +136,91 @@ model Business {
   settings       AccountSettings?
   terminalStatus TerminalStatus?
   handoffCodes   HandoffCode[]
+  promotions     Promotion[]
 
   @@map("businesses")
+}
+
+// ---------------------------------------------------------------------------
+// Promotions
+// ---------------------------------------------------------------------------
+
+enum PromotionKind {
+  /// `value` is a percentage, 1–100, of whatever it is applied to.
+  PERCENT
+  /// `value` is sen off, never more than what it is applied to.
+  AMOUNT
+}
+
+/// What a promo takes its discount off.
+enum PromotionScope {
+  /// The whole order. Picked by the cashier, or applied to every order automatically.
+  ORDER
+  /// Any item that matches one of its targets. Applied automatically.
+  ITEMS
+  /// A set of items bought together — every target, in its quantity. Applied automatically.
+  COMBO
+}
+
+/// How often an automatic promo applies within one order.
+enum PromotionLimit {
+  /// Every matching item, or every complete combo.
+  EACH
+  /// At most once per receipt.
+  ONCE_PER_ORDER
+}
+
+/// A promo the owner sets up — "Merdeka 10%", "RM 2 off Kopi", "Nasi Lemak +
+/// Drink combo". It runs on business dates inside its range.
+/// A whole-order promo is either picked by the cashier from the discount screen
+/// or applied to every order automatically. Item and combo promos apply
+/// themselves when the order contains what they target. Either way the counter
+/// works the amounts out and the cashier can take an automatic one off.
+/// What is recorded on the sale is the discount itself, checked by the server
+/// like any other, so editing or deleting a promo never changes a past sale.
+model Promotion {
+  id         String         @id @default(uuid())
+  businessId String         @map("business_id")
+  name       String
+  kind       PromotionKind
+  value      Int
+  scope      PromotionScope @default(ORDER)
+  /// Whole-order promos only: applied without the cashier picking it. Item and combo promos always are.
+  autoApply  Boolean        @default(false) @map("auto_apply")
+  limit      PromotionLimit @default(EACH)
+  /// First business date it runs on.
+  startsOn   DateTime       @map("starts_on") @db.Date
+  /// Last business date it runs on, inclusive. Null runs until switched off.
+  endsOn     DateTime?      @map("ends_on") @db.Date
+  isActive   Boolean        @default(true) @map("is_active")
+  sortOrder  Int            @default(0) @map("sort_order")
+  createdAt  DateTime       @default(now()) @map("created_at")
+
+  business Business          @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  targets  PromotionTarget[]
+
+  @@unique([businessId, id])
+  @@index([businessId, startsOn])
+  @@map("promotions")
+}
+
+/// What an item or combo promo applies to: one product or a whole category.
+/// For a combo, `quantity` is how many of it the combo needs.
+model PromotionTarget {
+  id          String  @id @default(uuid())
+  businessId  String  @map("business_id")
+  promotionId String  @map("promotion_id")
+  productId   String? @map("product_id")
+  categoryId  String? @map("category_id")
+  quantity    Int     @default(1)
+  sortOrder   Int     @default(0) @map("sort_order")
+
+  promotion Promotion @relation(fields: [businessId, promotionId], references: [businessId, id], onDelete: Cascade)
+  product   Product?  @relation(fields: [businessId, productId], references: [businessId, id], onDelete: Cascade)
+  category  Category? @relation(fields: [businessId, categoryId], references: [businessId, id], onDelete: Cascade)
+
+  @@index([promotionId])
+  @@map("promotion_targets")
 }
 
 // ---------------------------------------------------------------------------
@@ -209,9 +292,10 @@ model Category {
   sortOrder  Int      @default(0) @map("sort_order")
   createdAt  DateTime @default(now()) @map("created_at")
 
-  brand      Brand       @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
-  products   Product[]
-  orderItems OrderItem[]
+  brand            Brand             @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+  products         Product[]
+  orderItems       OrderItem[]
+  promotionTargets PromotionTarget[]
 
   @@unique([businessId, id])
   @@unique([brandId, name])
@@ -233,10 +317,11 @@ model Product {
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  brand          Brand           @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
-  category       Category        @relation(fields: [businessId, categoryId], references: [businessId, id], onDelete: Restrict)
-  modifierGroups ModifierGroup[]
-  orderItems     OrderItem[]
+  brand            Brand             @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+  category         Category          @relation(fields: [businessId, categoryId], references: [businessId, id], onDelete: Restrict)
+  modifierGroups   ModifierGroup[]
+  orderItems       OrderItem[]
+  promotionTargets PromotionTarget[]
 
   @@unique([businessId, id])
   @@index([brandId])
@@ -592,6 +677,9 @@ model AccountSettings {
   /// Partner settlement: two brands, each owned by a partner, with a monthly
   /// payout between them. Off for a new business; a solo shop never sees it.
   settlementEnabled     Boolean  @default(false) @map("settlement_enabled")
+  /// When one trading day ends and the next begins, 0–12 (hour of the morning,
+  /// Malaysia time). A 1am sale with the default 5 counts for the night before.
+  dayRolloverHour       Int      @default(5) @map("day_rollover_hour")
   /// Share of shared overheads borne by Food, 0–100. Drinks takes the rest.
   sharedOverheadFoodPct Int      @map("shared_overhead_food_pct")
   /// The host's cut of the Food net result, 0–100.

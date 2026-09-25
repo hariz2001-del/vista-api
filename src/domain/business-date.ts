@@ -1,13 +1,17 @@
+import type { Tx } from '../db.ts'
+
 const BUSINESS_TIME_ZONE = 'Asia/Kuala_Lumpur'
 
 /**
  * Trading days do not start at midnight. Service runs roughly 8pm to 3am, so a
  * 1am sale belongs to the evening that opened the night before.
  *
- * The cutoff is 5am: late enough to cover a shift that overruns, early enough
- * that nobody is trading through it. This must stay byte-for-byte in agreement
- * with the POS's own implementation, since an offline tablet stamps its own
- * business date with no server to ask.
+ * The default cutoff is 5am: late enough to cover a shift that overruns, early
+ * enough that nobody is trading through it. Each business can set its own
+ * (`account_settings.day_rollover_hour`); the counter is told it in the
+ * bootstrap. This must stay byte-for-byte in agreement with the POS's own
+ * implementation, since an offline tablet stamps its own business date with
+ * no server to ask.
  */
 const CUTOFF_HOUR = 5
 
@@ -55,6 +59,12 @@ export function getBusinessDate(date: Date, cutoffHour = CUTOFF_HOUR): string {
   // Midday UTC, so the arithmetic cannot slip a day across a timezone edge.
   const priorDay = new Date(Date.UTC(parts.year, parts.month - 1, parts.day - 1, 12))
   return isoDate(priorDay.getUTCFullYear(), priorDay.getUTCMonth() + 1, priorDay.getUTCDate())
+}
+
+/** Today's business date for one business, by its own rollover hour (5am unless it set another). */
+export async function businessToday(client: Tx, businessId: string): Promise<string> {
+  const settings = await client.accountSettings.findUnique({ where: { businessId } })
+  return getBusinessDate(new Date(), settings?.dayRolloverHour ?? CUTOFF_HOUR)
 }
 
 /**

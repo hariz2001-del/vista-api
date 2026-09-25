@@ -158,6 +158,7 @@ async function main(): Promise<void> {
   // before either. This clears every business, not only the demo one: the seed
   // is for a development or test database, never a live one.
   await prisma.handoffCode.deleteMany()
+  await prisma.promotion.deleteMany()
   await prisma.session.deleteMany()
   await prisma.partner.deleteMany()
   await prisma.expense.deleteMany()
