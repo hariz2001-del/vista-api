@@ -38,6 +38,7 @@ export async function bootstrapRoutes(app: FastifyInstance): Promise<void> {
       db.promotion.findMany({
         where: { isActive: true, OR: [{ endsOn: null }, { endsOn: { gte: yesterday } }] },
         orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+        include: { targets: true },
       }),
     ])
 
@@ -50,6 +51,14 @@ export async function bootstrapRoutes(app: FastifyInstance): Promise<void> {
           name: wire.name,
           kind: wire.kind,
           value: wire.value,
+          scope: wire.scope,
+          auto_apply: wire.autoApply,
+          limit: wire.limit,
+          targets: wire.targets.map((target) => ({
+            product_id: target.productId,
+            category_id: target.categoryId,
+            quantity: target.quantity,
+          })),
           starts_on: wire.startsOn,
           ends_on: wire.endsOn,
         }

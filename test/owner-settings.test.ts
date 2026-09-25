@@ -106,6 +106,95 @@ describe('promotions', () => {
   })
 })
 
+describe('promotion rules', () => {
+  async function setUp() {
+    const b = await makeBusiness(app)
+    const category = await prisma.category.findFirstOrThrow({ where: { businessId: b.businessId } })
+    const product = await prisma.product.create({
+      data: { businessId: b.businessId, brandId: category.brandId, categoryId: category.id, name: 'Kopi', basePriceSen: 500 },
+    })
+    return { b, category, product, today: getBusinessDate(new Date()) }
+  }
+
+  it('saves item and combo promos with their targets, and hands them to the counter', async () => {
+    const { b, category, product, today } = await setUp()
+    const items = await call(b.ownerToken, 'POST', '/rms/promotions', {
+      name: 'Kopi RM1 off',
+      kind: 'AMOUNT',
+      value: 100,
+      scope: 'ITEMS',
+      autoApply: false,
+      limit: 'EACH',
+      targets: [{ productId: product.id }],
+      startsOn: today,
+      endsOn: null,
+    })
+    expect(items.statusCode, items.body).toBe(200)
+    // Item promos always apply by themselves, whatever was sent.
+    expect(items.json()).toMatchObject({ scope: 'ITEMS', autoApply: true, targets: [{ productId: product.id, quantity: 1 }] })
+
+    const combo = await call(b.ownerToken, 'POST', '/rms/promotions', {
+      name: 'Pair deal',
+      kind: 'AMOUNT',
+      value: 200,
+      scope: 'COMBO',
+      limit: 'ONCE_PER_ORDER',
+      targets: [{ productId: product.id, quantity: 2 }, { categoryId: category.id }],
+      startsOn: today,
+      endsOn: null,
+    })
+    expect(combo.statusCode, combo.body).toBe(200)
+
+    const boot = (await call(b.counterToken, 'GET', '/bootstrap')).json() as {
+      promotions: Array<{ name: string; scope: string; auto_apply: boolean; limit: string; targets: unknown[] }>
+    }
+    expect(boot.promotions.find((promo) => promo.name === 'Pair deal')).toMatchObject({
+      scope: 'COMBO',
+      auto_apply: true,
+      limit: 'ONCE_PER_ORDER',
+      targets: [
+        { product_id: product.id, category_id: null, quantity: 2 },
+        { product_id: null, category_id: category.id, quantity: 1 },
+      ],
+    })
+  })
+
+  it('refuses targets on a whole-order promo, none on an item promo, and half-made targets', async () => {
+    const { b, product, today } = await setUp()
+    const base = { kind: 'PERCENT', value: 10, startsOn: today, endsOn: null }
+    for (const [label, body] of [
+      ['order with targets', { ...base, name: 'x', scope: 'ORDER', targets: [{ productId: product.id }] }],
+      ['items without targets', { ...base, name: 'x', scope: 'ITEMS', targets: [] }],
+      ['target with both', { ...base, name: 'x', scope: 'ITEMS', targets: [{ productId: product.id, categoryId: product.categoryId }] }],
+      ['target with neither', { ...base, name: 'x', scope: 'ITEMS', targets: [{ quantity: 2 }] }],
+    ] as const) {
+      expect((await call(b.ownerToken, 'POST', '/rms/promotions', body)).statusCode, label).toBe(400)
+    }
+  })
+
+  it('will not target another business’s items', async () => {
+    const { b, today } = await setUp()
+    const demoProduct = await prisma.product.findFirstOrThrow({ where: { businessId: DEMO.businessId } })
+    const response = await call(b.ownerToken, 'POST', '/rms/promotions', {
+      name: 'Sneaky', kind: 'PERCENT', value: 10, scope: 'ITEMS', targets: [{ productId: demoProduct.id }], startsOn: today, endsOn: null,
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.json()).toMatchObject({ error: 'promo:UNKNOWN_TARGET' })
+    expect(await prisma.promotion.count({ where: { name: 'Sneaky' } })).toBe(0)
+  })
+
+  it('drops a deleted item out of the promos that named it', async () => {
+    const { b, product, category, today } = await setUp()
+    await call(b.ownerToken, 'POST', '/rms/promotions', {
+      name: 'Both', kind: 'PERCENT', value: 10, scope: 'ITEMS',
+      targets: [{ productId: product.id }, { categoryId: category.id }], startsOn: today, endsOn: null,
+    })
+    expect((await call(b.ownerToken, 'DELETE', `/rms/products/${product.id}`)).statusCode).toBe(200)
+    const promo = await prisma.promotion.findFirstOrThrow({ where: { name: 'Both' }, include: { targets: true } })
+    expect(promo.targets.map((target) => target.categoryId)).toEqual([category.id])
+  })
+})
+
 describe('partners', () => {
   it('lets the owner say which partner owns which brand, keeping the roles with the brands', async () => {
     const owner = await loginOwner(app)

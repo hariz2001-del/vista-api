@@ -85,6 +85,7 @@ export const MESSAGES: Record<string, string> = {
   'menu:LAST_BRAND': 'A business needs at least one brand.',
   'menu:INVALID_SELECTION': 'The minimum cannot be more than the maximum.',
   'promo:NOT_FOUND': 'That promotion no longer exists.',
+  'promo:UNKNOWN_TARGET': 'An item or category in that promotion is no longer on the menu.',
   'menu:ORDER_MISMATCH': 'The menu changed while you were arranging it. It has been reloaded — try again.',
 
   'validation:INVALID_REQUEST': 'Something about that request was not valid.',

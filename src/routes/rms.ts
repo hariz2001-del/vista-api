@@ -175,7 +175,10 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         where: { scope: 'COUNTER', revokedAt: null },
         orderBy: { createdAt: 'asc' },
       }),
-      db.promotion.findMany({ orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] }),
+      db.promotion.findMany({
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+        include: { targets: true },
+      }),
     ])
 
     const current = settings ?? DEFAULT_SETTINGS
