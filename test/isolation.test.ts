@@ -644,6 +644,94 @@ describe('menu builder', () => {
     expect(sameName.statusCode).toBe(200)
   })
 
+  it('copies an option group onto another item as its own copy', async () => {
+    const b = await makeBusiness(app)
+    const first = await stockMenu(b, 500)
+    const group = await call(b.ownerToken, 'POST', `/rms/products/${first}/groups`, {
+      name: 'Size',
+      minSelect: 1,
+      maxSelect: 1,
+    })
+    const groupId = (group.json() as { id: string }).id
+    for (const [name, priceSen] of [['Regular', 0], ['Large', 150]] as const) {
+      await call(b.ownerToken, 'POST', `/rms/groups/${groupId}/options`, { name, priceSen })
+    }
+
+    // A second item, created with the first one's group copied on.
+    const category = (await snapshotOf(b.ownerToken)).categories[0]
+    const created = await call(b.ownerToken, 'POST', '/rms/products', {
+      categoryId: category?.id,
+      name: 'Teh Tarik',
+      basePriceSen: 400,
+      copyGroupIds: [groupId],
+    })
+    expect(created.statusCode, created.body).toBe(200)
+    const second = (created.json() as { id: string }).id
+
+    // A third, given it afterwards.
+    const third = await stockMenu(b, 300)
+    const copied = await call(b.ownerToken, 'POST', `/rms/products/${third}/groups/copy`, { groupId })
+    expect(copied.statusCode).toBe(200)
+
+    type Menu = Array<{
+      id: string
+      modifierGroups: Array<{ id: string; name: string; minSelect: number; options: Array<{ name: string; priceSen: number }> }>
+    }>
+    const products = (await snapshotOf(b.ownerToken)).products as unknown as Menu
+    for (const id of [second, third]) {
+      const [copy] = products.find((product) => product.id === id)?.modifierGroups ?? []
+      expect(copy).toMatchObject({ name: 'Size', minSelect: 1 })
+      expect(copy?.id).not.toBe(groupId)
+      expect(copy?.options.map((option) => [option.name, option.priceSen])).toEqual([
+        ['Regular', 0],
+        ['Large', 150],
+      ])
+    }
+
+    // Changing the original leaves the copies alone.
+    await call(b.ownerToken, 'PATCH', `/rms/groups/${groupId}`, { name: 'Cup' })
+    const after = (await snapshotOf(b.ownerToken)).products as unknown as Menu
+    expect(after.find((product) => product.id === second)?.modifierGroups[0]?.name).toBe('Size')
+  })
+
+  it('will not copy another business’s option group', async () => {
+    const b = await makeBusiness(app)
+    const productId = await stockMenu(b)
+    const demoGroup = await prisma.modifierGroup.findFirstOrThrow({
+      where: { businessId: DEMO.businessId },
+    })
+
+    const copy = await call(b.ownerToken, 'POST', `/rms/products/${productId}/groups/copy`, {
+      groupId: demoGroup.id,
+    })
+    expect(copy.statusCode).toBe(404)
+
+    const category = (await snapshotOf(b.ownerToken)).categories[0]
+    const create = await call(b.ownerToken, 'POST', '/rms/products', {
+      categoryId: category?.id,
+      name: 'Should not exist',
+      basePriceSen: 100,
+      copyGroupIds: [demoGroup.id],
+    })
+    expect(create.statusCode).toBe(404)
+    // All or nothing: the item was not created without its groups.
+    expect(await prisma.product.count({ where: { name: 'Should not exist' } })).toBe(0)
+  })
+
+  it('moves an item to another category, and with it to that category’s brand', async () => {
+    const b = await makeBusiness(app)
+    const productId = await stockMenu(b)
+    const drinks = await call(b.ownerToken, 'POST', '/rms/brands', { name: 'Drinks', colour: '#087f8c' })
+    const drinksId = (drinks.json() as { id: string }).id
+    const cold = await call(b.ownerToken, 'POST', '/rms/categories', { brandId: drinksId, name: 'Cold' })
+    const coldId = (cold.json() as { id: string }).id
+
+    const move = await call(b.ownerToken, 'PATCH', `/rms/products/${productId}`, { categoryId: coldId })
+    expect(move.statusCode).toBe(200)
+    const moved = await prisma.product.findUniqueOrThrow({ where: { id: productId } })
+    expect(moved).toMatchObject({ categoryId: coldId, brandId: drinksId })
+  })
+
   it('will not delete the last brand', async () => {
     const b = await makeBusiness(app)
     const brand = (await snapshotOf(b.ownerToken)).brands[0]

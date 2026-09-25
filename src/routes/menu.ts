@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { requireOwner } from '../auth.ts'
+import type { Tx } from '../db.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
 
 /**
@@ -33,7 +34,11 @@ const productCreate = z.object({
   description: z.string().trim().max(200).default(''),
   basePriceSen: PRICE,
   imageUrl: z.string().trim().url().max(500).nullish(),
+  /** Option groups of other items to copy onto the new one, e.g. the category's usual sizes. */
+  copyGroupIds: z.array(ID).max(20).default([]),
 })
+
+const groupCopy = z.object({ groupId: ID })
 const productUpdate = z.object({
   categoryId: ID.optional(),
   name: NAME.optional(),
@@ -82,6 +87,49 @@ function translate(error: unknown): never {
 
 function assertSelection(minSelect: number, maxSelect: number): void {
   if (minSelect > maxSelect) throw badRequest('menu:INVALID_SELECTION')
+}
+
+/**
+ * Copy an option group, with all its options, onto a product. The copy is its
+ * own group: editing the original later does not change it, and a past sale's
+ * modifiers keep pointing at the options it was actually sold with.
+ *
+ * `tx` is business-scoped, so a group id from another business reads as not
+ * found. Goes last among the product's groups.
+ */
+async function copyGroup(
+  tx: Tx,
+  businessId: string,
+  sourceGroupId: string,
+  productId: string,
+): Promise<string> {
+  const source = await tx.modifierGroup.findUnique({
+    where: { id: sourceGroupId },
+    include: { items: { orderBy: { sortOrder: 'asc' } } },
+  })
+  if (!source) throw notFound('menu:GROUP_NOT_FOUND')
+
+  const count = await tx.modifierGroup.count({ where: { productId } })
+  const copy = await tx.modifierGroup.create({
+    data: {
+      businessId,
+      productId,
+      name: source.name,
+      description: source.description,
+      minSelect: source.minSelect,
+      maxSelect: source.maxSelect,
+      sortOrder: count + 1,
+      items: {
+        create: source.items.map((item) => ({
+          name: item.name,
+          priceSen: item.priceSen,
+          type: item.type,
+          sortOrder: item.sortOrder,
+        })),
+      },
+    },
+  })
+  return copy.id
 }
 
 type Params = { Params: { id: string } }
@@ -194,22 +242,41 @@ export async function menuRoutes(app: FastifyInstance): Promise<void> {
     const category = await db.category.findUnique({ where: { id: body.categoryId } })
     if (!category) throw notFound('menu:CATEGORY_NOT_FOUND')
 
-    const last = await db.product.findFirst({ orderBy: { sortOrder: 'desc' } })
-    const product = await db.product
-      .create({
-        data: {
-          businessId,
-          brandId: category.brandId,
-          categoryId: category.id,
-          name: body.name,
-          description: body.description,
-          basePriceSen: body.basePriceSen,
-          imageUrl: body.imageUrl ?? null,
-          sortOrder: (last?.sortOrder ?? 0) + 1,
-        },
-      })
-      .catch(translate)
-    return { id: product.id }
+    // The item and any option groups copied onto it land together or not at all.
+    return db.$transaction(async (tx) => {
+      const last = await tx.product.findFirst({ orderBy: { sortOrder: 'desc' } })
+      const product = await tx.product
+        .create({
+          data: {
+            businessId,
+            brandId: category.brandId,
+            categoryId: category.id,
+            name: body.name,
+            description: body.description,
+            basePriceSen: body.basePriceSen,
+            imageUrl: body.imageUrl ?? null,
+            sortOrder: (last?.sortOrder ?? 0) + 1,
+          },
+        })
+        .catch(translate)
+      for (const groupId of new Set(body.copyGroupIds)) {
+        await copyGroup(tx, businessId, groupId, product.id)
+      }
+      return { id: product.id }
+    })
+  })
+
+  /** Copy another item's option group, with its options, onto this item. */
+  app.post<Params>('/rms/products/:id/groups/copy', owner, async (request) => {
+    const productId = ID.parse(request.params.id)
+    const { groupId } = groupCopy.parse(request.body)
+    const { db, businessId } = request
+    return db.$transaction(async (tx) => {
+      if (!(await tx.product.findUnique({ where: { id: productId } }))) {
+        throw notFound('rms:PRODUCT_NOT_FOUND')
+      }
+      return { id: await copyGroup(tx, businessId, groupId, productId) }
+    })
   })
 
   /**
