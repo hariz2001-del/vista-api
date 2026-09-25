@@ -10,8 +10,8 @@ Expenses, the cashflow ledger reporting, partner settlement and period closure a
 ## Running it
 
 ```bash
-npm install
-npm run db:up          # Postgres 16 in Docker, bound to 127.0.0.1:5432
+npm install            # also runs prisma generate
+npm run db:up          # Postgres 16 in Docker, bound to 127.0.0.1:5433
 cp .env.example .env
 npx prisma migrate dev
 npm run seed
@@ -19,7 +19,11 @@ npm run dev            # http://127.0.0.1:3000
 npm run check          # oxlint + tsc + vitest
 ```
 
-Demo credentials come from the seed: `demo@vistahub.my` / `vista`, counter PIN `1234`.
+Production runs on Vercel (the API) and Supabase (the database). Local work and the
+tests never touch either — see [deploy/README.md](deploy/README.md).
+
+The seed creates one account, `demo@vistahub.my`, with the password and counter
+PIN you set as `SEED_PASSWORD` and `SEED_PIN` in `.env`.
 
 ## Endpoints
 

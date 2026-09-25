@@ -5,3 +5,6 @@ dist/
 .pgdata/
 *.log
 *.tsbuildinfo
+.vercel
+
+.env*

@@ -1,8 +1,13 @@
 import type { FastifyInstance } from 'fastify'
-import { buildApp } from '../src/app.ts'
+import { buildApp } from '../src/build-app.ts'
 import { prisma } from '../src/db.ts'
 
-export const DEMO = { email: 'demo@vistahub.my', password: 'vista', pin: '1234' }
+// Whatever the seed was given. vitest.config.ts guarantees both are set.
+export const DEMO = {
+  email: 'demo@vistahub.my',
+  password: process.env.SEED_PASSWORD as string,
+  pin: process.env.SEED_PIN as string,
+}
 
 /**
  * Clear everything transactional but leave the catalogue alone — the catalogue
@@ -20,6 +25,8 @@ export async function resetTransactional(): Promise<void> {
   await prisma.order.deleteMany()
   await prisma.shift.deleteMany()
   await prisma.queueCounter.deleteMany()
+  // Guessing limits live in the database now, so they outlast a test run.
+  await prisma.attemptCounter.deleteMany()
 }
 
 export async function makeApp(): Promise<FastifyInstance> {

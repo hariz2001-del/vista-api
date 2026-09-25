@@ -25,10 +25,19 @@ if (testUrl.pathname === new URL(devUrl).pathname) {
   throw new Error('The test database must not be the development database.')
 }
 
+const seedPassword = process.env.SEED_PASSWORD
+const seedPin = process.env.SEED_PIN
+if (!seedPassword || !seedPin) {
+  throw new Error('SEED_PASSWORD and SEED_PIN are not set — copy .env.example to .env')
+}
+
 // Set in this process, so global-setup and every test worker agree on one URL.
 // The dev URL is kept separately only so global-setup can issue CREATE DATABASE.
 process.env.VISTA_ADMIN_DATABASE_URL = devUrl
 process.env.DATABASE_URL = testUrl.toString()
+// Prisma Migrate connects through DIRECT_URL. Left pointing at the dev database,
+// global-setup's `migrate deploy` would migrate that instead of the test one.
+process.env.DIRECT_URL = testUrl.toString()
 
 export default defineConfig({
   test: {
@@ -39,7 +48,12 @@ export default defineConfig({
     // them interfere with each other.
     fileParallelism: false,
     sequence: { concurrent: false },
-    env: { NODE_ENV: 'test', DATABASE_URL: testUrl.toString() },
+    env: {
+      NODE_ENV: 'test',
+      DATABASE_URL: testUrl.toString(),
+      SEED_PASSWORD: seedPassword,
+      SEED_PIN: seedPin,
+    },
     testTimeout: 30_000,
     hookTimeout: 60_000,
   },

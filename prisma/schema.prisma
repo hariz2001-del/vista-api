@@ -15,13 +15,22 @@
 // predecessor project kept a Prisma schema as documentation alongside manual
 // SQL and the two silently drifted apart.
 
+// On Supabase the two URLs are different doors into the same database:
+//  * DATABASE_URL — the transaction pooler (port 6543). The API's queries go
+//    through it, because serverless functions open connections by the dozen.
+//  * DIRECT_URL — the session pooler (port 5432). Prisma Migrate needs a real
+//    session, which the transaction pooler cannot give it.
+// Locally both point at the same Docker database.
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 generator client {
   provider = "prisma-client-js"
+  // "native" for this machine; rhel-openssl-3.0.x is what Vercel's functions run.
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 // ---------------------------------------------------------------------------
@@ -669,4 +678,22 @@ model Partner {
   brand Brand @relation(fields: [brandId], references: [id], onDelete: Restrict)
 
   @@map("partners")
+}
+
+// ---------------------------------------------------------------------------
+// Guessing limits
+// ---------------------------------------------------------------------------
+
+/// Wrong-password and wrong-PIN attempts, one row per client per route. In the
+/// database rather than memory because the API runs as serverless functions that
+/// share no memory and are recycled at will (src/attempts.ts). A row is useless
+/// once `resetAt` passes and is cleared on the next attempt.
+model AttemptCounter {
+  /// `<method> <route> <client address>`.
+  key     String   @id
+  count   Int
+  resetAt DateTime @map("reset_at") @db.Timestamptz(3)
+
+  @@index([resetAt])
+  @@map("attempt_counters")
 }

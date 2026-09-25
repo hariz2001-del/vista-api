@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { prisma } from '../src/db.ts'
 import { businessDateToUtc, getBusinessDate } from '../src/domain/business-date.ts'
 import {
+  DEMO,
   authed,
   checkoutPayload,
   login,
@@ -58,7 +59,7 @@ describe('shift open', () => {
       method: 'POST',
       url: '/shifts/open',
       headers: authed(token),
-      payload: { pin: '1234' },
+      payload: { pin: DEMO.pin },
     })
     expect(response.statusCode).toBe(409)
     expect(response.json()).toMatchObject({ error: 'shift:ALREADY_OPEN' })
@@ -100,7 +101,7 @@ describe('shift close', () => {
       })
     }
 
-    const response = await close(shiftId, { pin: '1234' })
+    const response = await close(shiftId, { pin: DEMO.pin })
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({
@@ -129,7 +130,7 @@ describe('shift close', () => {
 
     // An older client may still send a declared figure. It is accepted and ignored.
     const response = await close(shiftId, {
-      pin: '1234',
+      pin: DEMO.pin,
       declared_bank_total_sen: 750,
     } as CloseRequest)
 
@@ -170,15 +171,15 @@ describe('shift close', () => {
     })
 
     // The bank received the discounted amount, so that is the figure recorded.
-    const response = await close(shiftId, { pin: '1234' })
+    const response = await close(shiftId, { pin: DEMO.pin })
     expect(response.json()).toMatchObject({ system_net_sales_sen: 600 })
   })
 
   it('refuses a second close', async () => {
     const shiftId = await openShift(app, token)
-    await close(shiftId, { pin: '1234' })
+    await close(shiftId, { pin: DEMO.pin })
 
-    const response = await close(shiftId, { pin: '1234' })
+    const response = await close(shiftId, { pin: DEMO.pin })
     expect(response.statusCode).toBe(409)
     expect(response.json()).toMatchObject({ error: 'shift:ALREADY_CLOSED' })
   })
@@ -187,7 +188,7 @@ describe('shift close', () => {
     const shiftId = await openShift(app, token)
 
     const response = await close(shiftId, {
-      pin: '1234',
+      pin: DEMO.pin,
       device_pending_count: 2,
     })
 

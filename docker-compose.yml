@@ -1,17 +1,26 @@
+# Local Postgres for development and tests. Production is Supabase; nothing
+# here is deployed. The password comes from .env, which Compose loads from this
+# directory automatically, so a plain `docker compose up -d` picks it up.
+#
+# Its own project, container name and port (5433), so it can run beside the ec2
+# copy's `vista-db` on 5432 without either touching the other.
+
+name: vista-supabase
+
 services:
   db:
     image: postgres:16-alpine
-    container_name: vista-db
+    container_name: vista-db-supabase
     restart: unless-stopped
     environment:
       POSTGRES_USER: vista
-      POSTGRES_PASSWORD: vista_local_dev
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: vista
       # Deterministic collation, so ORDER BY does not depend on the host locale.
       POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
     ports:
-      # Bound to loopback only. In production this port is never exposed off the box.
-      - "127.0.0.1:5432:5432"
+      # Bound to loopback only.
+      - "127.0.0.1:5433:5432"
     volumes:
       - ./.pgdata:/var/lib/postgresql/data
     healthcheck:
