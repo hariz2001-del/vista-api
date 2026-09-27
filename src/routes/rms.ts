@@ -164,7 +164,15 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       db.shift.findMany({ orderBy: { openedAt: 'asc' } }),
       db.order.findMany({
         orderBy: { completedAt: 'asc' },
-        include: { items: { include: { modifiers: true } } },
+        include: {
+          items: {
+            include: {
+              // The group name is not snapshotted on the sold option, so it is read
+              // through the live menu; a since-deleted option comes back without one.
+              modifiers: { include: { modifierItem: { select: { group: { select: { name: true } } } } } },
+            },
+          },
+        },
       }),
       db.saleCorrection.findMany({
         orderBy: { createdAt: 'asc' },
@@ -276,6 +284,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
           lineDiscountSen: item.lineDiscountSen,
           allocatedOrderDiscountSen: item.allocatedOrderDiscountSen,
           modifiers: item.modifiers.map((modifier) => ({
+            groupName: modifier.modifierItem?.group.name ?? null,
             name: modifier.name,
             priceSen: modifier.priceSen,
             type: modifier.type,
