@@ -162,7 +162,10 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       }),
       db.partner.findMany({ include: { brand: { select: { sortOrder: true } } } }),
       db.shift.findMany({ orderBy: { openedAt: 'asc' } }),
-      db.order.findMany({ orderBy: { completedAt: 'asc' }, include: { items: true } }),
+      db.order.findMany({
+        orderBy: { completedAt: 'asc' },
+        include: { items: { include: { modifiers: true } } },
+      }),
       db.saleCorrection.findMany({
         orderBy: { createdAt: 'asc' },
         include: { brandDeltas: true, originalOrder: { select: { queueNumber: true } } },
@@ -263,6 +266,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         needsReview: order.needsReview,
         reviewReason: order.reviewReason,
         lines: order.items.map((item) => ({
+          productId: item.productId,
           productName: item.productName,
           brandId: item.brandId,
           categoryId: item.categoryId,
@@ -271,6 +275,11 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
           modifierTotalSen: item.modifierTotalSen,
           lineDiscountSen: item.lineDiscountSen,
           allocatedOrderDiscountSen: item.allocatedOrderDiscountSen,
+          modifiers: item.modifiers.map((modifier) => ({
+            name: modifier.name,
+            priceSen: modifier.priceSen,
+            type: modifier.type,
+          })),
         })),
       })),
       corrections: corrections.map((correction) => ({
