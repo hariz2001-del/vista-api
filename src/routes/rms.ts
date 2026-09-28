@@ -5,6 +5,7 @@ import type { Tx } from '../db.ts'
 import { businessDateToUtc, businessToday } from '../domain/business-date.ts'
 import { openingDeficitFor, settlePeriod, splitShared } from '../domain/settlement.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
+import { itemsTotalSen, lineTotalSen } from '../domain/expense-items.ts'
 import { serialisePromotion } from './promotions.ts'
 import { shiftTakings } from './shifts.ts'
 
@@ -68,6 +69,16 @@ function ledgerCategoryFor(category: string): 'CAPITAL_ASSET' | 'OPERATING_EXPEN
   return category === 'CAPITAL_ASSET' ? 'CAPITAL_ASSET' : 'OPERATING_EXPENSE'
 }
 
+/** Blank means absent, so an emptied field stores null rather than "". */
+function optionalText(max: number) {
+  return z
+    .string()
+    .trim()
+    .max(max)
+    .nullish()
+    .transform((value) => (value ? value : null))
+}
+
 const expenseBody = z.object({
   businessDate: DATE,
   amountSen: z.number().int().positive(),
@@ -79,11 +90,36 @@ const expenseBody = z.object({
     'OPERATIONS',
     'MAINTENANCE',
     'CAPITAL_ASSET',
+    'ICE_GAS',
   ]),
   paidBy: z.enum(['STALL_FUNDS', 'PARTNER_FOOD', 'PARTNER_DRINKS']),
   brandId: ID.nullable(),
   foodSplitPct: z.number().int().min(0).max(100),
   description: z.string().trim().min(1).max(200),
+  // Receipt details. All optional: a quick lump sum sends none of them.
+  receiptNo: optionalText(60),
+  vendor: optionalText(120),
+  receiptTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+    .nullish()
+    .transform((value) => value ?? null),
+  paymentMethod: z
+    .enum(['CASH', 'DUITNOW_QR', 'DEBIT_CARD', 'BANK_TRANSFER'])
+    .nullish()
+    .transform((value) => value ?? null),
+  notes: optionalText(500),
+  items: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(120),
+        quantityMilli: z.number().int().positive().max(100_000_000),
+        unit: optionalText(20),
+        unitPriceSen: z.number().int().min(-10_000_000).max(100_000_000),
+      }),
+    )
+    .max(100)
+    .default([]),
 })
 
 const adjustmentBody = z.object({
@@ -179,7 +215,10 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         include: { brandDeltas: true, originalOrder: { select: { queueNumber: true } } },
       }),
       db.ledgerEntry.findMany({ orderBy: [{ businessDate: 'asc' }, { id: 'asc' }] }),
-      db.expense.findMany({ orderBy: [{ businessDate: 'desc' }, { createdAt: 'desc' }] }),
+      db.expense.findMany({
+        orderBy: [{ businessDate: 'desc' }, { createdAt: 'desc' }],
+        include: { items: { orderBy: { sortOrder: 'asc' } } },
+      }),
       db.periodClosure.findMany({ orderBy: { endDate: 'asc' } }),
       db.terminalStatus.findUnique({ where: { businessId } }),
       db.session.findMany({
@@ -332,6 +371,18 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         drinksAmountSen: expense.drinksAmountSen,
         description: expense.description,
         receiptUrl: expense.receiptUrl,
+        receiptNo: expense.receiptNo,
+        vendor: expense.vendor,
+        receiptTime: expense.receiptTime,
+        paymentMethod: expense.paymentMethod,
+        notes: expense.notes,
+        items: expense.items.map((item) => ({
+          name: item.name,
+          quantityMilli: item.quantityMilli,
+          unit: item.unit,
+          unitPriceSen: item.unitPriceSen,
+          totalSen: item.totalSen,
+        })),
         isSettled: expense.isSettled,
         isLocked: expense.isLocked,
       })),
@@ -381,6 +432,15 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
     const body = expenseBody.parse(request.body)
     const { db, businessId } = request
 
+    // Itemised: the lines are the receipt, so they must add up to the amount
+    // exactly. Recomputed here from quantity and price; the form is not trusted.
+    if (body.items.length > 0 && itemsTotalSen(body.items) !== body.amountSen) {
+      throw badRequest(
+        'rms:ITEMS_DO_NOT_ADD_UP',
+        `lines total ${itemsTotalSen(body.items)} sen, amount is ${body.amountSen} sen`,
+      )
+    }
+
     return db.$transaction(async (tx) => {
       await assertNotLocked(tx, body.businessDate)
 
@@ -417,8 +477,25 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
           foodAmountSen: foodSen,
           drinksAmountSen: drinksSen,
           description: body.description,
+          receiptNo: body.receiptNo,
+          vendor: body.vendor,
+          receiptTime: body.receiptTime,
+          paymentMethod: body.paymentMethod,
+          notes: body.notes,
           isSettled: body.paidBy === 'STALL_FUNDS',
           createdById: request.user.id,
+          // Nested through the composite key, so a line can only ever belong to
+          // an expense of the same business.
+          items: {
+            create: body.items.map((item, index) => ({
+              name: item.name,
+              quantityMilli: item.quantityMilli,
+              unit: item.unit,
+              unitPriceSen: item.unitPriceSen,
+              totalSen: lineTotalSen(item.quantityMilli, item.unitPriceSen),
+              sortOrder: index,
+            })),
+          },
         },
       })
 
