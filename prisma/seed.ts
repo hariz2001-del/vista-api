@@ -52,9 +52,9 @@ const SPICE_LEVEL: SeedGroup = {
   minSelect: 1,
   maxSelect: 1,
   options: [
-    { name: 'Not Spicy', priceSen: 0, type: 'REMOVAL' },
-    { name: 'Medium', priceSen: 0, type: 'REMOVAL' },
-    { name: 'Extra Spicy', priceSen: 0, type: 'REMOVAL' },
+    { name: 'Not Spicy', priceSen: 0, type: 'ADD_ON' },
+    { name: 'Medium', priceSen: 0, type: 'ADD_ON' },
+    { name: 'Extra Spicy', priceSen: 0, type: 'ADD_ON' },
   ],
 }
 
@@ -91,7 +91,7 @@ const CUP_SIZE: SeedGroup = {
   minSelect: 1,
   maxSelect: 1,
   options: [
-    { name: 'Regular', priceSen: 0, type: 'REMOVAL' },
+    { name: 'Regular', priceSen: 0, type: 'ADD_ON' },
     { name: 'Large', priceSen: 150, type: 'ADD_ON' },
   ],
 }

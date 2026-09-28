@@ -275,7 +275,8 @@ describe('new items with their own option groups', () => {
       ['Curry', 0, 3],
     ])
     expect(groups[0]?.items.map((item) => [item.name, item.priceSen, item.type])).toEqual([
-      ['Kosong', 0, 'REMOVAL'],
+      // A free option is not assumed to be a removal.
+      ['Kosong', 0, 'ADD_ON'],
       ['Telur', 100, 'ADD_ON'],
     ])
   })

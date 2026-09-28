@@ -302,8 +302,9 @@ export async function menuRoutes(app: FastifyInstance): Promise<void> {
               create: group.options.map((option, index) => ({
                 name: option.name,
                 priceSen: option.priceSen,
-                // An extra charge is an add-on; a free choice ("No ice") is not.
-                type: option.type ?? (option.priceSen > 0 ? 'ADD_ON' : 'REMOVAL'),
+                // Never guessed from the price: a free choice is as often a flavour
+                // ("Blue", "Regular") as a removal ("No ice"), and the name says which.
+                type: option.type ?? 'ADD_ON',
                 sortOrder: index + 1,
               })),
             },
