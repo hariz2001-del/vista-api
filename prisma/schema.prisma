@@ -705,6 +705,17 @@ enum ExpenseCategory {
   OPERATIONS
   MAINTENANCE
   CAPITAL_ASSET
+  /// Ice deliveries and gas tong refills: bought constantly, worth their own line.
+  ICE_GAS
+}
+
+/// How the money left, as printed or remembered. Informational: who paid
+/// (`PaymentSource`) is what moves the ledger.
+enum PaymentMethod {
+  CASH
+  DUITNOW_QR
+  DEBIT_CARD
+  BANK_TRANSFER
 }
 
 /// Who actually paid. A partner paying out of pocket creates a debt to them,
@@ -737,6 +748,14 @@ model Expense {
   drinksAmountSen Int             @map("drinks_amount_sen")
   description     String
   receiptUrl      String?         @map("receipt_url")
+  /// The supplier's own invoice or receipt number, for matching a dispute.
+  receiptNo       String?         @map("receipt_no")
+  vendor          String?
+  /// Time printed on the receipt, "HH:MM". The day is `businessDate`.
+  receiptTime     String?         @map("receipt_time")
+  paymentMethod   PaymentMethod?  @map("payment_method")
+  /// The owner's own remark for whoever audits this later.
+  notes           String?
   /// For a partner-paid expense: has the stall reimbursed them yet?
   isSettled       Boolean         @default(false) @map("is_settled")
   /// Set once the containing period has been closed and settled.
@@ -744,12 +763,36 @@ model Expense {
   createdById     String          @map("created_by_id")
   createdAt       DateTime        @default(now()) @map("created_at")
 
-  brand     Brand? @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
-  createdBy User   @relation("ExpensesCreated", fields: [businessId, createdById], references: [businessId, id], onDelete: Restrict)
+  brand     Brand?        @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+  createdBy User          @relation("ExpensesCreated", fields: [businessId, createdById], references: [businessId, id], onDelete: Restrict)
+  items     ExpenseItem[]
 
+  @@unique([businessId, id])
   @@index([businessId, businessDate])
   @@index([paidBy, isSettled])
   @@map("expenses")
+}
+
+/// One line of an itemised receipt. When an expense has lines, they sum
+/// exactly to its `amountSen` — the API refuses anything else.
+model ExpenseItem {
+  id            String  @id @default(uuid())
+  businessId    String  @map("business_id")
+  expenseId     String  @map("expense_id")
+  name          String
+  /// Thousandths of a unit, so 2.5 kg is 2500 and the money stays integer.
+  quantityMilli Int     @map("quantity_milli")
+  unit          String?
+  /// May be negative: a discount or the 5-sen rounding line.
+  unitPriceSen  Int     @map("unit_price_sen")
+  /// quantity × unit price, rounded half away from zero to the sen.
+  totalSen      Int     @map("total_sen")
+  sortOrder     Int     @default(0) @map("sort_order")
+
+  expense Expense @relation(fields: [businessId, expenseId], references: [businessId, id], onDelete: Cascade)
+
+  @@index([expenseId])
+  @@map("expense_items")
 }
 
 /// A settled period, frozen at the figures both partners were paid against.
