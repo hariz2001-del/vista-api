@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { requireUser } from '../auth.ts'
+import { closeStaleShift } from './shifts.ts'
 
 const heartbeatBody = z.object({
   /** Flush attempts in a row that failed to send something, as the tablet counts them. */
@@ -27,6 +28,9 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
       update: data,
       create: { businessId: request.businessId, ...data },
     })
-    return { ok: true }
+    // A tablet left on through the rollover: its shift closes within a minute
+    // of the day ending, and the reply tells it to start today's.
+    const closedShiftId = await closeStaleShift(request.db, request.businessId)
+    return { ok: true, shift_closed: closedShiftId !== null }
   })
 }
