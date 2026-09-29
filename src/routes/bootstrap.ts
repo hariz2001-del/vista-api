@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { requireUser } from '../auth.ts'
 import { businessDateToUtc, businessToday } from '../domain/business-date.ts'
 import { serialisePromotion } from './promotions.ts'
+import { closeStaleShift } from './shifts.ts'
 
 /**
  * Everything the terminal needs to run a shift, in one response.
@@ -13,6 +14,8 @@ import { serialisePromotion } from './promotions.ts'
 export async function bootstrapRoutes(app: FastifyInstance): Promise<void> {
   app.get('/bootstrap', { preHandler: requireUser }, async (request) => {
     const db = request.db
+    // A shift from a day that has ended is closed before the tablet sees it.
+    await closeStaleShift(db, request.businessId)
     const today = await businessToday(db, request.businessId)
     // From yesterday: a shift open past midnight still trades on the date it opened.
     const yesterday = new Date(businessDateToUtc(today).getTime() - 24 * 60 * 60_000)

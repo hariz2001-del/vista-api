@@ -1,3 +1,4 @@
+import type { PrismaClient } from '@prisma/client'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { attemptLimitConfig, type AttemptOptions } from '../attempts.ts'
@@ -52,6 +53,49 @@ export async function shiftTakings(
   return { orderCount, systemNetSalesSen }
 }
 
+/**
+ * Close the open shift if its business day is over.
+ *
+ * A shift belongs to one business day, and every sale takes that day. Left open
+ * past the owner's rollover hour ("trading day ends at"), it would file the next
+ * day's sales under the day before — which is what happened to a real stall's
+ * Saturday. So it is closed automatically the first time anything looks after
+ * the rollover: the tablet starting up, a shift being opened, or the tablet's
+ * once-a-minute heartbeat. Takings are computed exactly as at a cashier's close;
+ * no cashier is recorded as closing it.
+ *
+ * Returns the closed shift's id, or null when nothing was stale.
+ */
+export async function closeStaleShift(db: PrismaClient, businessId: string): Promise<string | null> {
+  const today = businessDateToUtc(await businessToday(db, businessId))
+  const stale = await db.shift.findFirst({ where: { status: 'OPEN', businessDate: { lt: today } } })
+  if (!stale) return null
+
+  return db.$transaction(async (tx) => {
+    // The same lock as checkout and the cashier's close, so a sale cannot land
+    // between the takings being counted and the shift being marked closed.
+    const locked = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+      SELECT id, status FROM shifts WHERE id = ${stale.id} AND business_id = ${businessId} FOR UPDATE
+    `
+    if (locked[0]?.status !== 'OPEN') return null
+
+    const { systemNetSalesSen } = await shiftTakings(tx, stale.id)
+    await tx.shift.update({
+      where: { id: stale.id },
+      data: {
+        status: 'CLOSED',
+        closedAt: new Date(),
+        closedById: null,
+        declaredBankTotalSen: null,
+        systemNetSalesSen,
+        varianceSen: null,
+        reconciliationStatus: 'NOT_REQUIRED',
+      },
+    })
+    return stale.id
+  })
+}
+
 async function assertPin(db: Tx, userId: string, pin: string): Promise<void> {
   const user = await db.user.findUnique({ where: { id: userId } })
   if (!user?.pinHash) throw badRequest('auth:NO_PIN_SET')
@@ -68,6 +112,9 @@ export async function shiftRoutes(app: FastifyInstance, options: AttemptOptions)
     const db = request.db
     await assertPin(db, request.user.id, pin)
 
+    // Yesterday's shift, never closed: close it now, so today's opens fresh
+    // rather than the cashier being quietly put back on yesterday's.
+    await closeStaleShift(db, request.businessId)
     const existing = await db.shift.findFirst({ where: { status: 'OPEN' } })
     if (existing) throw conflict('shift:ALREADY_OPEN')
 
