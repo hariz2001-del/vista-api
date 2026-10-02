@@ -97,7 +97,24 @@ function serialise(order: NonNullable<Awaited<ReturnType<typeof loadExisting>>>,
   }
 }
 
+const nextQueueQuery = z.object({
+  business_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+})
+
 export async function checkoutRoutes(app: FastifyInstance): Promise<void> {
+  /**
+   * The number the next sale will most likely get, so the cashier can write it
+   * on the cup before charging. A preview only: nothing is reserved, and another
+   * terminal checking out first takes it.
+   */
+  app.get('/checkout/next-queue-number', { preHandler: requireUser }, async (request) => {
+    const query = nextQueueQuery.parse(request.query)
+    const counter = await request.db.queueCounter.findFirst({
+      where: { businessDate: businessDateToUtc(query.business_date) },
+    })
+    return { queue_number: formatQueueNumber((counter?.currentVal ?? 0) + 1) }
+  })
+
   app.post('/checkout', { preHandler: requireUser }, async (request) => {
     const body = checkoutBody.parse(request.body)
     const userId = request.user.id
