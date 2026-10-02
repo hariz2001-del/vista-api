@@ -88,6 +88,16 @@ export const MESSAGES: Record<string, string> = {
   'promo:UNKNOWN_TARGET': 'An item or category in that promotion is no longer on the menu.',
   'menu:ORDER_MISMATCH': 'The menu changed while you were arranging it. It has been reloaded — try again.',
 
+  'team:ORG_NOT_FOUND': 'We could not find that workplace. Check the email or code with your manager.',
+  'team:INVALID_LOGIN': 'That name or PIN is not right. Try again, or ask your manager to reset your PIN.',
+  'team:AMBIGUOUS_NAME': 'More than one person has that name. Use your Staff ID instead.',
+  'team:STAFF_NOT_FOUND': 'That staff member no longer exists.',
+  'team:STAFF_CODE_TAKEN': 'Another staff member already has that Staff ID.',
+  'team:WORK_TYPE_NOT_FOUND': 'That work type no longer exists.',
+  'team:WORK_TYPE_NAME_TAKEN': 'A work type with that name already exists.',
+  'team:TARGET_ABOVE_MAX': 'The usual number of shifts cannot be more than the maximum.',
+  'team:ORG_CODE_TAKEN': 'Another workplace already uses that code. Pick a different one.',
+
   'validation:INVALID_REQUEST': 'Something about that request was not valid.',
   'server:UNEXPECTED': 'Something went wrong. The sale was not recorded — try again.',
 }

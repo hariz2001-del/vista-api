@@ -160,6 +160,31 @@ async function main(): Promise<void> {
   await prisma.handoffCode.deleteMany()
   await prisma.promotion.deleteMany()
   await prisma.session.deleteMany()
+  // The Team module. Paid payslips and the audit log refuse deletes by trigger,
+  // as they must on a live database; this transaction alone turns triggers off
+  // (a development or test database runs as a superuser) to wipe them.
+  await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL session_replication_role = replica`,
+    prisma.payslipLine.deleteMany(),
+    prisma.payrollAdjustment.deleteMany(),
+    prisma.payslip.deleteMany(),
+    prisma.attendanceRecord.deleteMany(),
+    prisma.replacementOffer.deleteMany(),
+    prisma.coverageRequest.deleteMany(),
+    prisma.assignment.deleteMany(),
+    prisma.shiftApplication.deleteMany(),
+    prisma.shiftSlot.deleteMany(),
+    prisma.rosterWeek.deleteMany(),
+    prisma.slotTemplate.deleteMany(),
+    prisma.closedPeriod.deleteMany(),
+    prisma.operatingHours.deleteMany(),
+    prisma.staffAttributes.deleteMany(),
+    prisma.staffCredential.deleteMany(),
+    prisma.staffMember.deleteMany(),
+    prisma.workType.deleteMany(),
+    prisma.teamSettings.deleteMany(),
+    prisma.teamAuditEntry.deleteMany(),
+  ])
   await prisma.partner.deleteMany()
   await prisma.expense.deleteMany()
   await prisma.periodClosure.deleteMany()

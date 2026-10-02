@@ -137,6 +137,10 @@ model Business {
   terminalStatus TerminalStatus?
   handoffCodes   HandoffCode[]
   promotions     Promotion[]
+  staffMembers   StaffMember[]
+  teamSettings   TeamSettings?
+  rosterWeeks    RosterWeek[]
+  teamAuditLog   TeamAuditEntry[]
 
   @@map("businesses")
 }
@@ -707,6 +711,8 @@ enum ExpenseCategory {
   CAPITAL_ASSET
   /// Ice deliveries and gas tong refills: bought constantly, worth their own line.
   ICE_GAS
+  /// Staff pay, written by paying a payslip (Team → Payroll), never typed in.
+  WAGES
 }
 
 /// How the money left, as printed or remembered. Informational: who paid
@@ -766,6 +772,8 @@ model Expense {
   brand     Brand?        @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
   createdBy User          @relation("ExpensesCreated", fields: [businessId, createdById], references: [businessId, id], onDelete: Restrict)
   items     ExpenseItem[]
+  /// Set when this expense is a paid payslip's wages.
+  payslip   Payslip?
 
   @@unique([businessId, id])
   @@index([businessId, businessDate])
@@ -855,6 +863,9 @@ enum SessionScope {
   /// vistahub.my, between signing in and picking an app. Can do exactly one
   /// thing — mint a handoff code — and lasts minutes.
   HUB
+  /// One staff member on team.vistahub.my: their own roster, applications,
+  /// attendance and pay. Refused by every /rms route and every counter route.
+  STAFF
 }
 
 /// One signed-in device. Every request checks its row, which is how signing
@@ -868,10 +879,15 @@ model Session {
   createdAt  DateTime     @default(now()) @map("created_at")
   lastUsedAt DateTime     @default(now()) @map("last_used_at")
   revokedAt  DateTime?    @map("revoked_at")
+  /// The staff member a STAFF session belongs to; `userId` is then the business
+  /// account they signed in under. Null for every other scope.
+  staffId    String?      @map("staff_id")
 
-  user User @relation(fields: [businessId, userId], references: [businessId, id], onDelete: Cascade)
+  user  User         @relation(fields: [businessId, userId], references: [businessId, id], onDelete: Cascade)
+  staff StaffMember? @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Restrict)
 
   @@index([businessId, scope, revokedAt])
+  @@index([staffId])
   @@map("sessions")
 }
 
@@ -936,4 +952,594 @@ model AttemptCounter {
 
   @@index([resetAt])
   @@map("attempt_counters")
+}
+
+// ---------------------------------------------------------------------------
+// Team — staff, rostering, attendance and payroll (TEAM-MODULE-PLAN.md)
+//
+// Three layers, kept apart on purpose:
+//  * the roster is what was PLANNED (roster weeks, slots, assignments);
+//  * attendance is what HAPPENED (clock in / out, approved by management);
+//  * payroll pays APPROVED attendance, never the roster.
+// A paid payslip is a snapshot and is never rewritten: a later change to the
+// attendance behind it becomes a payroll adjustment instead.
+// ---------------------------------------------------------------------------
+
+enum StaffStatus {
+  ACTIVE
+  /// Cannot sign in and is left out of rostering. History stays.
+  INACTIVE
+}
+
+enum StaffCredentialKind {
+  PIN
+}
+
+enum SoloSuitability {
+  SUITABLE
+  CAUTION
+  NOT_RECOMMENDED
+}
+
+enum TrainingStatus {
+  TRAINEE
+  TRAINED
+}
+
+enum RosterStatus {
+  DRAFT
+  APPLICATIONS_OPEN
+  APPLICATIONS_CLOSED
+  /// The engine has suggested a roster; nothing is visible to staff yet.
+  GENERATED
+  IN_REVIEW
+  /// Staff see their shifts. Active and Completed are derived from the dates.
+  PUBLISHED
+}
+
+enum ApplicationStatus {
+  APPLIED
+  WITHDRAWN
+}
+
+enum AssignmentStatus {
+  ACTIVE
+  /// The staff member pulled out themselves, before the deadline.
+  WITHDRAWN
+  /// Management took them off.
+  REMOVED
+}
+
+enum AssignmentSource {
+  AUTO
+  MANUAL
+  REPLACEMENT
+}
+
+enum CoverageStatus {
+  OPEN
+  FILLED
+  CANCELLED
+}
+
+enum OfferStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  /// Management confirmed it on the staff member's behalf (WhatsApp, a call…).
+  MANAGER_CONFIRMED
+  MANAGER_SKIPPED
+  /// The vacancy was filled or cancelled while this offer was waiting.
+  SUPERSEDED
+}
+
+enum AttendanceSource {
+  TEAM_APP
+  MANUAL
+}
+
+enum AttendanceStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PayslipStatus {
+  APPROVED
+  PAID
+}
+
+enum PayslipLineKind {
+  ATTENDANCE
+  ADJUSTMENT
+}
+
+enum AdjustmentStatus {
+  OPEN
+  INCLUDED
+  DISMISSED
+}
+
+enum PayFrequency {
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+enum RoundingMode {
+  FLOOR
+  NEAREST
+}
+
+/// A person who works shifts. Not a User: staff never hold the business
+/// account's email or password, only a PIN (see StaffCredential).
+model StaffMember {
+  id                String      @id @default(uuid())
+  businessId        String      @map("business_id")
+  name              String
+  /// The business's own staff number, e.g. "S012". Unique within the business.
+  staffCode         String      @map("staff_code")
+  status            StaffStatus @default(ACTIVE)
+  defaultWorkTypeId String?     @map("default_work_type_id")
+  /// What they can do, e.g. barista, kitchen. Matched against a slot's needs.
+  roleTags          String[]    @default([]) @map("role_tags")
+  createdAt         DateTime    @default(now()) @map("created_at")
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+
+  business        Business            @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  defaultWorkType WorkType?           @relation("DefaultWorkType", fields: [businessId, defaultWorkTypeId], references: [businessId, id], onDelete: Restrict)
+  credentials     StaffCredential[]
+  attributes      StaffAttributes?
+  sessions        Session[]
+  applications    ShiftApplication[]
+  assignments     Assignment[]
+  offers          ReplacementOffer[]
+  attendance      AttendanceRecord[]
+  payslips        Payslip[]
+  adjustments     PayrollAdjustment[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, staffCode])
+  @@index([businessId, status])
+  @@map("staff_members")
+}
+
+/// How a staff member proves who they are. Only hashes are stored. A separate
+/// table so a stronger method can be added beside the PIN later.
+model StaffCredential {
+  id         String              @id @default(uuid())
+  businessId String              @map("business_id")
+  staffId    String              @map("staff_id")
+  kind       StaffCredentialKind
+  secretHash String              @map("secret_hash")
+  setAt      DateTime            @default(now()) @map("set_at")
+
+  staff StaffMember @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Cascade)
+
+  @@unique([staffId, kind])
+  @@map("staff_credentials")
+}
+
+/// CONFIDENTIAL. Management's read of a staff member, used by the rostering
+/// engine. Its own table so that no staff-facing query can select it by
+/// accident; no /team route reads it at all.
+model StaffAttributes {
+  staffId            String          @id @map("staff_id")
+  businessId         String          @map("business_id")
+  /// 1–5, null for "not assessed".
+  reliability        Int?
+  capability         Int?
+  experience         Int?
+  soloSuitability    SoloSuitability @default(SUITABLE) @map("solo_suitability")
+  trainingStatus     TrainingStatus  @default(TRAINED) @map("training_status")
+  /// −2 … +2. A thumb on the scale, not a rule.
+  managementPriority Int             @default(0) @map("management_priority")
+  notes              String?
+  /// Future attributes, by name.
+  extra              Json            @default("{}")
+  updatedAt          DateTime        @updatedAt @map("updated_at")
+
+  staff StaffMember @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Cascade)
+
+  @@unique([businessId, staffId])
+  @@map("staff_attributes")
+}
+
+/// A kind of work with its own hourly rate: Regular RM 7, Training RM 5, …
+model WorkType {
+  id             String   @id @default(uuid())
+  businessId     String   @map("business_id")
+  name           String
+  rateSenPerHour Int      @map("rate_sen_per_hour")
+  description    String?
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  defaultFor  StaffMember[]      @relation("DefaultWorkType")
+  slots       ShiftSlot[]
+  templates   SlotTemplate[]
+  assignments Assignment[]
+  attendance  AttendanceRecord[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, name])
+  @@map("work_types")
+}
+
+/// A business's rostering and payroll rules. Every number the brief says must
+/// not be hardcoded lives here. A roster week copies what it needs when it is
+/// created, so changing these never rewrites a week already under way.
+model TeamSettings {
+  businessId              String       @id @map("business_id")
+  /// Shifts one staff member may apply for in a week.
+  applicationLimit        Int          @default(10) @map("application_limit")
+  /// The normal number of shifts ASSIGNED per staff member per week, and the caps.
+  assignmentTargetShifts  Int          @default(5) @map("assignment_target_shifts")
+  assignmentMaxShifts     Int          @default(7) @map("assignment_max_shifts")
+  assignmentMaxMinutes    Int          @default(2700) @map("assignment_max_minutes")
+  /// Staff may pull out of a shift until this many hours before it starts.
+  withdrawalDeadlineHours Int          @default(24) @map("withdrawal_deadline_hours")
+  /// A vacancy this close to its start is urgent coverage.
+  urgentCoverageHours     Int          @default(24) @map("urgent_coverage_hours")
+  /// Payable time is rounded to this many minutes (1 = exact).
+  payRoundingMinutes      Int          @default(30) @map("pay_rounding_minutes")
+  payRoundingMode         RoundingMode @default(FLOOR) @map("pay_rounding_mode")
+  payFrequency            PayFrequency @default(WEEKLY) @map("pay_frequency")
+  /// A day the pay cycle starts on, from which every period is counted.
+  payAnchorDate           DateTime     @default(dbgenerated("'2026-01-05'::date")) @map("pay_anchor_date") @db.Date
+  /// Payday is this many days after the period ends.
+  paydayOffsetDays        Int          @default(3) @map("payday_offset_days")
+  /// The rostering engine's weights, by name. See src/domain/rostering.ts.
+  engineWeights           Json         @default("{}") @map("engine_weights")
+  /// Optional short code staff can type instead of the business email.
+  orgCode                 String?      @unique @map("org_code")
+  updatedAt               DateTime     @updatedAt @map("updated_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@map("team_settings")
+}
+
+/// Normal opening hours, per weekday (0 = Monday … 6 = Sunday).
+model OperatingHours {
+  id         String  @id @default(uuid())
+  businessId String  @map("business_id")
+  weekday    Int
+  isClosed   Boolean @default(false) @map("is_closed")
+  /// "HH:MM". Closing at or before opening means after midnight.
+  opensAt    String  @map("opens_at")
+  closesAt   String  @map("closes_at")
+
+  @@unique([businessId, weekday])
+  @@map("operating_hours")
+}
+
+/// Days the business is shut: a holiday, a renovation.
+model ClosedPeriod {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  startDate  DateTime @map("start_date") @db.Date
+  endDate    DateTime @map("end_date") @db.Date
+  reason     String?
+
+  @@index([businessId, startDate])
+  @@map("closed_periods")
+}
+
+/// The usual week's shifts. A new roster week is stamped out from these and
+/// then edited freely.
+model SlotTemplate {
+  id            String   @id @default(uuid())
+  businessId    String   @map("business_id")
+  weekday       Int
+  /// "HH:MM". An end at or before the start means the shift runs past midnight.
+  startTime     String   @map("start_time")
+  endTime       String   @map("end_time")
+  requiredStaff Int      @default(1) @map("required_staff")
+  canRunSolo    Boolean  @default(true) @map("can_run_solo")
+  roleTags      String[] @default([]) @map("role_tags")
+  workTypeId    String?  @map("work_type_id")
+  label         String?
+
+  workType WorkType? @relation(fields: [businessId, workTypeId], references: [businessId, id], onDelete: Restrict)
+
+  @@index([businessId, weekday])
+  @@map("slot_templates")
+}
+
+/// One Monday-to-Sunday roster and everything about its application round.
+model RosterWeek {
+  id                      String       @id @default(uuid())
+  businessId              String       @map("business_id")
+  /// The Monday.
+  weekStart               DateTime     @map("week_start") @db.Date
+  status                  RosterStatus @default(DRAFT)
+  applicationsOpenAt      DateTime?    @map("applications_open_at")
+  applicationsCloseAt     DateTime?    @map("applications_close_at")
+  reviewDeadline          DateTime?    @map("review_deadline")
+  publishDeadline         DateTime?    @map("publish_deadline")
+  // Copied from TeamSettings when the week is created, editable per week.
+  applicationLimit        Int          @map("application_limit")
+  assignmentTargetShifts  Int          @map("assignment_target_shifts")
+  assignmentMaxShifts     Int          @map("assignment_max_shifts")
+  assignmentMaxMinutes    Int          @map("assignment_max_minutes")
+  withdrawalDeadlineHours Int          @map("withdrawal_deadline_hours")
+  generatedAt             DateTime?    @map("generated_at")
+  reviewedAt              DateTime?    @map("reviewed_at")
+  publishedAt             DateTime?    @map("published_at")
+  /// Bumped on every change to the week's slots or assignments.
+  version                 Int          @default(1)
+  createdAt               DateTime     @default(now()) @map("created_at")
+  updatedAt               DateTime     @updatedAt @map("updated_at")
+
+  business Business    @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  slots    ShiftSlot[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, weekStart])
+  @@map("roster_weeks")
+}
+
+/// One shift to be staffed. Times are real timestamps, so 16:30–21:00 is
+/// simply 4.5 hours and nothing assumes whole hours.
+model ShiftSlot {
+  id            String   @id @default(uuid())
+  businessId    String   @map("business_id")
+  rosterWeekId  String   @map("roster_week_id")
+  startsAt      DateTime @map("starts_at") @db.Timestamptz(3)
+  endsAt        DateTime @map("ends_at") @db.Timestamptz(3)
+  requiredStaff Int      @default(1) @map("required_staff")
+  canRunSolo    Boolean  @default(true) @map("can_run_solo")
+  roleTags      String[] @default([]) @map("role_tags")
+  workTypeId    String?  @map("work_type_id")
+  label         String?
+
+  rosterWeek   RosterWeek         @relation(fields: [businessId, rosterWeekId], references: [businessId, id], onDelete: Cascade)
+  workType     WorkType?          @relation(fields: [businessId, workTypeId], references: [businessId, id], onDelete: Restrict)
+  applications ShiftApplication[]
+  assignments  Assignment[]
+  coverage     CoverageRequest[]
+
+  @@unique([businessId, id])
+  @@index([rosterWeekId, startsAt])
+  @@map("shift_slots")
+}
+
+/// "I am willing to work this shift." Never a promise of being given it.
+model ShiftApplication {
+  id         String            @id @default(uuid())
+  businessId String            @map("business_id")
+  slotId     String            @map("slot_id")
+  staffId    String            @map("staff_id")
+  status     ApplicationStatus @default(APPLIED)
+  createdAt  DateTime          @default(now()) @map("created_at")
+  updatedAt  DateTime          @updatedAt @map("updated_at")
+
+  slot  ShiftSlot   @relation(fields: [businessId, slotId], references: [businessId, id], onDelete: Cascade)
+  staff StaffMember @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Restrict)
+
+  @@unique([slotId, staffId])
+  @@index([staffId])
+  @@map("shift_applications")
+}
+
+/// "This person works this shift." Visible to staff once the week is published.
+model Assignment {
+  id                 String           @id @default(uuid())
+  businessId         String           @map("business_id")
+  slotId             String           @map("slot_id")
+  staffId            String           @map("staff_id")
+  status             AssignmentStatus @default(ACTIVE)
+  source             AssignmentSource
+  /// Locked assignments are never moved by the engine.
+  isLocked           Boolean          @default(false) @map("is_locked")
+  /// Overrides the slot's and the staff member's work type for this shift.
+  workTypeId         String?          @map("work_type_id")
+  /// A one-off rate for this shift only. The work type's rate is untouched.
+  rateOverrideSen    Int?             @map("rate_override_sen")
+  rateOverrideReason String?          @map("rate_override_reason")
+  rateOverrideAt     DateTime?        @map("rate_override_at")
+  /// MANAGEMENT ONLY: why the engine chose this person.
+  explanation        String?
+  endedAt            DateTime?        @map("ended_at")
+  createdAt          DateTime         @default(now()) @map("created_at")
+  updatedAt          DateTime         @updatedAt @map("updated_at")
+
+  slot       ShiftSlot          @relation(fields: [businessId, slotId], references: [businessId, id], onDelete: Cascade)
+  staff      StaffMember        @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Restrict)
+  workType   WorkType?          @relation(fields: [businessId, workTypeId], references: [businessId, id], onDelete: Restrict)
+  vacancies  CoverageRequest[]
+  attendance AttendanceRecord[]
+
+  @@unique([businessId, id])
+  @@index([slotId, status])
+  @@index([staffId, status])
+  @@map("assignments")
+}
+
+/// A seat that came free on a published roster and needs someone.
+model CoverageRequest {
+  id                  String         @id @default(uuid())
+  businessId          String         @map("business_id")
+  slotId              String         @map("slot_id")
+  vacatedAssignmentId String?        @map("vacated_assignment_id")
+  isUrgent            Boolean        @default(false) @map("is_urgent")
+  status              CoverageStatus @default(OPEN)
+  createdAt           DateTime       @default(now()) @map("created_at")
+  resolvedAt          DateTime?      @map("resolved_at")
+
+  slot              ShiftSlot          @relation(fields: [businessId, slotId], references: [businessId, id], onDelete: Cascade)
+  vacatedAssignment Assignment?        @relation(fields: [businessId, vacatedAssignmentId], references: [businessId, id], onDelete: Restrict)
+  offers            ReplacementOffer[]
+
+  @@unique([businessId, id])
+  @@index([businessId, status])
+  @@map("coverage_requests")
+}
+
+/// One offer of a vacancy to one staff member, made in queue order.
+model ReplacementOffer {
+  id                String      @id @default(uuid())
+  businessId        String      @map("business_id")
+  coverageRequestId String      @map("coverage_request_id")
+  staffId           String      @map("staff_id")
+  /// Position in the replacement queue, 1 first.
+  rank              Int
+  status            OfferStatus @default(PENDING)
+  createdAt         DateTime    @default(now()) @map("created_at")
+  respondedAt       DateTime?   @map("responded_at")
+
+  coverageRequest CoverageRequest @relation(fields: [businessId, coverageRequestId], references: [businessId, id], onDelete: Cascade)
+  staff           StaffMember     @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Restrict)
+
+  @@unique([coverageRequestId, staffId])
+  @@index([staffId, status])
+  @@map("replacement_offers")
+}
+
+/// What actually happened. A clock-in is only a claim until management
+/// approves the times; only approved time is ever paid.
+model AttendanceRecord {
+  id              String           @id @default(uuid())
+  businessId      String           @map("business_id")
+  staffId         String           @map("staff_id")
+  /// The rostered shift this was for. Null for unrostered work.
+  assignmentId    String?          @map("assignment_id")
+  clockInAt       DateTime         @map("clock_in_at") @db.Timestamptz(3)
+  clockOutAt      DateTime?        @map("clock_out_at") @db.Timestamptz(3)
+  source          AttendanceSource
+  status          AttendanceStatus @default(PENDING)
+  /// The times management agreed to pay for. Default to the clocked times.
+  approvedStartAt DateTime?        @map("approved_start_at") @db.Timestamptz(3)
+  approvedEndAt   DateTime?        @map("approved_end_at") @db.Timestamptz(3)
+  /// For unrostered work, or to override the shift's work type.
+  workTypeId      String?          @map("work_type_id")
+  note            String?
+  /// Bumped on every edit, so a paid payslip can tell its snapshot is stale.
+  version         Int              @default(1)
+  approvedAt      DateTime?        @map("approved_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  staff       StaffMember         @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Restrict)
+  assignment  Assignment?         @relation(fields: [businessId, assignmentId], references: [businessId, id], onDelete: Restrict)
+  workType    WorkType?           @relation(fields: [businessId, workTypeId], references: [businessId, id], onDelete: Restrict)
+  adjustments PayrollAdjustment[]
+
+  @@unique([businessId, id])
+  @@index([businessId, clockInAt])
+  @@index([staffId, clockInAt])
+  @@map("attendance_records")
+}
+
+/// One staff member's pay for one pay period. A draft is never stored — it is
+/// worked out from approved attendance whenever it is viewed. Approving
+/// snapshots the lines; paying freezes them for good.
+model Payslip {
+  id            String        @id @default(uuid())
+  businessId    String        @map("business_id")
+  staffId       String        @map("staff_id")
+  periodStart   DateTime      @map("period_start") @db.Date
+  periodEnd     DateTime      @map("period_end") @db.Date
+  status        PayslipStatus @default(APPROVED)
+  totalMinutes  Int           @map("total_minutes")
+  totalSen      Int           @map("total_sen")
+  approvedAt    DateTime      @default(now()) @map("approved_at")
+  paidAt        DateTime?     @map("paid_at")
+  /// The business date the payment was booked on.
+  paidOn        DateTime?     @map("paid_on") @db.Date
+  expenseId     String?       @unique @map("expense_id")
+  ledgerEntryId BigInt?       @unique @map("ledger_entry_id")
+
+  staff       StaffMember         @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Restrict)
+  expense     Expense?            @relation(fields: [businessId, expenseId], references: [businessId, id], onDelete: Restrict)
+  lines       PayslipLine[]
+  adjustments PayrollAdjustment[] @relation("AdjustmentCause")
+  included    PayrollAdjustment[] @relation("AdjustmentIncluded")
+
+  @@unique([businessId, id])
+  @@unique([businessId, expenseId])
+  @@unique([businessId, staffId, periodStart, periodEnd])
+  @@index([businessId, periodStart])
+  @@map("payslips")
+}
+
+/// One snapshotted line of a payslip.
+model PayslipLine {
+  id                String          @id @default(uuid())
+  businessId        String          @map("business_id")
+  payslipId         String          @map("payslip_id")
+  kind              PayslipLineKind
+  attendanceId      String?         @map("attendance_id")
+  /// The attendance version this line was priced from.
+  attendanceVersion Int?            @map("attendance_version")
+  adjustmentId      String?         @map("adjustment_id")
+  workDate          DateTime        @map("work_date") @db.Date
+  clockInAt         DateTime?       @map("clock_in_at") @db.Timestamptz(3)
+  clockOutAt        DateTime?       @map("clock_out_at") @db.Timestamptz(3)
+  minutes           Int
+  workTypeName      String          @map("work_type_name")
+  rateSenPerHour    Int             @map("rate_sen_per_hour")
+  amountSen         Int             @map("amount_sen")
+  description       String?
+  sortOrder         Int             @default(0) @map("sort_order")
+
+  payslip Payslip @relation(fields: [businessId, payslipId], references: [businessId, id], onDelete: Cascade)
+
+  @@index([payslipId])
+  @@index([attendanceId])
+  @@map("payslip_lines")
+}
+
+/// Money a paid payslip got wrong, discovered later. Never folded silently
+/// into the paid record; management includes it in a later payslip or
+/// dismisses it.
+model PayrollAdjustment {
+  id                  String           @id @default(uuid())
+  businessId          String           @map("business_id")
+  staffId             String           @map("staff_id")
+  attendanceId        String?          @map("attendance_id")
+  causePayslipId      String?          @map("cause_payslip_id")
+  /// Positive: more is owed to the staff member. Negative: they were overpaid.
+  amountSen           Int              @map("amount_sen")
+  minutesDelta        Int              @default(0) @map("minutes_delta")
+  reason              String
+  status              AdjustmentStatus @default(OPEN)
+  includedInPayslipId String?          @map("included_in_payslip_id")
+  resolvedNote        String?          @map("resolved_note")
+  createdAt           DateTime         @default(now()) @map("created_at")
+  resolvedAt          DateTime?        @map("resolved_at")
+
+  staff      StaffMember       @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Restrict)
+  attendance AttendanceRecord? @relation(fields: [businessId, attendanceId], references: [businessId, id], onDelete: Restrict)
+  cause      Payslip?          @relation("AdjustmentCause", fields: [businessId, causePayslipId], references: [businessId, id], onDelete: Restrict)
+  includedIn Payslip?          @relation("AdjustmentIncluded", fields: [businessId, includedInPayslipId], references: [businessId, id], onDelete: Restrict)
+
+  @@index([businessId, status])
+  @@index([staffId])
+  @@map("payroll_adjustments")
+}
+
+/// Who did what in the Team module, and what it looked like before and after.
+/// Insert-only. Management only.
+model TeamAuditEntry {
+  id         BigInt   @id @default(autoincrement())
+  businessId String   @map("business_id")
+  /// OWNER, MANAGER, STAFF or SYSTEM.
+  actorKind  String   @map("actor_kind")
+  actorId    String?  @map("actor_id")
+  actorLabel String   @map("actor_label")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  before     Json?
+  after      Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@index([businessId, createdAt])
+  @@index([businessId, entityType, entityId])
+  @@map("team_audit_log")
 }

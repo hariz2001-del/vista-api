@@ -25,13 +25,17 @@ export function verifySecret(plain: string, hash: string): Promise<boolean> {
  *  - OWNER — the dashboard: everything, including the books. Expires.
  *  - HUB — vistahub.my between signing in and choosing an app. It can mint a
  *    handoff code and nothing else, and expires in minutes.
+ *  - STAFF — one staff member on team.vistahub.my: their own roster,
+ *    applications, attendance and pay, through /team routes only.
  */
-export type SessionScope = 'COUNTER' | 'OWNER' | 'HUB'
+export type SessionScope = 'COUNTER' | 'OWNER' | 'HUB' | 'STAFF'
 
 /** An owner session lasts a working day. A counter session has no expiry at all. */
 export const OWNER_SESSION_TTL = '12h'
 /** Long enough to pick an app, and to come back and pick the other one. */
 export const HUB_SESSION_TTL = '30m'
+/** A staff phone stays signed in for a month; a PIN reset ends it at once. */
+export const STAFF_SESSION_TTL = '30d'
 
 export type SessionUser = {
   id: string
@@ -55,6 +59,8 @@ declare module 'fastify' {
     businessId: string
     /** The database as that business sees it (src/db.ts). */
     db: PrismaClient
+    /** Set for a STAFF session only: the staff member, from the session row. */
+    staffId: string | undefined
   }
 }
 
@@ -65,6 +71,7 @@ export function signSession(
 ): string {
   if (payload.scope === 'OWNER') return sign(payload, { expiresIn: OWNER_SESSION_TTL })
   if (payload.scope === 'HUB') return sign(payload, { expiresIn: HUB_SESSION_TTL })
+  if (payload.scope === 'STAFF') return sign(payload, { expiresIn: STAFF_SESSION_TTL })
   return sign(payload)
 }
 
@@ -107,16 +114,19 @@ async function authenticate(request: FastifyRequest): Promise<void> {
 
   request.businessId = session.businessId
   request.db = forBusiness(session.businessId)
+  request.staffId = session.staffId ?? undefined
 }
 
 /**
  * The counter's routes: sales, corrections, shifts, the menu. A counter or an
- * owner session may call them. A hub session may not — it exists only to hand
- * the owner on to one of the two apps.
+ * owner session may call them. Nothing else may: a hub session exists only to
+ * hand the owner on to an app, and a staff session only ever reaches /team.
  */
 export async function requireUser(request: FastifyRequest, _reply: FastifyReply): Promise<void> {
   await authenticate(request)
-  if (request.user.scope === 'HUB') throw forbidden('auth:FORBIDDEN')
+  if (request.user.scope !== 'COUNTER' && request.user.scope !== 'OWNER') {
+    throw forbidden('auth:FORBIDDEN')
+  }
 }
 
 /**
@@ -133,4 +143,58 @@ export async function requireOwner(request: FastifyRequest, _reply: FastifyReply
 export async function requireHub(request: FastifyRequest, _reply: FastifyReply): Promise<void> {
   await authenticate(request)
   if (request.user.scope !== 'HUB') throw forbidden('auth:FORBIDDEN')
+}
+
+/**
+ * A staff member's own routes on team.vistahub.my. The staff member is the one
+ * on the session row, and must still be active: deactivating someone in the
+ * RMS shuts their phone out on its next request.
+ */
+export async function requireStaff(request: FastifyRequest, _reply: FastifyReply): Promise<void> {
+  await authenticate(request)
+  if (request.user.scope !== 'STAFF' || !request.staffId) throw forbidden('auth:FORBIDDEN')
+  const staff = await request.db.staffMember.findUnique({
+    where: { id: request.staffId },
+    select: { status: true },
+  })
+  if (!staff || staff.status !== 'ACTIVE') throw unauthorized('auth:UNAUTHORIZED')
+}
+
+/**
+ * What management can do in the Team module. Checked on the server for every
+ * route; the RMS hiding a button is a convenience, never the control.
+ *
+ * Today only the business account signs in to the RMS, and it holds all of
+ * them. Manager logins, when they come, get a subset — and no route changes.
+ */
+export type TeamPermission =
+  | 'staff.manage'
+  | 'staff.confidential'
+  | 'roster.manage'
+  | 'coverage.manage'
+  | 'attendance.review'
+  | 'payroll.process'
+  | 'payroll.pay'
+  | 'audit.view'
+
+export function permissionsFor(scope: SessionScope): ReadonlySet<TeamPermission> {
+  if (scope !== 'OWNER') return new Set()
+  return new Set<TeamPermission>([
+    'staff.manage',
+    'staff.confidential',
+    'roster.manage',
+    'coverage.manage',
+    'attendance.review',
+    'payroll.process',
+    'payroll.pay',
+    'audit.view',
+  ])
+}
+
+/** A preHandler for a management route that needs `permission`. */
+export function requirePermission(permission: TeamPermission) {
+  return async function guard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    await requireOwner(request, reply)
+    if (!permissionsFor(request.user.scope).has(permission)) throw forbidden('auth:FORBIDDEN')
+  }
 }

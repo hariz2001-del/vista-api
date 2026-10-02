@@ -480,12 +480,13 @@ describe('the database as a backstop', () => {
 
 describe('routes', () => {
   it('reach the database only through the business-scoped client', () => {
-    // Sign-in and registration run before there is a business; every other
-    // route must go through `request.db`. A bare `prisma` import in a route
-    // file is how one business's query would reach another's rows.
+    // Sign-in and registration run before there is a business — the account's
+    // in auth.ts, a staff member's in team-auth.ts — and every other route must
+    // go through `request.db`. A bare `prisma` import in a route file is how
+    // one business's query would reach another's rows.
     const dir = join(import.meta.dirname, '..', 'src', 'routes')
     const offenders = readdirSync(dir)
-      .filter((file) => file.endsWith('.ts') && file !== 'auth.ts')
+      .filter((file) => file.endsWith('.ts') && file !== 'auth.ts' && file !== 'team-auth.ts')
       .filter((file) => /import\s*\{[^}]*\bprisma\b[^}]*\}\s*from\s*'\.\.\/db\.ts'/.test(
         readFileSync(join(dir, file), 'utf8'),
       ))
