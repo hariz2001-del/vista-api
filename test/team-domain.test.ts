@@ -26,6 +26,7 @@ describe('team time', () => {
     expect(mondayOf('2026-10-04')).toBe('2026-09-28')
     expect(rangeLabel('2026-09-21', '2026-09-27')).toBe('21–27 Sept')
     expect(rangeLabel('2026-09-28', '2026-10-04')).toBe('28 Sept – 4 Oct')
+    expect(rangeLabel('2026-10-02', '2026-10-02')).toBe('2 Oct')
   })
 })
 
@@ -211,6 +212,14 @@ describe('rostering engine', () => {
     expect(kinds).toContain('OVERSTAFFED')
     expect(kinds).toContain('DID_NOT_APPLY')
     expect(fairness.find((entry) => entry.staffId === 't2')).toMatchObject({ appliedShifts: 2, assignedShifts: 2, fillRate: 1 })
+  })
+
+  it('asks a suitable person before one not recommended on their own, even with fewer hours', () => {
+    const data = input([person('busy'), person('risky', { soloSuitability: 'NOT_RECOMMENDED' }), person('gone')], [slot('mon', 0), slot('tue', 1), slot('sat', 5)], {
+      sat: ['busy', 'risky', 'gone'],
+    })
+    const queue = rankReplacements(data, [{ slotId: 'mon', staffId: 'busy' }, { slotId: 'tue', staffId: 'busy' }], 'sat', new Set(['gone']))
+    expect(queue.map((candidate) => candidate.staffId)).toEqual(['busy', 'risky'])
   })
 
   it('queues replacements: applicants first, then free people, never a clash', () => {

@@ -81,6 +81,7 @@ function dayLabel(date: string, withMonth: boolean): string {
 
 /** A date range label: "21–27 Sept", "28 Sept – 4 Oct". */
 export function rangeLabel(start: string, end: string): string {
+  if (start === end) return dayLabel(start, true)
   return start.slice(0, 7) === end.slice(0, 7)
     ? `${dayLabel(start, false)}–${dayLabel(end, true)}`
     : `${dayLabel(start, true)} – ${dayLabel(end, true)}`

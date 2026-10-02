@@ -520,8 +520,10 @@ export type ReplacementCandidate = {
 
 /**
  * Who to offer a vacated seat to, in order. People who applied for the shift
- * and were not picked come first; then anyone else free. Within each, the same
- * suitability and fairness as the engine. People with a clash, over their
+ * and were not picked come first; then anyone else free. Within each, on a
+ * shift they would work alone, people suitable for that come before those
+ * management marked otherwise; then the same suitability and fairness as the
+ * engine. People with a clash, over their
  * limits, or listed in `exclude` (already offered, the one who withdrew) are
  * left out.
  */
@@ -549,9 +551,15 @@ export function rankReplacements(
       const applied = Boolean(input.applications.get(slot.id)?.has(staff.id))
       const fit = suitability(state, engineInput, seatSlot, staff)
       const minutes = state.minutes.get(staff.id) ?? 0
+      // On a shift they would work alone, someone marked unsuitable for that is
+      // asked only after everyone suitable — a warning, not a trade against hours.
+      const soloRisk = wouldBeSolo(seatSlot)
+        ? ({ SUITABLE: 0, CAUTION: 1, NOT_RECOMMENDED: 2 } as const)[staff.attributes?.soloSuitability ?? 'SUITABLE']
+        : 0
       return {
         staff,
         applied,
+        soloRisk,
         total: fit.score - (input.weights.fairness * minutes) / 600,
         minutes,
         reason: [
@@ -564,6 +572,7 @@ export function rankReplacements(
     .toSorted(
       (a, b) =>
         Number(b.applied) - Number(a.applied) ||
+        a.soloRisk - b.soloRisk ||
         b.total - a.total ||
         a.minutes - b.minutes ||
         stableHash(`${slotId}:${a.staff.id}`) - stableHash(`${slotId}:${b.staff.id}`),
