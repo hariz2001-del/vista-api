@@ -242,6 +242,31 @@ describe('checkout — queue numbers', () => {
       '#001', '#002', '#003', '#004', '#005', '#006', '#007', '#008',
     ])
   })
+
+  it('previews the next queue number without taking it', async () => {
+    const preview = () =>
+      app.inject({
+        method: 'GET',
+        url: `/checkout/next-queue-number?business_date=${businessDate}`,
+        headers: authed(token),
+      })
+
+    expect((await preview()).json()).toEqual({ queue_number: '#001' })
+    expect((await preview()).json()).toEqual({ queue_number: '#001' })
+
+    const product = await productByName('Ayam Goreng Berempah')
+    const sale = await checkout(
+      checkoutPayload({
+        shiftId,
+        businessDate,
+        clientTxnId: randomUUID(),
+        claimedTotalSen: 800,
+        items: [{ product_id: product.id, quantity: 1 }],
+      }),
+    )
+    expect(sale.json().queue_number).toBe('#001')
+    expect((await preview()).json()).toEqual({ queue_number: '#002' })
+  })
 })
 
 describe('checkout — offline sync', () => {
