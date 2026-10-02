@@ -24,7 +24,7 @@ const schema = z.object({
   CORS_ORIGINS: z
     .string()
     .default(
-      'http://localhost:5173,http://localhost:5174,http://localhost:5176,http://localhost:5180,http://localhost:5182',
+      'http://localhost:5173,http://localhost:5174,http://localhost:5176,http://localhost:5177,http://localhost:5180,http://localhost:5182',
     )
     .transform((value) =>
       value
