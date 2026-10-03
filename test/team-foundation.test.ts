@@ -114,6 +114,20 @@ describe('team — staff and PINs', () => {
     expect(unknown.body).not.toContain(b.businessId)
   })
 
+  it('accepts a first name or the start of a name when it fits one person only', async () => {
+    const b = await makeBusiness(app)
+    const { pin } = await addStaff(b, { name: 'Aina Rahman' })
+    await addStaff(b, { name: 'Amir Hakim' })
+    await addStaff(b, { name: 'Amira Zain' })
+    for (const who of ['aina', 'Aina Rahman', '  AINA  rahman ', 'rahman', 'ain']) {
+      expect((await staffLogin(b, who, pin)).statusCode, who).toBe(200)
+    }
+    // "ami" fits two people: ask for more, never guess.
+    const ambiguous = await staffLogin(b, 'ami', pin)
+    expect(ambiguous.statusCode).toBe(409)
+    expect(ambiguous.json().error).toBe('team:AMBIGUOUS_NAME')
+  })
+
   it('locks one staff member after five wrong PINs, from any address', async () => {
     const b = await makeBusiness(app)
     const { pin } = await addStaff(b, { name: 'Amir' })

@@ -24,7 +24,15 @@ export async function loadWeek(tx: Tx, weekId: string) {
             orderBy: { createdAt: 'asc' },
             include: { workType: true, staff: { select: { id: true, name: true, staffCode: true } } },
           },
-          coverage: { where: { status: 'OPEN' }, select: { id: true, isUrgent: true } },
+          coverage: {
+            where: { status: 'OPEN' },
+            select: {
+              id: true,
+              isUrgent: true,
+              vacatedAssignment: { select: { staff: { select: { name: true } } } },
+              offers: { where: { status: 'PENDING' }, select: { staff: { select: { name: true } } } },
+            },
+          },
         },
       },
     },
