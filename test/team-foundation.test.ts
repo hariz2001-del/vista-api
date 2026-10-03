@@ -34,8 +34,13 @@ async function addStaff(b: TestBusiness, body: object) {
   return response.json() as { staff: { id: string; staffCode: string }; pin: string }
 }
 
+/** The PIN alone signs in; the name is only what older app versions also send. */
 async function staffLogin(b: TestBusiness, who: string, pin: string) {
   return call(null, 'POST', '/team/auth/login', { orgId: b.businessId, who, pin })
+}
+
+async function pinOnly(b: TestBusiness, pin: string) {
+  return call(null, 'POST', '/team/auth/login', { orgId: b.businessId, pin })
 }
 
 /** Every key anywhere in a JSON value. */
@@ -83,23 +88,29 @@ describe('team — staff and PINs', () => {
     expect(list.json().staff[0]).toMatchObject({ name: 'Aina', hasPin: true })
   })
 
-  it('signs a staff member in by organisation, name or Staff ID, and PIN', async () => {
+  it('signs a staff member in by organisation, then the PIN alone', async () => {
     const b = await makeBusiness(app)
     const { pin } = await addStaff(b, { name: 'Aina', staffCode: 's007' })
+    const other = await addStaff(b, { name: 'Amir' })
 
     const org = await call(null, 'POST', '/team/auth/org', { identifier: b.email.toUpperCase() })
     expect(org.statusCode).toBe(200)
     expect(org.json()).toEqual({ orgId: b.businessId, name: expect.any(String) })
 
-    for (const who of ['aina', 'S007']) {
-      const login = await staffLogin(b, who, pin)
-      expect(login.statusCode, login.body).toBe(200)
-      expect(login.json().staff).toMatchObject({ name: 'Aina', staffCode: 'S007' })
-    }
+    const login = await pinOnly(b, pin)
+    expect(login.statusCode, login.body).toBe(200)
+    expect(login.json().staff).toMatchObject({ name: 'Aina', staffCode: 'S007' })
+    // Each PIN is its own person, whatever name an old app sends with it.
+    expect((await staffLogin(b, 'Aina', other.pin)).json().staff.name).toBe('Amir')
 
-    const wrong = await staffLogin(b, 'Aina', pin === '0000' ? '0001' : '0000')
+    const unused = ['0000', '0001', '0002'].find((candidate) => candidate !== pin && candidate !== other.pin)!
+    const wrong = await pinOnly(b, unused)
     expect(wrong.statusCode).toBe(401)
     expect(wrong.json().error).toBe('team:INVALID_LOGIN')
+
+    // Another business's PIN is not this one's.
+    const elsewhere = await makeBusiness(app)
+    expect((await call(null, 'POST', '/team/auth/login', { orgId: elsewhere.businessId, pin })).statusCode).toBe(401)
   })
 
   it('finds an organisation by its code, and says nothing about one that does not exist', async () => {
@@ -114,31 +125,46 @@ describe('team — staff and PINs', () => {
     expect(unknown.body).not.toContain(b.businessId)
   })
 
-  it('accepts a first name or the start of a name when it fits one person only', async () => {
+  it('never gives two staff the same PIN, and refuses a typed one already taken', async () => {
     const b = await makeBusiness(app)
-    const { pin } = await addStaff(b, { name: 'Aina Rahman' })
-    await addStaff(b, { name: 'Amir Hakim' })
-    await addStaff(b, { name: 'Amira Zain' })
-    for (const who of ['aina', 'Aina Rahman', '  AINA  rahman ', 'rahman', 'ain']) {
-      expect((await staffLogin(b, who, pin)).statusCode, who).toBe(200)
-    }
-    // "ami" fits two people: ask for more, never guess.
-    const ambiguous = await staffLogin(b, 'ami', pin)
-    expect(ambiguous.statusCode).toBe(409)
-    expect(ambiguous.json().error).toBe('team:AMBIGUOUS_NAME')
+    const pins = new Set<string>()
+    for (let index = 0; index < 12; index += 1) pins.add((await addStaff(b, { name: `Staff ${index}` })).pin)
+    expect(pins.size).toBe(12)
+
+    const first = await addStaff(b, { name: 'Aina' })
+    const second = await addStaff(b, { name: 'Amir' })
+    const taken = await call(b.ownerToken, 'POST', `/rms/team/staff/${second.staff.id}/pin`, { pin: first.pin })
+    expect(taken.statusCode).toBe(409)
+    expect(taken.json().error).toBe('team:PIN_TAKEN')
+    // Setting your own PIN again is fine.
+    expect((await call(b.ownerToken, 'POST', `/rms/team/staff/${first.staff.id}/pin`, { pin: first.pin })).statusCode).toBe(200)
   })
 
-  it('locks one staff member after five wrong PINs, from any address', async () => {
+  it('asks for a new PIN when two staff already share one', async () => {
+    const b = await makeBusiness(app)
+    const aina = await addStaff(b, { name: 'Aina' })
+    const amir = await addStaff(b, { name: 'Amir' })
+    // As it could be for PINs given out before they had to differ.
+    const credential = await prisma.staffCredential.findFirstOrThrow({ where: { staffId: aina.staff.id } })
+    await prisma.staffCredential.update({
+      where: { id: credential.id },
+      data: (await prisma.staffCredential.findFirstOrThrow({ where: { staffId: amir.staff.id }, select: { secretHash: true, secretSealed: true } })),
+    })
+    const shared = await pinOnly(b, amir.pin)
+    expect(shared.statusCode).toBe(409)
+    expect(shared.json().error).toBe('team:PIN_SHARED')
+  })
+
+  it('locks a business’s staff sign-in after 20 wrong PINs, from any address', async () => {
     const b = await makeBusiness(app)
     const { pin } = await addStaff(b, { name: 'Amir' })
-    const wrongPin = pin === '1111' ? '2222' : '1111'
+    const wrong = Array.from({ length: 21 }, (_, index) => index.toString().padStart(4, '0')).filter((candidate) => candidate !== pin)
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect((await staffLogin(b, 'Amir', wrongPin)).statusCode).toBe(401)
+    for (const guess of wrong.slice(0, 20)) {
+      expect((await pinOnly(b, guess)).statusCode).toBe(401)
     }
     // Even the right PIN is refused until the window passes.
-    const locked = await staffLogin(b, 'Amir', pin)
-    expect(locked.statusCode).toBe(429)
+    expect((await pinOnly(b, pin)).statusCode).toBe(429)
   })
 
   it('ends a staff member’s sessions when their PIN is reset or they are deactivated', async () => {

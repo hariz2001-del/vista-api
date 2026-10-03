@@ -85,6 +85,42 @@ async function openWeek(t: Team, weekStart: string, shifts: Array<{ day: number;
   return ok<WeekDetail>(t.b.ownerToken, 'POST', `/rms/team/weeks/${created.week.id}/status`, { status: 'APPLICATIONS_OPEN' })
 }
 
+describe('team — staff pick, management gives', () => {
+  it('gives each shift to the staff who picked it, first come, never two at once', async () => {
+    const t = await team(['Aina', 'Amir', 'Siti'])
+    const week = await openWeek(t, futureMonday(), [
+      { day: 0, start: '10:00', end: '14:00', required: 2 },
+      { day: 0, start: '12:00', end: '16:00', required: 1 },
+      { day: 1, start: '10:00', end: '14:00', required: 1 },
+    ])
+    const [morning, overlap, tuesday] = week.slots
+    // Staff see the open week and pick.
+    for (const [name, slot] of [['Aina', morning], ['Amir', morning], ['Siti', morning], ['Aina', overlap], ['Siti', overlap], ['Siti', tuesday]] as const) {
+      await ok(t.staff[name]!.token, 'POST', `/team/slots/${slot!.id}/apply`)
+    }
+
+    const filled = await ok<{ added: number; leftOver: number; detail: WeekDetail }>(
+      t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/fill-from-picks`,
+    )
+    const names = (slot: WeekDetail['slots'][number]) =>
+      slot.assignments.filter((a) => a.status === 'ACTIVE').map((a) => Object.keys(t.staff).find((n) => t.staff[n]!.id === a.staffId)).sort()
+    const [m, o, tu] = filled.detail.slots
+    // Morning goes to the first two to pick. Aina is then busy at 12, so 12–4 goes to Siti.
+    expect(names(m!)).toEqual(['Aina', 'Amir'])
+    expect(names(o!)).toEqual(['Siti'])
+    expect(names(tu!)).toEqual(['Siti'])
+    expect(filled.added).toBe(4)
+    expect(filled.leftOver).toBe(2)
+
+    // Running it again changes nothing.
+    const again = await ok<{ added: number }>(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/fill-from-picks`)
+    expect(again.added).toBe(0)
+
+    await ok(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/publish`)
+    expect((await call(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/fill-from-picks`)).statusCode).toBe(409)
+  })
+})
+
 describe('team — timetable and applications', () => {
   it('stamps a week out of the usual shifts, skipping closed days, at any minute', async () => {
     const t = await team([])

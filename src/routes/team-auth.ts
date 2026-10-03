@@ -1,9 +1,10 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { attemptLimitConfig, countAttempt, type AttemptOptions } from '../attempts.ts'
-import { signSession, verifySecret } from '../auth.ts'
+import { signSession } from '../auth.ts'
 import { prisma } from '../db.ts'
 import { DomainError, messageFor, notFound, unauthorized } from '../errors.ts'
+import { pinMatches } from '../team/pins.ts'
 
 /**
  * Staff sign-in for team.vistahub.my. Like the account sign-in in auth.ts,
@@ -18,47 +19,26 @@ const orgBody = z.object({
 
 const loginBody = z.object({
   orgId: z.string().uuid(),
-  /** Staff ID, or name. */
-  who: z.string().trim().min(1).max(80),
+  /** Older app versions still send a name; the PIN alone decides now. */
+  who: z.string().max(80).optional(),
   pin: z.string().regex(/^\d{4}$/),
 })
 
-/** Wrong PINs one staff member may take, from any number of phones. */
-const STAFF_PIN_LIMIT = 5
-const STAFF_PIN_WINDOW_MS = 15 * 60_000
-
-/** Compared against when nobody matched, so a miss takes as long as a hit. */
-const DUMMY_HASH = '$2b$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinv'
-
-function staffPinKey(staffId: string): string {
-  return `staff-pin ${staffId}`
-}
-
-async function isStaffLockedOut(staffId: string): Promise<boolean> {
-  const row = await prisma.attemptCounter.findUnique({ where: { key: staffPinKey(staffId) } })
-  return Boolean(row && row.resetAt > new Date() && row.count >= STAFF_PIN_LIMIT)
-}
-
-const normalise = (text: string) => text.trim().replace(/\s+/g, ' ').toLowerCase()
-
 /**
- * Who someone typed, forgivingly: their Staff ID, their full name, or — when
- * it picks out exactly one person — just their first name or the start of
- * their name. Staff type "aina" for "Aina Rahman"; refusing that would read as
- * a wrong PIN and lock them out. When the short form fits several people,
- * every match is returned and the caller asks for the full name.
+ * Wrong PINs one business may take, from any number of phones. The PIN is the
+ * whole sign-in, so this caps how fast anyone can sweep the 10,000 of them —
+ * at the price that a determined guesser can make everyone wait 15 minutes.
  */
-export function matchStaff<T extends { name: string; staffCode: string }>(staff: T[], typed: string): T[] {
-  const who = normalise(typed)
-  if (!who) return []
-  const byCode = staff.filter((member) => member.staffCode.toLowerCase() === who)
-  if (byCode.length > 0) return byCode
-  const byName = staff.filter((member) => normalise(member.name) === who)
-  if (byName.length > 0) return byName
-  return staff.filter((member) => {
-    const name = normalise(member.name)
-    return name.startsWith(who) || name.split(' ').includes(who)
-  })
+const ORG_PIN_LIMIT = 20
+const ORG_PIN_WINDOW_MS = 15 * 60_000
+
+function orgPinKey(businessId: string): string {
+  return `staff-pin-org ${businessId}`
+}
+
+async function isOrgLockedOut(businessId: string): Promise<boolean> {
+  const row = await prisma.attemptCounter.findUnique({ where: { key: orgPinKey(businessId) } })
+  return Boolean(row && row.resetAt > new Date() && row.count >= ORG_PIN_LIMIT)
 }
 
 async function businessDisplayName(businessId: string): Promise<string> {
@@ -99,34 +79,28 @@ export async function teamAuthRoutes(app: FastifyInstance, options: AttemptOptio
   })
 
   /**
-   * Name (or Staff ID) and PIN. Two limits apply: the usual one per phone, and
-   * one per staff member — five wrong PINs and that person is locked for 15
-   * minutes whichever phones the guesses came from, because 10,000 PINs is not
-   * many to spread across a few addresses.
+   * The PIN alone. Every PIN in a business is different (pins.ts), so it says
+   * who is signing in. Two limits apply: the usual one per phone, and one per
+   * business across all phones.
    */
   app.post('/team/auth/login', { config: attemptLimitConfig(options) }, async (request) => {
     const body = loginBody.parse(request.body)
-
-    // Staff are few per business, so all active ones are read and matched here.
-    const everyone = await prisma.staffMember.findMany({
-      where: { businessId: body.orgId, status: 'ACTIVE' },
-      include: { credentials: { where: { kind: 'PIN' } } },
-    })
-    const matches = matchStaff(everyone, body.who)
-    if (matches.length > 1) throw new DomainError('team:AMBIGUOUS_NAME', 409, messageFor('team:AMBIGUOUS_NAME'))
-    const staff = matches[0]
-
-    if (staff && (await isStaffLockedOut(staff.id))) {
+    if (await isOrgLockedOut(body.orgId)) {
       throw new DomainError('auth:TOO_MANY_ATTEMPTS', 429, messageFor('auth:TOO_MANY_ATTEMPTS'))
     }
 
-    const hash = staff?.credentials[0]?.secretHash ?? DUMMY_HASH
-    const ok = await verifySecret(body.pin, hash)
-    if (!staff || !staff.credentials[0] || !ok) {
-      if (staff) await countAttempt(staffPinKey(staff.id), STAFF_PIN_WINDOW_MS)
+    const credentials = await prisma.staffCredential.findMany({
+      where: { businessId: body.orgId, kind: 'PIN', staff: { status: 'ACTIVE' } },
+      include: { staff: true },
+    })
+    const matches = await pinMatches(credentials, body.pin)
+    if (matches.length === 0) {
+      await countAttempt(orgPinKey(body.orgId), ORG_PIN_WINDOW_MS)
       throw unauthorized('team:INVALID_LOGIN')
     }
-    await prisma.attemptCounter.deleteMany({ where: { key: staffPinKey(staff.id) } })
+    // Only possible for PINs given out before they had to differ.
+    if (matches.length > 1) throw new DomainError('team:PIN_SHARED', 409, messageFor('team:PIN_SHARED'))
+    const staff = matches[0]!.staff
 
     // A staff session hangs off the business account it signed in under.
     const account = await prisma.user.findFirst({
