@@ -286,6 +286,54 @@ export async function teamRmsRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  /**
+   * Delete a staff member for good — for someone added by mistake, or who
+   * never worked. Anyone with hours or pay on record is refused: deleting them
+   * would tear the history out of payroll and the books. Deactivate them
+   * instead. Their shifts, applications and offers go with them, and any
+   * phone they are signed in on is signed out.
+   */
+  app.delete<{ Params: { id: string } }>(
+    '/rms/team/staff/:id',
+    { preHandler: requirePermission('staff.manage') },
+    async (request) => {
+      const id = ID.parse(request.params.id)
+      const { db, businessId } = request
+      const actor = await actorOf(request)
+      await db.$transaction(async (tx) => {
+        const staff = await tx.staffMember.findUnique({ where: { id } })
+        if (!staff) throw notFound('team:STAFF_NOT_FOUND')
+        const [attendance, payslips, adjustments] = await Promise.all([
+          tx.attendanceRecord.count({ where: { staffId: id } }),
+          tx.payslip.count({ where: { staffId: id } }),
+          tx.payrollAdjustment.count({ where: { staffId: id } }),
+        ])
+        if (attendance + payslips + adjustments > 0) throw conflict('team:STAFF_HAS_HISTORY')
+
+        const assignments = await tx.assignment.findMany({ where: { staffId: id }, select: { id: true, slot: { select: { rosterWeekId: true } } } })
+        await tx.coverageRequest.updateMany({
+          where: { vacatedAssignmentId: { in: assignments.map((assignment) => assignment.id) } },
+          data: { vacatedAssignmentId: null },
+        })
+        await tx.assignment.deleteMany({ where: { staffId: id } })
+        await tx.replacementOffer.deleteMany({ where: { staffId: id } })
+        await tx.shiftApplication.deleteMany({ where: { staffId: id } })
+        await tx.session.deleteMany({ where: { staffId: id } })
+        await tx.staffMember.delete({ where: { id } })
+        for (const weekId of new Set(assignments.map((assignment) => assignment.slot.rosterWeekId))) {
+          await tx.rosterWeek.update({ where: { id: weekId }, data: { version: { increment: 1 } } })
+        }
+        await audit(tx, businessId, actor, {
+          action: 'staff.deleted',
+          entityType: 'staff',
+          entityId: id,
+          before: { name: staff.name, staffCode: staff.staffCode, shiftsRemoved: assignments.length },
+        })
+      })
+      return { ok: true }
+    },
+  )
+
   /** Confidential: management's read of a staff member. Never reaches /team. */
   app.put<{ Params: { id: string } }>(
     '/rms/team/staff/:id/attributes',

@@ -161,6 +161,34 @@ describe('team — staff and PINs', () => {
     expect((await call(b.counterToken, 'GET', '/team/me')).statusCode).toBe(403)
   })
 
+  it('deletes someone with no history, shifts and sign-in included; refuses anyone with pay on record', async () => {
+    const b = await makeBusiness(app)
+    const { staff, pin } = await addStaff(b, { name: 'Mistake' })
+    const token = (await staffLogin(b, 'Mistake', pin)).json().token as string
+    const week = await call(b.ownerToken, 'POST', '/rms/team/weeks', { weekStart: '2026-11-02', fromTemplate: false })
+    const withSlot = await call(b.ownerToken, 'POST', `/rms/team/weeks/${week.json().week.id}/slots`, { date: '2026-11-02', startTime: '17:00', endTime: '22:00' })
+    await call(b.ownerToken, 'POST', `/rms/team/slots/${withSlot.json().slots[0].id}/assignments`, { staffId: staff.id })
+
+    expect((await call(b.ownerToken, 'DELETE', `/rms/team/staff/${staff.id}`)).statusCode).toBe(200)
+    expect(await prisma.staffMember.count({ where: { id: staff.id } })).toBe(0)
+    expect(await prisma.assignment.count({ where: { staffId: staff.id } })).toBe(0)
+    expect((await call(token, 'GET', '/team/me')).statusCode).toBe(401)
+
+    const { staff: worked } = await addStaff(b, { name: 'Worked' })
+    await call(b.ownerToken, 'POST', '/rms/team/attendance', {
+      staffId: worked.id,
+      startAt: '2026-09-25T17:00:00+08:00',
+      endAt: '2026-09-25T22:00:00+08:00',
+    })
+    const refused = await call(b.ownerToken, 'DELETE', `/rms/team/staff/${worked.id}`)
+    expect(refused.statusCode).toBe(409)
+    expect(refused.json().error).toBe('team:STAFF_HAS_HISTORY')
+
+    // Another business cannot delete them.
+    const other = await makeBusiness(app)
+    expect((await call(other.ownerToken, 'DELETE', `/rms/team/staff/${worked.id}`)).statusCode).toBe(404)
+  })
+
   it('cannot sign in to one business with another business’s staff', async () => {
     const a = await makeBusiness(app)
     const b = await makeBusiness(app)
