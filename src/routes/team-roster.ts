@@ -651,6 +651,56 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
     })
   })
 
+  /**
+   * Give each shift to the staff who picked it, first come first served, until
+   * it is full. Nobody is put on two shifts that overlap, and nobody already on
+   * a shift is moved. Whoever is left over stays as a pick to place by hand.
+   */
+  app.post<{ Params: { id: string } }>('/rms/team/weeks/:id/fill-from-picks', roster, async (request) => {
+    const id = ID.parse(request.params.id)
+    const { db, businessId } = request
+    const actor = await actorOf(request)
+    return db.$transaction(
+      async (tx) => {
+        const week = await requireWeek(tx, id)
+        if (week.status === 'PUBLISHED') throw conflict('team:WEEK_PUBLISHED')
+        const active = new Set((await tx.staffMember.findMany({ where: { status: 'ACTIVE' }, select: { id: true } })).map((s) => s.id))
+        const placed = week.slots.flatMap((slot) =>
+          slot.assignments
+            .filter((assignment) => assignment.status === 'ACTIVE')
+            .map((assignment) => ({ staffId: assignment.staffId, startsAt: slot.startsAt, endsAt: slot.endsAt })),
+        )
+        const added: Array<{ slotId: string; staffId: string }> = []
+        let leftOver = 0
+        for (const slot of week.slots) {
+          let open = slot.requiredStaff - slot.assignments.filter((assignment) => assignment.status === 'ACTIVE').length
+          const picks = slot.applications.toSorted((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+          for (const pick of picks) {
+            if (slot.assignments.some((assignment) => assignment.staffId === pick.staffId && assignment.status === 'ACTIVE')) continue
+            const busy = placed.some((p) => p.staffId === pick.staffId && p.startsAt < slot.endsAt && p.endsAt > slot.startsAt)
+            if (open <= 0 || busy || !active.has(pick.staffId)) {
+              leftOver += 1
+              continue
+            }
+            await tx.assignment.create({ data: { businessId, slotId: slot.id, staffId: pick.staffId, source: 'MANUAL' } })
+            placed.push({ staffId: pick.staffId, startsAt: slot.startsAt, endsAt: slot.endsAt })
+            added.push({ slotId: slot.id, staffId: pick.staffId })
+            open -= 1
+          }
+        }
+        if (added.length > 0) await touchWeek(tx, id)
+        await audit(tx, businessId, actor, {
+          action: 'roster.filled_from_picks',
+          entityType: 'roster_week',
+          entityId: id,
+          after: { added, leftOver },
+        })
+        return { added: added.length, leftOver, detail: await weekDetail(tx, businessId, id) }
+      },
+      { timeout: 30_000 },
+    )
+  })
+
   app.delete<{ Params: { id: string } }>('/rms/team/weeks/:id', roster, async (request) => {
     const id = ID.parse(request.params.id)
     const { db, businessId } = request

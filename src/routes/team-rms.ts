@@ -5,7 +5,7 @@ import { permissionsFor, requirePermission } from '../auth.ts'
 import type { Tx } from '../db.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
 import { actorOf, audit } from '../team/audit.ts'
-import { generatePin, revokeStaffSessions, setStaffPin } from '../team/pins.ts'
+import { revokeStaffSessions, setStaffPin, uniquePin } from '../team/pins.ts'
 import { unsealPin } from '../team/seal.ts'
 
 /**
@@ -211,7 +211,7 @@ export async function teamRmsRoutes(app: FastifyInstance): Promise<void> {
     const body = staffCreate.parse(request.body)
     const { db, businessId } = request
     const actor = await actorOf(request)
-    const pin = generatePin()
+    let pin = ''
 
     const created = await db
       .$transaction(async (tx) => {
@@ -225,6 +225,7 @@ export async function teamRmsRoutes(app: FastifyInstance): Promise<void> {
             roleTags: body.roleTags,
           },
         })
+        pin = await uniquePin(tx, staff.id)
         await setStaffPin(tx, businessId, staff.id, pin)
         await audit(tx, businessId, actor, {
           action: 'staff.created',
@@ -384,12 +385,13 @@ export async function teamRmsRoutes(app: FastifyInstance): Promise<void> {
       const body = pinBody.parse(request.body ?? {})
       const { db, businessId } = request
       const actor = await actorOf(request)
-      const pin = body.pin ?? generatePin()
+      let pin = body.pin ?? ''
 
       await db.$transaction(async (tx) => {
         if (!(await tx.staffMember.findUnique({ where: { id } }))) {
           throw notFound('team:STAFF_NOT_FOUND')
         }
+        if (!pin) pin = await uniquePin(tx, id)
         await setStaffPin(tx, businessId, id, pin)
         await audit(tx, businessId, actor, {
           action: body.pin ? 'staff.pin_set' : 'staff.pin_reset',
