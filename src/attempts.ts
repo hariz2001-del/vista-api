@@ -73,7 +73,7 @@ export class AttemptStore {
  * adds one, and says how long the window has left. Two copies counting the same
  * client at once serialise on the row, so neither loses the other's attempt.
  */
-async function countAttempt(key: string, windowMs: number): Promise<{ current: number; ttl: number }> {
+export async function countAttempt(key: string, windowMs: number): Promise<{ current: number; ttl: number }> {
   const rows = await prisma.$queryRaw<Array<{ count: number; ttl_ms: number }>>`
     INSERT INTO attempt_counters (key, count, reset_at)
     VALUES (${key}, 1, now() + ${windowMs}::int * interval '1 millisecond')

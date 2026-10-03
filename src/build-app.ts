@@ -14,6 +14,11 @@ import { correctionRoutes } from './routes/corrections.ts'
 import { menuRoutes } from './routes/menu.ts'
 import { promotionRoutes } from './routes/promotions.ts'
 import { receiptRoutes } from './routes/receipts.ts'
+import { teamAuthRoutes } from './routes/team-auth.ts'
+import { teamPayrollRoutes } from './routes/team-payroll.ts'
+import { teamRmsRoutes } from './routes/team-rms.ts'
+import { teamRosterRoutes } from './routes/team-roster.ts'
+import { teamStaffRoutes } from './routes/team-staff.ts'
 import { rmsRoutes } from './routes/rms.ts'
 import { shiftRoutes } from './routes/shifts.ts'
 import { terminalRoutes } from './routes/terminal.ts'
@@ -131,6 +136,11 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(rmsRoutes)
   await app.register(menuRoutes)
   await app.register(promotionRoutes)
+  await app.register(teamRmsRoutes)
+  await app.register(teamRosterRoutes)
+  await app.register(teamPayrollRoutes)
+  await app.register(teamAuthRoutes, attempts)
+  await app.register(teamStaffRoutes)
 
   return app
 }

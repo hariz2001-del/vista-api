@@ -107,6 +107,14 @@ function translate(error: unknown): never {
     // A Restrict foreign key: it has been sold, or still has things in it.
     if (error.code === 'P2003') throw conflict('menu:IN_USE')
   }
+  // The same refusal from an ON DELETE RESTRICT key (Postgres 23001), which
+  // Prisma passes through without a code of its own.
+  if (
+    error instanceof Prisma.PrismaClientUnknownRequestError &&
+    /23001|violates RESTRICT setting/.test(error.message)
+  ) {
+    throw conflict('menu:IN_USE')
+  }
   throw error
 }
 

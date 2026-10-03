@@ -17,6 +17,7 @@ export const DEMO = {
  * Businesses a test registered are removed entirely.
  */
 export async function resetTransactional(): Promise<void> {
+  await resetTeam()
   await prisma.expense.deleteMany()
   await prisma.periodClosure.deleteMany()
   await prisma.terminalStatus.deleteMany()
@@ -44,6 +45,37 @@ export async function resetTransactional(): Promise<void> {
   await prisma.accountSettings.deleteMany({ where: others })
   await prisma.user.deleteMany({ where: others })
   await prisma.business.deleteMany({ where: { id: { not: DEMO.businessId } } })
+}
+
+/**
+ * Clear the Team module. A paid payslip and the audit log refuse deletes by
+ * trigger, as they must in production; this transaction alone switches
+ * triggers off (the test database runs as a superuser) to wipe them.
+ */
+export async function resetTeam(): Promise<void> {
+  await prisma.session.deleteMany({ where: { staffId: { not: null } } })
+  await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL session_replication_role = replica`,
+    prisma.payslipLine.deleteMany(),
+    prisma.payrollAdjustment.deleteMany(),
+    prisma.payslip.deleteMany(),
+    prisma.attendanceRecord.deleteMany(),
+    prisma.replacementOffer.deleteMany(),
+    prisma.coverageRequest.deleteMany(),
+    prisma.assignment.deleteMany(),
+    prisma.shiftApplication.deleteMany(),
+    prisma.shiftSlot.deleteMany(),
+    prisma.rosterWeek.deleteMany(),
+    prisma.slotTemplate.deleteMany(),
+    prisma.closedPeriod.deleteMany(),
+    prisma.operatingHours.deleteMany(),
+    prisma.staffAttributes.deleteMany(),
+    prisma.staffCredential.deleteMany(),
+    prisma.staffMember.deleteMany(),
+    prisma.workType.deleteMany(),
+    prisma.teamSettings.deleteMany(),
+    prisma.teamAuditEntry.deleteMany(),
+  ])
 }
 
 export async function makeApp(): Promise<FastifyInstance> {
