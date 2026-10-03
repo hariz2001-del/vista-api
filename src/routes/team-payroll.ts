@@ -60,6 +60,7 @@ const editBody = z
   .partial()
 const approveBody = z.object({ approvedStartAt: INSTANT.optional(), approvedEndAt: INSTANT.optional() })
 const rejectBody = z.object({ note: z.string().trim().max(300).nullish() })
+const fromRosterBody = z.object({ assignmentIds: z.array(ID).min(1).max(500) })
 const payslipApprove = z.object({ staffId: ID, start: DATE, end: DATE })
 const payBody = z.object({ paidOn: DATE.optional() })
 const dismissBody = z.object({ note: z.string().trim().min(1).max(300) })
@@ -172,6 +173,86 @@ export async function teamPayrollRoutes(app: FastifyInstance): Promise<void> {
         }),
       }
     })
+  })
+
+  /**
+   * Shifts that have finished on a published roster and that nobody has
+   * confirmed yet — with no clock-in, this is where hours come from: management
+   * confirms each as worked (adjusting times if someone left early).
+   */
+  app.get('/rms/team/attendance/unconfirmed', review, async (request) => {
+    const { start, end } = rangeQuery.parse(request.query)
+    const range = dateRange(start, end)
+    const now = new Date()
+    const assignments = await request.db.assignment.findMany({
+      where: {
+        status: 'ACTIVE',
+        attendance: { none: { status: { not: 'REJECTED' } } },
+        slot: {
+          rosterWeek: { status: 'PUBLISHED' },
+          startsAt: { gte: range.gte, lt: range.lt },
+          endsAt: { lte: now },
+        },
+      },
+      include: { staff: { select: { name: true } }, slot: true },
+      orderBy: [{ slot: { startsAt: 'asc' } }, { staff: { name: 'asc' } }],
+    })
+    return {
+      shifts: assignments.map((assignment) => ({
+        assignmentId: assignment.id,
+        staffId: assignment.staffId,
+        staffName: assignment.staff.name,
+        date: mytDate(assignment.slot.startsAt),
+        startTime: mytTime(assignment.slot.startsAt),
+        endTime: mytTime(assignment.slot.endsAt),
+        startsAt: assignment.slot.startsAt.toISOString(),
+        endsAt: assignment.slot.endsAt.toISOString(),
+        minutes: minutesBetween(assignment.slot.startsAt, assignment.slot.endsAt),
+        label: assignment.slot.label,
+      })),
+    }
+  })
+
+  /** Confirm rostered shifts as worked, at their rostered times. Approved at once. */
+  app.post('/rms/team/attendance/from-roster', review, async (request) => {
+    const { assignmentIds } = fromRosterBody.parse(request.body)
+    const { db, businessId } = request
+    const actor = await actorOf(request)
+    const created = await db.$transaction(async (tx) => {
+      const assignments = await tx.assignment.findMany({
+        where: { id: { in: assignmentIds }, status: 'ACTIVE' },
+        include: { slot: true, attendance: { where: { status: { not: 'REJECTED' } }, select: { id: true } } },
+      })
+      let count = 0
+      for (const assignment of assignments) {
+        // Already confirmed (a double tap, or two managers): leave it.
+        if (assignment.attendance.length > 0) continue
+        const record = await tx.attendanceRecord.create({
+          data: {
+            businessId,
+            staffId: assignment.staffId,
+            assignmentId: assignment.id,
+            clockInAt: assignment.slot.startsAt,
+            clockOutAt: assignment.slot.endsAt,
+            approvedStartAt: assignment.slot.startsAt,
+            approvedEndAt: assignment.slot.endsAt,
+            source: 'MANUAL',
+            status: 'APPROVED',
+            approvedAt: new Date(),
+            note: 'Worked as rostered',
+          },
+        })
+        await audit(tx, businessId, actor, {
+          action: 'attendance.confirmed_from_roster',
+          entityType: 'attendance',
+          entityId: record.id,
+          after: { assignmentId: assignment.id, staffId: assignment.staffId },
+        })
+        count += 1
+      }
+      return count
+    })
+    return { confirmed: created }
   })
 
   /** Time management records by hand. Approved as it is entered. */

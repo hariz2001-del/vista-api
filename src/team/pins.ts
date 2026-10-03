@@ -1,6 +1,7 @@
 import { randomInt } from 'node:crypto'
 import { hashSecret } from '../auth.ts'
 import type { Tx } from '../db.ts'
+import { sealPin } from './seal.ts'
 
 /** A random 4-digit PIN from the operating system's CSPRNG, leading zeros kept. */
 export function generatePin(): string {
@@ -8,8 +9,8 @@ export function generatePin(): string {
 }
 
 /**
- * Give a staff member a new PIN. Only its hash is stored, so the plain PIN
- * exists exactly once — in the response to whoever set it.
+ * Give a staff member a new PIN. Sign-in checks its bcrypt hash; an
+ * encrypted copy lets management look it up again in the RMS (seal.ts).
  *
  * Every session that staff member has open is ended: a reset is usually
  * because the old PIN got out, so a phone signed in with it must not stay in.
@@ -21,10 +22,11 @@ export async function setStaffPin(
   pin: string,
 ): Promise<void> {
   const secretHash = await hashSecret(pin)
+  const secretSealed = sealPin(pin)
   await tx.staffCredential.upsert({
     where: { staffId_kind: { staffId, kind: 'PIN' } },
-    update: { secretHash, setAt: new Date() },
-    create: { businessId, staffId, kind: 'PIN', secretHash },
+    update: { secretHash, secretSealed, setAt: new Date() },
+    create: { businessId, staffId, kind: 'PIN', secretHash, secretSealed },
   })
   await revokeStaffSessions(tx, staffId)
 }
