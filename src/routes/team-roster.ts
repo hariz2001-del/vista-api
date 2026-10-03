@@ -68,7 +68,14 @@ const weekWindow = {
   reviewDeadline: INSTANT.nullish(),
   publishDeadline: INSTANT.nullish(),
 }
-const weekCreate = z.object({ weekStart: DATE, fromTemplate: z.boolean().default(true), ...weekWindow })
+const weekCreate = z.object({
+  weekStart: DATE,
+  fromTemplate: z.boolean().default(true),
+  /** Copy this earlier week's shifts (times, staff needed, labels — not people). Wins over the template. */
+  copyFromWeekId: ID.nullish(),
+  ...weekWindow,
+})
+const copyDayBody = z.object({ fromDate: DATE })
 const weekUpdate = z
   .object({
     ...weekWindow,
@@ -434,7 +441,27 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
       })
 
       let created = 0
-      if (body.fromTemplate) {
+      if (body.copyFromWeekId) {
+        const source = await tx.rosterWeek.findUnique({ where: { id: body.copyFromWeekId }, include: { slots: true } })
+        if (!source) throw notFound('team:WEEK_NOT_FOUND')
+        const shiftMs = toDate(body.weekStart).getTime() - source.weekStart.getTime()
+        for (const slot of source.slots) {
+          await tx.shiftSlot.create({
+            data: {
+              businessId,
+              rosterWeekId: week.id,
+              startsAt: new Date(slot.startsAt.getTime() + shiftMs),
+              endsAt: new Date(slot.endsAt.getTime() + shiftMs),
+              requiredStaff: slot.requiredStaff,
+              canRunSolo: slot.canRunSolo,
+              roleTags: slot.roleTags,
+              workTypeId: slot.workTypeId,
+              label: slot.label,
+            },
+          })
+          created += 1
+        }
+      } else if (body.fromTemplate) {
         const [templates, hours, closed] = await Promise.all([
           tx.slotTemplate.findMany(),
           tx.operatingHours.findMany(),
@@ -468,7 +495,7 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
         action: 'roster.week_created',
         entityType: 'roster_week',
         entityId: week.id,
-        after: { weekStart: body.weekStart, shiftsFromTemplate: created },
+        after: { weekStart: body.weekStart, copiedFromWeekId: body.copyFromWeekId ?? null, shifts: created },
       })
       return week.id
     })
@@ -718,6 +745,58 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
         before: { startsAt: slot.startsAt, endsAt: slot.endsAt },
       })
       return weekDetail(tx, businessId, slot.rosterWeekId)
+    })
+  })
+
+  /**
+   * Make one day's shifts the same as another day's in the week: that day's
+   * shifts are replaced by copies (times, staff needed, label, work type — not
+   * the people). Refused if anyone has hours recorded on a shift it would remove.
+   */
+  app.post<{ Params: { id: string; date: string } }>('/rms/team/weeks/:id/days/:date/copy-from', roster, async (request) => {
+    const weekId = ID.parse(request.params.id)
+    const date = DATE.parse(request.params.date)
+    const { fromDate } = copyDayBody.parse(request.body)
+    const { db, businessId } = request
+    const actor = await actorOf(request)
+    return db.$transaction(async (tx) => {
+      const week = await requireWeek(tx, weekId)
+      const weekStart = week.weekStart.toISOString().slice(0, 10)
+      const inWeek = (value: string) => value >= weekStart && value <= addDays(weekStart, 6)
+      if (!inWeek(date) || !inWeek(fromDate)) throw badRequest('team:DATE_OUTSIDE_WEEK')
+      if (date === fromDate) return weekDetail(tx, businessId, weekId)
+
+      const targets = week.slots.filter((slot) => mytDate(slot.startsAt) === date)
+      const attended = await tx.attendanceRecord.count({ where: { assignment: { slotId: { in: targets.map((slot) => slot.id) } } } })
+      if (attended > 0) throw conflict('team:HAS_ATTENDANCE')
+      await tx.coverageRequest.deleteMany({ where: { slotId: { in: targets.map((slot) => slot.id) } } })
+      await tx.shiftSlot.deleteMany({ where: { id: { in: targets.map((slot) => slot.id) } } })
+
+      const dayMs = Date.parse(`${date}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`)
+      const sources = week.slots.filter((slot) => mytDate(slot.startsAt) === fromDate)
+      for (const slot of sources) {
+        await tx.shiftSlot.create({
+          data: {
+            businessId,
+            rosterWeekId: weekId,
+            startsAt: new Date(slot.startsAt.getTime() + dayMs),
+            endsAt: new Date(slot.endsAt.getTime() + dayMs),
+            requiredStaff: slot.requiredStaff,
+            canRunSolo: slot.canRunSolo,
+            roleTags: slot.roleTags,
+            workTypeId: slot.workTypeId,
+            label: slot.label,
+          },
+        })
+      }
+      await touchWeek(tx, weekId)
+      await audit(tx, businessId, actor, {
+        action: 'roster.day_copied',
+        entityType: 'roster_week',
+        entityId: weekId,
+        after: { fromDate, toDate: date, replaced: targets.length, copied: sources.length },
+      })
+      return weekDetail(tx, businessId, weekId)
     })
   })
 

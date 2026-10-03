@@ -109,6 +109,30 @@ describe('team — timetable and applications', () => {
     expect((await call(t.b.ownerToken, 'POST', '/rms/team/weeks', { weekStart })).statusCode).toBe(409)
   })
 
+  it('copies a day’s shifts onto another day, and a whole week onto the next', async () => {
+    const t = await team(['Aina'])
+    const weekStart = futureMonday()
+    const week = await ok<WeekDetail>(t.b.ownerToken, 'POST', '/rms/team/weeks', { weekStart, fromTemplate: false })
+    await ok(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/slots`, { date: weekStart, startTime: '16:30', endTime: '21:00', requiredStaff: 2, label: 'Opening' })
+    await ok(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/slots`, { date: weekStart, startTime: '22:00', endTime: '02:00' })
+    // Tuesday had something else; copying Monday replaces it.
+    await ok(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/slots`, { date: addDays(weekStart, 1), startTime: '10:00', endTime: '12:00' })
+
+    const copied = await ok<WeekDetail>(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/days/${addDays(weekStart, 1)}/copy-from`, { fromDate: weekStart })
+    const tuesday = copied.slots.filter((slot) => slot.date === addDays(weekStart, 1))
+    expect(tuesday.map((slot) => [slot.startTime, slot.endTime])).toEqual([['16:30', '21:00'], ['22:00', '02:00']])
+    expect(copied.slots.filter((slot) => slot.date === weekStart)).toHaveLength(2)
+
+    const next = await ok<WeekDetail>(t.b.ownerToken, 'POST', '/rms/team/weeks', { weekStart: addDays(weekStart, 7), copyFromWeekId: week.week.id })
+    expect(next.slots.map((slot) => [slot.date, slot.startTime])).toEqual([
+      [addDays(weekStart, 7), '16:30'],
+      [addDays(weekStart, 7), '22:00'],
+      [addDays(weekStart, 8), '16:30'],
+      [addDays(weekStart, 8), '22:00'],
+    ])
+    expect(next.slots.every((slot) => slot.assignments.length === 0)).toBe(true)
+  })
+
   it('lets staff apply only while applications are open and up to the limit', async () => {
     const t = await team(['Aina'])
     const weekStart = futureMonday()
