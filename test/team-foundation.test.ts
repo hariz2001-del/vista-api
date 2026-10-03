@@ -170,6 +170,43 @@ describe('team — staff and PINs', () => {
   })
 })
 
+describe('team — looking up a PIN in the RMS', () => {
+  it('shows the current PIN to management, records each look, and never stores it readable', async () => {
+    const b = await makeBusiness(app)
+    const { staff, pin } = await addStaff(b, { name: 'Aina' })
+
+    const seen = await call(b.ownerToken, 'GET', `/rms/team/staff/${staff.id}/pin`)
+    expect(seen.json()).toEqual({ pin, viewable: true })
+    const credential = await prisma.staffCredential.findFirstOrThrow({ where: { staffId: staff.id } })
+    expect(credential.secretSealed).not.toContain(pin)
+
+    const reset = await call(b.ownerToken, 'POST', `/rms/team/staff/${staff.id}/pin`, { pin: '0042' })
+    expect(reset.json().pin).toBe('0042')
+    expect((await call(b.ownerToken, 'GET', `/rms/team/staff/${staff.id}/pin`)).json().pin).toBe('0042')
+
+    const trail = await call(b.ownerToken, 'GET', '/rms/team/audit')
+    expect(trail.json().entries.filter((entry: { action: string }) => entry.action === 'staff.pin_viewed')).toHaveLength(2)
+    expect(trail.body).not.toContain('0042')
+  })
+
+  it('is closed to staff, the counter and other businesses', async () => {
+    const a = await makeBusiness(app)
+    const b = await makeBusiness(app)
+    const { staff, pin } = await addStaff(a, { name: 'Aina' })
+    const staffToken = (await staffLogin(a, 'Aina', pin)).json().token as string
+    expect((await call(staffToken, 'GET', `/rms/team/staff/${staff.id}/pin`)).statusCode).toBe(403)
+    expect((await call(a.counterToken, 'GET', `/rms/team/staff/${staff.id}/pin`)).statusCode).toBe(403)
+    expect((await call(b.ownerToken, 'GET', `/rms/team/staff/${staff.id}/pin`)).statusCode).toBe(404)
+  })
+
+  it('says a PIN set before this cannot be shown, until it is reset', async () => {
+    const b = await makeBusiness(app)
+    const { staff } = await addStaff(b, { name: 'Aina' })
+    await prisma.staffCredential.updateMany({ where: { staffId: staff.id }, data: { secretSealed: null } })
+    expect((await call(b.ownerToken, 'GET', `/rms/team/staff/${staff.id}/pin`)).json()).toEqual({ pin: null, viewable: false })
+  })
+})
+
 describe('team — confidential attributes', () => {
   it('stores management’s read of a staff member and never shows it to them', async () => {
     const b = await makeBusiness(app)

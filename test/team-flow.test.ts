@@ -300,6 +300,24 @@ describe('team — attendance, payroll and the ledger', () => {
     })
   }
 
+  it('pays rostered shifts that management confirms as worked, once', async () => {
+    const t = await team(['Aina'])
+    const week = await ok<WeekDetail>(t.b.ownerToken, 'POST', '/rms/team/weeks', { weekStart: '2026-09-21', fromTemplate: false })
+    const withSlot = await ok<WeekDetail>(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/slots`, { date: '2026-09-25', startTime: '16:30', endTime: '21:00' })
+    const { assignmentId } = await ok<{ assignmentId: string }>(t.b.ownerToken, 'POST', `/rms/team/slots/${withSlot.slots[0]!.id}/assignments`, { staffId: t.staff.Aina!.id })
+    await ok(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/publish`)
+
+    const unconfirmed = await ok<{ shifts: Array<{ assignmentId: string; minutes: number }> }>(t.b.ownerToken, 'GET', `/rms/team/attendance/unconfirmed?start=${period.start}&end=${period.end}`)
+    expect(unconfirmed.shifts).toEqual([expect.objectContaining({ assignmentId, minutes: 270 })])
+    expect((await ok<{ confirmed: number }>(t.b.ownerToken, 'POST', '/rms/team/attendance/from-roster', { assignmentIds: [assignmentId] })).confirmed).toBe(1)
+    // A second tap does nothing.
+    expect((await ok<{ confirmed: number }>(t.b.ownerToken, 'POST', '/rms/team/attendance/from-roster', { assignmentIds: [assignmentId] })).confirmed).toBe(0)
+    expect((await ok<{ shifts: unknown[] }>(t.b.ownerToken, 'GET', `/rms/team/attendance/unconfirmed?start=${period.start}&end=${period.end}`)).shifts).toEqual([])
+
+    const summary = await ok<{ rows: Array<{ totalMinutes: number; totalSen: number }> }>(t.b.ownerToken, 'GET', `/rms/team/payroll?start=${period.start}&end=${period.end}`)
+    expect(summary.rows[0]).toMatchObject({ totalMinutes: 270, totalSen: 3150 }) // 4.5h × RM7
+  })
+
   it('clocks in and out from the app as a claim that management approves', async () => {
     const t = await team(['Aina'])
     const aina = t.staff.Aina!.token

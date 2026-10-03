@@ -6,6 +6,7 @@ import type { Tx } from '../db.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
 import { actorOf, audit } from '../team/audit.ts'
 import { generatePin, revokeStaffSessions, setStaffPin } from '../team/pins.ts'
+import { unsealPin } from '../team/seal.ts'
 
 /**
  * Team, management side: staff, their confidential attributes, PINs, work
@@ -349,6 +350,28 @@ export async function teamRmsRoutes(app: FastifyInstance): Promise<void> {
         })
       })
       return { pin }
+    },
+  )
+
+  /**
+   * Look up a staff member's current PIN — the RMS's eye button. Each look is
+   * recorded in the audit trail. A PIN set before PINs were kept this way, or
+   * under an old server key, cannot be shown: reset it to get a viewable one.
+   */
+  app.get<{ Params: { id: string } }>(
+    '/rms/team/staff/:id/pin',
+    { preHandler: requirePermission('staff.manage') },
+    async (request) => {
+      const id = ID.parse(request.params.id)
+      const { db, businessId } = request
+      const actor = await actorOf(request)
+      return db.$transaction(async (tx) => {
+        if (!(await tx.staffMember.findUnique({ where: { id } }))) throw notFound('team:STAFF_NOT_FOUND')
+        const credential = await tx.staffCredential.findFirst({ where: { staffId: id, kind: 'PIN' } })
+        const pin = unsealPin(credential?.secretSealed ?? null)
+        if (pin) await audit(tx, businessId, actor, { action: 'staff.pin_viewed', entityType: 'staff', entityId: id })
+        return { pin, viewable: pin !== null }
+      })
     },
   )
 

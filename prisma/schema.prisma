@@ -1108,12 +1108,16 @@ model StaffMember {
 /// How a staff member proves who they are. Only hashes are stored. A separate
 /// table so a stronger method can be added beside the PIN later.
 model StaffCredential {
-  id         String              @id @default(uuid())
-  businessId String              @map("business_id")
-  staffId    String              @map("staff_id")
-  kind       StaffCredentialKind
-  secretHash String              @map("secret_hash")
-  setAt      DateTime            @default(now()) @map("set_at")
+  id           String              @id @default(uuid())
+  businessId   String              @map("business_id")
+  staffId      String              @map("staff_id")
+  kind         StaffCredentialKind
+  secretHash   String              @map("secret_hash")
+  /// The same PIN, AES-GCM encrypted with a server-held key (src/team/seal.ts),
+  /// so management can look it up in the RMS. Never used to sign in. Null for
+  /// PINs set before this existed.
+  secretSealed String?             @map("secret_sealed")
+  setAt        DateTime            @default(now()) @map("set_at")
 
   staff StaffMember @relation(fields: [businessId, staffId], references: [businessId, id], onDelete: Cascade)
 
