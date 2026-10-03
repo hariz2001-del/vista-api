@@ -39,6 +39,28 @@ async function isStaffLockedOut(staffId: string): Promise<boolean> {
   return Boolean(row && row.resetAt > new Date() && row.count >= STAFF_PIN_LIMIT)
 }
 
+const normalise = (text: string) => text.trim().replace(/\s+/g, ' ').toLowerCase()
+
+/**
+ * Who someone typed, forgivingly: their Staff ID, their full name, or — when
+ * it picks out exactly one person — just their first name or the start of
+ * their name. Staff type "aina" for "Aina Rahman"; refusing that would read as
+ * a wrong PIN and lock them out. When the short form fits several people,
+ * every match is returned and the caller asks for the full name.
+ */
+export function matchStaff<T extends { name: string; staffCode: string }>(staff: T[], typed: string): T[] {
+  const who = normalise(typed)
+  if (!who) return []
+  const byCode = staff.filter((member) => member.staffCode.toLowerCase() === who)
+  if (byCode.length > 0) return byCode
+  const byName = staff.filter((member) => normalise(member.name) === who)
+  if (byName.length > 0) return byName
+  return staff.filter((member) => {
+    const name = normalise(member.name)
+    return name.startsWith(who) || name.split(' ').includes(who)
+  })
+}
+
 async function businessDisplayName(businessId: string): Promise<string> {
   const [settings, business] = await Promise.all([
     prisma.accountSettings.findUnique({ where: { businessId }, select: { businessName: true } }),
@@ -85,20 +107,12 @@ export async function teamAuthRoutes(app: FastifyInstance, options: AttemptOptio
   app.post('/team/auth/login', { config: attemptLimitConfig(options) }, async (request) => {
     const body = loginBody.parse(request.body)
 
-    const candidates = await prisma.staffMember.findMany({
-      where: {
-        businessId: body.orgId,
-        status: 'ACTIVE',
-        OR: [
-          { staffCode: { equals: body.who, mode: 'insensitive' } },
-          { name: { equals: body.who, mode: 'insensitive' } },
-        ],
-      },
+    // Staff are few per business, so all active ones are read and matched here.
+    const everyone = await prisma.staffMember.findMany({
+      where: { businessId: body.orgId, status: 'ACTIVE' },
       include: { credentials: { where: { kind: 'PIN' } } },
     })
-    // A Staff ID is unique; a name might not be. A Staff ID match wins.
-    const byCode = candidates.filter((staff) => staff.staffCode.toUpperCase() === body.who.toUpperCase())
-    const matches = byCode.length > 0 ? byCode : candidates
+    const matches = matchStaff(everyone, body.who)
     if (matches.length > 1) throw new DomainError('team:AMBIGUOUS_NAME', 409, messageFor('team:AMBIGUOUS_NAME'))
     const staff = matches[0]
 

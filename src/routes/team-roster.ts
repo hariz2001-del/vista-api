@@ -197,7 +197,15 @@ async function weekDetail(tx: Tx, businessId: string, weekId: string) {
         rateOverrideReason: assignment.rateOverrideReason,
         explanation: assignment.explanation,
       })),
-      openCoverage: slot.coverage[0] ?? null,
+      // Who left the seat, and who is being asked now (null: nobody left to ask).
+      openCoverage: slot.coverage[0]
+        ? {
+            id: slot.coverage[0].id,
+            isUrgent: slot.coverage[0].isUrgent,
+            vacatedBy: slot.coverage[0].vacatedAssignment?.staff.name ?? null,
+            askingName: slot.coverage[0].offers[0]?.staff.name ?? null,
+          }
+        : null,
     })),
     staff: staffRows.map((staff) => ({
       id: staff.id,

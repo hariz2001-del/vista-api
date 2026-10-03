@@ -90,7 +90,7 @@ export const MESSAGES: Record<string, string> = {
 
   'team:ORG_NOT_FOUND': 'We could not find that workplace. Check the email or code with your manager.',
   'team:INVALID_LOGIN': 'That name or PIN is not right. Try again, or ask your manager to reset your PIN.',
-  'team:AMBIGUOUS_NAME': 'More than one person has that name. Use your Staff ID instead.',
+  'team:AMBIGUOUS_NAME': 'More than one person matches that name. Type your full name, or your Staff ID.',
   'team:STAFF_NOT_FOUND': 'That staff member no longer exists.',
   'team:STAFF_HAS_HISTORY': 'They have hours or pay on record, so they cannot be deleted. Deactivate them instead — their history stays and they can no longer sign in.',
   'team:STAFF_CODE_TAKEN': 'Another staff member already has that Staff ID.',
