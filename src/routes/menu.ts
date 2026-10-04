@@ -216,6 +216,7 @@ export async function menuRoutes(app: FastifyInstance): Promise<void> {
     const { db } = request
     if (!(await db.brand.findUnique({ where: { id } }))) throw notFound('menu:BRAND_NOT_FOUND')
     if ((await db.brand.count()) <= 1) throw conflict('menu:LAST_BRAND')
+    if ((await db.stockItem.count({ where: { brandId: id } })) > 0) throw conflict('menu:BRAND_HAS_STOCK')
     await db.brand.delete({ where: { id } }).catch(translate)
     return { id }
   })

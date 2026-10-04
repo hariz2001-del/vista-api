@@ -253,6 +253,7 @@ model User {
   periodsClosed      PeriodClosure[]  @relation("PeriodsClosed")
   sessions           Session[]
   handoffCodes       HandoffCode[]
+  stockCounts        StockCount[]     @relation("StockCountsSubmitted")
 
   @@unique([businessId, id])
   @@map("users")
@@ -282,6 +283,7 @@ model Brand {
   correctionDeltas CorrectionBrandDelta[]
   expenses         Expense[]
   partner          Partner?
+  stockItems       StockItem[]
 
   @@unique([businessId, id])
   @@unique([businessId, name])
@@ -1546,4 +1548,101 @@ model TeamAuditEntry {
   @@index([businessId, createdAt])
   @@index([businessId, entityType, entityId])
   @@map("team_audit_log")
+}
+
+// ---------------------------------------------------------------------------
+// Closing stock — a quick estimate at the end of the day, not inventory
+// ---------------------------------------------------------------------------
+
+/// How full the open container is, by eye.
+enum StockBalance {
+  MORE_THAN_HALF
+  HALF
+  LESS_THAN_HALF
+}
+
+/// One thing the counter checks at closing, as the owner set it up.
+///
+/// Brand is the real brand. Category and subcategory are the owner's own
+/// labels ("Sauce Tubs", "Milk"): the store room is grouped differently from
+/// the menu, so the menu's categories are not reused for it. Nothing here is
+/// a quantity on hand; counts live on submissions.
+model StockItem {
+  id            String   @id @default(uuid())
+  businessId    String   @map("business_id")
+  brandId       String   @map("brand_id")
+  category      String
+  /// Null when the category needs no further split.
+  subcategory   String?
+  name          String
+  /// What one is counted in: "packs", "trays", "tubs". Null means plain units.
+  unitLabel     String?  @map("unit_label")
+  trackUnopened Boolean  @default(true) @map("track_unopened")
+  trackOpened   Boolean  @default(false) @map("track_opened")
+  /// More than half / half / less than half of the open one.
+  trackBalance  Boolean  @default(true) @map("track_balance")
+  /// Off: kept for the record, no longer on the counter's list.
+  isActive      Boolean  @default(true) @map("is_active")
+  sortOrder     Int      @default(0) @map("sort_order")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  brand Brand @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+
+  @@unique([businessId, id])
+  @@index([businessId, isActive])
+  @@map("stock_items")
+}
+
+/// One closing count, as submitted from the counter.
+model StockCount {
+  id            String   @id @default(uuid())
+  businessId    String   @map("business_id")
+  businessDate  DateTime @map("business_date") @db.Date
+  submittedAt   DateTime @default(now()) @map("submitted_at")
+  /// The outlet name when it was counted.
+  branchName    String   @map("branch_name")
+  /// The rostered staff member who counted, if one was picked. Not a foreign
+  /// key: the count outlives the staff record, and the name below is the record.
+  staffId       String?  @map("staff_id")
+  staffName     String   @map("staff_name")
+  submittedById String   @map("submitted_by_id")
+  remarks       String?
+
+  submittedBy User             @relation("StockCountsSubmitted", fields: [businessId, submittedById], references: [businessId, id], onDelete: Restrict)
+  lines       StockCountLine[]
+
+  @@unique([businessId, id])
+  @@index([businessId, businessDate])
+  @@map("stock_counts")
+}
+
+/// One item on a count, with the item's set-up copied in as it was that day.
+/// Renaming, regrouping or removing an item later leaves old counts as they read.
+model StockCountLine {
+  id            String        @id @default(uuid())
+  businessId    String        @map("business_id")
+  countId       String        @map("count_id")
+  /// The item it was counted from. Not a foreign key, for the same reason.
+  stockItemId   String?       @map("stock_item_id")
+  brandId       String?       @map("brand_id")
+  brandName     String        @map("brand_name")
+  category      String
+  subcategory   String?
+  name          String
+  unitLabel     String?       @map("unit_label")
+  trackUnopened Boolean       @map("track_unopened")
+  trackOpened   Boolean       @map("track_opened")
+  trackBalance  Boolean       @map("track_balance")
+  /// Where it sat on the list, so the report reads in the same order.
+  position      Int
+  /// Thousandths, so 2.5 packs is 2500 — the same convention as receipt lines.
+  unopenedMilli Int?          @map("unopened_milli")
+  openedMilli   Int?          @map("opened_milli")
+  balance       StockBalance?
+
+  count StockCount @relation(fields: [businessId, countId], references: [businessId, id], onDelete: Cascade)
+
+  @@index([countId])
+  @@map("stock_count_lines")
 }

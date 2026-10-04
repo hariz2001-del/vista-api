@@ -185,6 +185,9 @@ async function main(): Promise<void> {
     prisma.teamSettings.deleteMany(),
     prisma.teamAuditEntry.deleteMany(),
   ])
+  await prisma.stockCountLine.deleteMany()
+  await prisma.stockCount.deleteMany()
+  await prisma.stockItem.deleteMany()
   await prisma.partner.deleteMany()
   await prisma.expense.deleteMany()
   await prisma.periodClosure.deleteMany()

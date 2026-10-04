@@ -21,6 +21,7 @@ import { teamRosterRoutes } from './routes/team-roster.ts'
 import { teamStaffRoutes } from './routes/team-staff.ts'
 import { rmsRoutes } from './routes/rms.ts'
 import { shiftRoutes } from './routes/shifts.ts'
+import { stockRoutes } from './routes/stock.ts'
 import { terminalRoutes } from './routes/terminal.ts'
 
 export type AppOptions = {
@@ -141,6 +142,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(teamPayrollRoutes)
   await app.register(teamAuthRoutes, attempts)
   await app.register(teamStaffRoutes)
+  await app.register(stockRoutes)
 
   return app
 }

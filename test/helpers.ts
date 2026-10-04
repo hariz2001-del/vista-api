@@ -18,6 +18,9 @@ export const DEMO = {
  */
 export async function resetTransactional(): Promise<void> {
   await resetTeam()
+  await prisma.stockCountLine.deleteMany()
+  await prisma.stockCount.deleteMany()
+  await prisma.stockItem.deleteMany()
   await prisma.expense.deleteMany()
   await prisma.periodClosure.deleteMany()
   await prisma.terminalStatus.deleteMany()
