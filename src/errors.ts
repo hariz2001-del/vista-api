@@ -65,6 +65,9 @@ export const MESSAGES: Record<string, string> = {
   'rms:SHIFT_STILL_OPEN': 'A shift in that range is still open. Close it before settling.',
   'rms:SHIFT_NOT_OPEN': 'That shift is not open.',
   'rms:EXPENSE_NOT_FOUND': 'That expense no longer exists.',
+  'rms:EXPENSE_FROM_PAYROLL': 'Staff wages come from a paid payslip and cannot be changed here.',
+  'rms:EXPENSE_REIMBURSED':
+    'The partner has already been paid back for this, so who paid and how much can no longer change.',
   'rms:NOT_AN_ADVANCE': 'Only a cost a partner paid out of pocket can be settled.',
   'rms:ALREADY_SETTLED': 'That payment has already been settled.',
   'rms:UNKNOWN_BRAND': 'That brand does not exist.',

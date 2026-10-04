@@ -122,6 +122,106 @@ const expenseBody = z.object({
     .default([]),
 })
 
+type ExpenseBody = z.infer<typeof expenseBody>
+
+/**
+ * Itemised: the lines are the receipt, so they must add up to the amount
+ * exactly. Recomputed here from quantity and price; the form is not trusted.
+ */
+function assertItemsAddUp(body: ExpenseBody): void {
+  if (body.items.length > 0 && itemsTotalSen(body.items) !== body.amountSen) {
+    throw badRequest(
+      'rms:ITEMS_DO_NOT_ADD_UP',
+      `lines total ${itemsTotalSen(body.items)} sen, amount is ${body.amountSen} sen`,
+    )
+  }
+}
+
+/** The receipt lines as stored, each total computed here. */
+function itemRows(items: ExpenseBody['items']) {
+  return items.map((item, index) => ({
+    name: item.name,
+    quantityMilli: item.quantityMilli,
+    unit: item.unit,
+    unitPriceSen: item.unitPriceSen,
+    totalSen: lineTotalSen(item.quantityMilli, item.unitPriceSen),
+    sortOrder: index,
+  }))
+}
+
+/**
+ * The food/drinks split, snapshotted on the row. Without partner settlement
+ * the cost sits whole on the first side, which nothing reads until it is on.
+ */
+async function allocate(tx: Tx, body: ExpenseBody, withSettlement: boolean) {
+  const brands = await tx.brand.findMany({ orderBy: { sortOrder: 'asc' } })
+  const foodBrand = brands[0]
+  if (body.brandId !== null && !brands.some((brand) => brand.id === body.brandId)) {
+    throw badRequest('rms:UNKNOWN_BRAND')
+  }
+
+  const isShared = body.brandId === null
+  const isFood = body.brandId !== null && body.brandId === foodBrand?.id
+  const { foodSen, drinksSen } = !withSettlement
+    ? { foodSen: body.amountSen, drinksSen: 0 }
+    : isShared
+      ? splitShared(body.amountSen, body.foodSplitPct)
+      : isFood
+        ? { foodSen: body.amountSen, drinksSen: 0 }
+        : { foodSen: 0, drinksSen: body.amountSen }
+
+  return {
+    foodSplitPct: !withSettlement ? 100 : isShared ? body.foodSplitPct : isFood ? 100 : 0,
+    foodAmountSen: foodSen,
+    drinksAmountSen: drinksSen,
+  }
+}
+
+/**
+ * An expense the owner may still change or remove: not wages (the payslip owns
+ * those), and not inside a period both partners have already settled.
+ */
+async function loadEditableExpense(tx: Tx, id: string) {
+  const expense = await tx.expense.findUnique({ where: { id }, include: { payslip: true } })
+  if (!expense) throw notFound('rms:EXPENSE_NOT_FOUND')
+  if (expense.payslip || expense.category === 'WAGES') throw conflict('rms:EXPENSE_FROM_PAYROLL')
+  if (expense.isLocked) throw conflict('rms:PERIOD_LOCKED')
+  await assertNotLocked(tx, isoDate(expense.businessDate))
+  return expense
+}
+
+/**
+ * Take back the cash-book line an expense paid from stall funds wrote. The
+ * book is append-only, so this is a MONEY_IN on the same day rather than a
+ * deleted row: the balance is as if it never left, and the history shows why.
+ */
+async function reverseLedgerFor(
+  tx: Tx,
+  businessId: string,
+  expense: {
+    businessDate: Date
+    amountSen: number
+    category: string
+    paidBy: string
+    brandId: string | null
+    description: string
+  },
+  why: string,
+): Promise<void> {
+  if (expense.paidBy !== 'STALL_FUNDS') return
+  await tx.ledgerEntry.create({
+    data: {
+      businessId,
+      businessDate: expense.businessDate,
+      direction: 'MONEY_IN',
+      amountSen: expense.amountSen,
+      category: ledgerCategoryFor(expense.category),
+      description: `${why} · ${expense.description}`,
+      brandId: expense.brandId,
+    },
+  })
+}
+
 const adjustmentBody = z.object({
   businessDate: DATE,
   amountSen: z.number().int().positive(),
@@ -432,14 +532,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
     const body = expenseBody.parse(request.body)
     const { db, businessId } = request
 
-    // Itemised: the lines are the receipt, so they must add up to the amount
-    // exactly. Recomputed here from quantity and price; the form is not trusted.
-    if (body.items.length > 0 && itemsTotalSen(body.items) !== body.amountSen) {
-      throw badRequest(
-        'rms:ITEMS_DO_NOT_ADD_UP',
-        `lines total ${itemsTotalSen(body.items)} sen, amount is ${body.amountSen} sen`,
-      )
-    }
+    assertItemsAddUp(body)
 
     return db.$transaction(async (tx) => {
       await assertNotLocked(tx, body.businessDate)
@@ -449,21 +542,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         throw badRequest('rms:SETTLEMENT_OFF')
       }
 
-      const brands = await tx.brand.findMany({ orderBy: { sortOrder: 'asc' } })
-      const foodBrand = brands[0]
-      if (body.brandId !== null && !brands.some((brand) => brand.id === body.brandId)) {
-        throw badRequest('rms:UNKNOWN_BRAND')
-      }
-
-      const isShared = body.brandId === null
-      const isFood = body.brandId !== null && body.brandId === foodBrand?.id
-      const { foodSen, drinksSen } = !withSettlement
-        ? { foodSen: body.amountSen, drinksSen: 0 }
-        : isShared
-          ? splitShared(body.amountSen, body.foodSplitPct)
-          : isFood
-            ? { foodSen: body.amountSen, drinksSen: 0 }
-            : { foodSen: 0, drinksSen: body.amountSen }
+      const allocation = await allocate(tx, body, withSettlement)
 
       const expense = await tx.expense.create({
         data: {
@@ -473,9 +552,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
           category: body.category,
           paidBy: body.paidBy,
           brandId: body.brandId,
-          foodSplitPct: !withSettlement ? 100 : isShared ? body.foodSplitPct : isFood ? 100 : 0,
-          foodAmountSen: foodSen,
-          drinksAmountSen: drinksSen,
+          ...allocation,
           description: body.description,
           receiptNo: body.receiptNo,
           vendor: body.vendor,
@@ -486,16 +563,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
           createdById: request.user.id,
           // Nested through the composite key, so a line can only ever belong to
           // an expense of the same business.
-          items: {
-            create: body.items.map((item, index) => ({
-              name: item.name,
-              quantityMilli: item.quantityMilli,
-              unit: item.unit,
-              unitPriceSen: item.unitPriceSen,
-              totalSen: lineTotalSen(item.quantityMilli, item.unitPriceSen),
-              sortOrder: index,
-            })),
-          },
+          items: { create: itemRows(body.items) },
         },
       })
 
@@ -516,6 +584,116 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       return { id: expense.id }
     })
   })
+
+  /**
+   * Correct a logged expense: the whole row is replaced by what the form sends.
+   * If the cash it moved changes (amount, day, payer, category or brand), the
+   * old cash-book line is reversed and a new one written, so the balance always
+   * matches the expense as it now reads.
+   *
+   * A partner who has already been reimbursed was paid a fixed sum, so who paid
+   * and how much can no longer change; everything else still can.
+   */
+  app.put<{ Params: { id: string } }>(
+    '/rms/expenses/:id',
+    { preHandler: requireOwner },
+    async (request) => {
+      const id = ID.parse(request.params.id)
+      const body = expenseBody.parse(request.body)
+      const { db, businessId } = request
+
+      assertItemsAddUp(body)
+
+      return db.$transaction(async (tx) => {
+        const old = await loadEditableExpense(tx, id)
+        await assertNotLocked(tx, body.businessDate)
+
+        const withSettlement = await settlementEnabled(tx, businessId)
+        if (!withSettlement && body.paidBy !== 'STALL_FUNDS') {
+          throw badRequest('rms:SETTLEMENT_OFF')
+        }
+
+        const reimbursed = old.paidBy !== 'STALL_FUNDS' && old.isSettled
+        if (reimbursed && (body.paidBy !== old.paidBy || body.amountSen !== old.amountSen)) {
+          throw conflict('rms:EXPENSE_REIMBURSED')
+        }
+
+        const allocation = await allocate(tx, body, withSettlement)
+        const businessDate = toDate(body.businessDate)
+
+        await tx.expense.update({
+          where: { id },
+          data: {
+            businessDate,
+            amountSen: body.amountSen,
+            category: body.category,
+            paidBy: body.paidBy,
+            brandId: body.brandId,
+            ...allocation,
+            description: body.description,
+            receiptNo: body.receiptNo,
+            vendor: body.vendor,
+            receiptTime: body.receiptTime,
+            paymentMethod: body.paymentMethod,
+            notes: body.notes,
+            isSettled: body.paidBy === 'STALL_FUNDS' || reimbursed,
+            items: { deleteMany: {}, create: itemRows(body.items) },
+          },
+        })
+
+        const cashMoved =
+          old.paidBy !== body.paidBy ||
+          old.amountSen !== body.amountSen ||
+          isoDate(old.businessDate) !== body.businessDate ||
+          ledgerCategoryFor(old.category) !== ledgerCategoryFor(body.category) ||
+          old.brandId !== body.brandId
+
+        if (cashMoved) {
+          await reverseLedgerFor(tx, businessId, old, 'Corrected')
+          if (body.paidBy === 'STALL_FUNDS') {
+            await tx.ledgerEntry.create({
+              data: {
+                businessId,
+                businessDate,
+                direction: 'MONEY_OUT',
+                amountSen: body.amountSen,
+                category: ledgerCategoryFor(body.category),
+                description: body.description,
+                brandId: body.brandId,
+              },
+            })
+          }
+        }
+
+        return { id }
+      })
+    },
+  )
+
+  /**
+   * Remove an expense logged by mistake. Money it took from stall funds is put
+   * back in the cash book. A partner already reimbursed for it cannot have it
+   * removed: that payment really happened.
+   */
+  app.delete<{ Params: { id: string } }>(
+    '/rms/expenses/:id',
+    { preHandler: requireOwner },
+    async (request) => {
+      const id = ID.parse(request.params.id)
+      const { db, businessId } = request
+
+      return db.$transaction(async (tx) => {
+        const expense = await loadEditableExpense(tx, id)
+        if (expense.paidBy !== 'STALL_FUNDS' && expense.isSettled) {
+          throw conflict('rms:EXPENSE_REIMBURSED')
+        }
+
+        await reverseLedgerFor(tx, businessId, expense, 'Deleted')
+        await tx.expense.delete({ where: { id } })
+        return { id }
+      })
+    },
+  )
 
   /**
    * Reimburse a partner who paid out of pocket. The flag flips with a guarded
