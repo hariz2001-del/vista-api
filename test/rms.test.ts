@@ -46,7 +46,16 @@ type Snapshot = {
   orders: Array<{ queueNumber: string; totalAmountSen: number; lines: unknown[] }>
   corrections: Array<{ kind: string; deltaSen: number; originalQueueNumber: string; reason: string }>
   ledger: Array<{ category: string; direction: string; amountSen: number; description: string }>
-  expenses: Array<{ id: string; isSettled: boolean; foodAmountSen: number; drinksAmountSen: number }>
+  expenses: Array<{
+    id: string
+    isSettled: boolean
+    amountSen: number
+    description: string
+    notes: string | null
+    foodAmountSen: number
+    drinksAmountSen: number
+    items: Array<{ name: string; totalSen: number }>
+  }>
   shifts: Array<{ id: string; closedAt: string | null; systemNetSalesSen: number | null; reconciliationStatus: string }>
   closures: Array<{ foodNetSalesSen: number; hostCommissionSen: number }>
   terminal: { lastSeenAt: string | null; consecutiveSyncFailures: number }
@@ -63,7 +72,7 @@ async function snapshot(): Promise<Snapshot> {
   return response.json() as Snapshot
 }
 
-function asOwner(method: 'POST' | 'PUT' | 'PATCH', url: string, payload?: unknown) {
+function asOwner(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', url: string, payload?: unknown) {
   return app.inject({ method, url, headers: authed(ownerToken), payload: payload as object })
 }
 
@@ -228,6 +237,122 @@ describe('rms — expenses', () => {
     expect(books.ledger).toEqual([
       expect.objectContaining({ direction: 'MONEY_OUT', amountSen: 1000, description: 'Reimbursed · Exhaust fan repair' }),
     ])
+  })
+})
+
+describe('rms — correcting and deleting an expense', () => {
+  const rent = {
+    businessDate,
+    amountSen: 5000,
+    category: 'RENT',
+    paidBy: 'STALL_FUNDS',
+    brandId: null,
+    foodSplitPct: 70,
+    description: 'Stall rent',
+  }
+
+  /** Net cash the book shows leaving: out minus in. */
+  function cashOut(ledger: Snapshot['ledger']): number {
+    return ledger.reduce(
+      (sum, entry) => sum + (entry.direction === 'MONEY_OUT' ? entry.amountSen : -entry.amountSen),
+      0,
+    )
+  }
+
+  it('re-splits a corrected amount and moves the cash book by reversing, never rewriting', async () => {
+    await asOwner('POST', '/rms/expenses', rent)
+    const { id } = (await snapshot()).expenses[0]!
+
+    const edited = await asOwner('PUT', `/rms/expenses/${id}`, { ...rent, amountSen: 4200 })
+    expect(edited.statusCode).toBe(200)
+
+    let books = await snapshot()
+    expect(books.expenses).toHaveLength(1)
+    expect(books.expenses[0]).toMatchObject({ amountSen: 4200, foodAmountSen: 2940, drinksAmountSen: 1260 })
+    expect(books.ledger).toEqual([
+      expect.objectContaining({ direction: 'MONEY_OUT', amountSen: 5000 }),
+      expect.objectContaining({ direction: 'MONEY_IN', amountSen: 5000, description: 'Corrected · Stall rent' }),
+      expect.objectContaining({ direction: 'MONEY_OUT', amountSen: 4200 }),
+    ])
+    expect(cashOut(books.ledger)).toBe(4200)
+
+    // A remark or a vendor moves no money, so it writes nothing to the book.
+    await asOwner('PUT', `/rms/expenses/${id}`, { ...rent, amountSen: 4200, notes: 'March' })
+    books = await snapshot()
+    expect(books.expenses[0]?.notes).toBe('March')
+    expect(books.ledger).toHaveLength(3)
+  })
+
+  it('replaces the receipt lines, and still refuses lines that do not add up', async () => {
+    const itemised = {
+      ...rent,
+      category: 'RAW_MATERIALS',
+      amountSen: 1500,
+      description: 'Market',
+      items: [{ name: 'Ayam', quantityMilli: 1000, unitPriceSen: 1500 }],
+    }
+    await asOwner('POST', '/rms/expenses', itemised)
+    const { id } = (await snapshot()).expenses[0]!
+
+    const lines = [
+      { name: 'Ayam', quantityMilli: 2000, unitPriceSen: 1000 },
+      { name: 'Telur', quantityMilli: 1000, unitPriceSen: 500 },
+    ]
+    const bad = await asOwner('PUT', `/rms/expenses/${id}`, { ...itemised, amountSen: 9999, items: lines })
+    expect(bad.statusCode).toBe(400)
+
+    const good = await asOwner('PUT', `/rms/expenses/${id}`, { ...itemised, amountSen: 2500, items: lines })
+    expect(good.statusCode).toBe(200)
+    expect((await snapshot()).expenses[0]?.items).toEqual([
+      expect.objectContaining({ name: 'Ayam', totalSen: 2000 }),
+      expect.objectContaining({ name: 'Telur', totalSen: 500 }),
+    ])
+  })
+
+  it('deletes a stall-funded expense and puts its money back in the cash book', async () => {
+    await asOwner('POST', '/rms/expenses', rent)
+    const { id } = (await snapshot()).expenses[0]!
+
+    const removed = await asOwner('DELETE', `/rms/expenses/${id}`)
+    expect(removed.statusCode).toBe(200)
+
+    const books = await snapshot()
+    expect(books.expenses).toHaveLength(0)
+    expect(books.ledger).toContainEqual(
+      expect.objectContaining({ direction: 'MONEY_IN', amountSen: 5000, description: 'Deleted · Stall rent' }),
+    )
+    expect(cashOut(books.ledger)).toBe(0)
+
+    const again = await asOwner('DELETE', `/rms/expenses/${id}`)
+    expect(again.statusCode).toBe(404)
+  })
+
+  it('keeps a reimbursed advance: its payer and amount are fixed, its details are not', async () => {
+    const advance = { ...rent, amountSen: 1000, category: 'MAINTENANCE', paidBy: 'PARTNER_DRINKS', description: 'Fan' }
+    await asOwner('POST', '/rms/expenses', advance)
+    await asOwner('POST', '/rms/expenses', { ...advance, description: 'Not yet paid back' })
+    const books = await snapshot()
+    const paid = books.expenses.find((expense) => expense.description === 'Fan')!
+    const unpaid = books.expenses.find((expense) => expense.description === 'Not yet paid back')!
+    await asOwner('POST', `/rms/expenses/${paid.id}/settle`)
+
+    const deletePaid = await asOwner('DELETE', `/rms/expenses/${paid.id}`)
+    expect(deletePaid.statusCode).toBe(409)
+    expect(deletePaid.json()).toMatchObject({ error: 'rms:EXPENSE_REIMBURSED' })
+
+    const resize = await asOwner('PUT', `/rms/expenses/${paid.id}`, { ...advance, amountSen: 800 })
+    expect(resize.statusCode).toBe(409)
+
+    const rename = await asOwner('PUT', `/rms/expenses/${paid.id}`, { ...advance, description: 'Exhaust fan' })
+    expect(rename.statusCode).toBe(200)
+
+    // An advance never paid back moved no stall money: deleting it writes nothing.
+    const deleteUnpaid = await asOwner('DELETE', `/rms/expenses/${unpaid.id}`)
+    expect(deleteUnpaid.statusCode).toBe(200)
+    const after = await snapshot()
+    expect(after.expenses.map((expense) => expense.description)).toEqual(['Exhaust fan'])
+    expect(after.expenses[0]?.isSettled).toBe(true)
+    expect(after.ledger).toHaveLength(1)
   })
 })
 
