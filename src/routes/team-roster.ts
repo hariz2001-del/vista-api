@@ -652,9 +652,11 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
   })
 
   /**
-   * Give each shift to the staff who picked it, first come first served, until
-   * it is full. Nobody is put on two shifts that overlap, and nobody already on
-   * a shift is moved. Whoever is left over stays as a pick to place by hand.
+   * Give each shift to the staff who applied for it until it is full. Priority
+   * goes to whoever offered the most shifts that week — the staff app tells
+   * them so — and between equals, to whoever applied first. Nobody is put on
+   * two shifts that overlap, and nobody already on a shift is moved. Whoever
+   * is left over stays as an application to place by hand.
    */
   app.post<{ Params: { id: string } }>('/rms/team/weeks/:id/fill-from-picks', roster, async (request) => {
     const id = ID.parse(request.params.id)
@@ -670,11 +672,18 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
             .filter((assignment) => assignment.status === 'ACTIVE')
             .map((assignment) => ({ staffId: assignment.staffId, startsAt: slot.startsAt, endsAt: slot.endsAt })),
         )
+        const offered = new Map<string, number>()
+        for (const slot of week.slots) {
+          for (const application of slot.applications) offered.set(application.staffId, (offered.get(application.staffId) ?? 0) + 1)
+        }
         const added: Array<{ slotId: string; staffId: string }> = []
         let leftOver = 0
         for (const slot of week.slots) {
           let open = slot.requiredStaff - slot.assignments.filter((assignment) => assignment.status === 'ACTIVE').length
-          const picks = slot.applications.toSorted((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+          const picks = slot.applications.toSorted(
+            (a, b) =>
+              (offered.get(b.staffId) ?? 0) - (offered.get(a.staffId) ?? 0) || a.createdAt.getTime() - b.createdAt.getTime(),
+          )
           for (const pick of picks) {
             if (slot.assignments.some((assignment) => assignment.staffId === pick.staffId && assignment.status === 'ACTIVE')) continue
             const busy = placed.some((p) => p.staffId === pick.staffId && p.startsAt < slot.endsAt && p.endsAt > slot.startsAt)

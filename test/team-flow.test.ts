@@ -86,7 +86,7 @@ async function openWeek(t: Team, weekStart: string, shifts: Array<{ day: number;
 }
 
 describe('team — staff pick, management gives', () => {
-  it('gives each shift to the staff who picked it, first come, never two at once', async () => {
+  it('gives each shift to applicants, most shifts offered first, never two at once', async () => {
     const t = await team(['Aina', 'Amir', 'Siti'])
     const week = await openWeek(t, futureMonday(), [
       { day: 0, start: '10:00', end: '14:00', required: 2 },
@@ -105,12 +105,13 @@ describe('team — staff pick, management gives', () => {
     const names = (slot: WeekDetail['slots'][number]) =>
       slot.assignments.filter((a) => a.status === 'ACTIVE').map((a) => Object.keys(t.staff).find((n) => t.staff[n]!.id === a.staffId)).sort()
     const [m, o, tu] = filled.detail.slots
-    // Morning goes to the first two to pick. Aina is then busy at 12, so 12–4 goes to Siti.
-    expect(names(m!)).toEqual(['Aina', 'Amir'])
-    expect(names(o!)).toEqual(['Siti'])
+    // Siti offered 3 shifts, Aina 2, Amir 1: the morning's two places go to Siti and Aina.
+    // Both are then busy at 12, so 12–4 stays open with both left as applications.
+    expect(names(m!)).toEqual(['Aina', 'Siti'])
+    expect(names(o!)).toEqual([])
     expect(names(tu!)).toEqual(['Siti'])
-    expect(filled.added).toBe(4)
-    expect(filled.leftOver).toBe(2)
+    expect(filled.added).toBe(3)
+    expect(filled.leftOver).toBe(3)
 
     // Running it again changes nothing.
     const again = await ok<{ added: number }>(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/fill-from-picks`)
@@ -118,6 +119,58 @@ describe('team — staff pick, management gives', () => {
 
     await ok(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/publish`)
     expect((await call(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/fill-from-picks`)).statusCode).toBe(409)
+  })
+})
+
+describe('team — staff submit their applications', () => {
+  it('takes the whole set at once, can be changed while open, and counts applicants per shift', async () => {
+    const t = await team(['Aina', 'Amir'])
+    const week = await openWeek(t, futureMonday(), [
+      { day: 0, start: '10:00', end: '14:00', required: 2 },
+      { day: 1, start: '10:00', end: '14:00' },
+      { day: 2, start: '10:00', end: '14:00' },
+    ])
+    const [s1, s2, s3] = week.slots.map((slot) => slot.id)
+    const aina = t.staff.Aina!.token
+    const amir = t.staff.Amir!.token
+    const url = `/team/weeks/${week.week.id}/applications`
+
+    expect(await ok(aina, 'PUT', url, { slotIds: [s1, s2] })).toMatchObject({ applied: 2, added: 2, removed: 0 })
+    await ok(amir, 'PUT', url, { slotIds: [s1] })
+    // Changed mind: swap Tuesday for Wednesday.
+    expect(await ok(aina, 'PUT', url, { slotIds: [s1, s3] })).toMatchObject({ applied: 2, added: 1, removed: 1 })
+
+    type Slot = { id: string; myStatus: string; applicantCount: number; needed: number }
+    const seen = (await ok<{ weeks: Array<{ appliedCount: number; slots: Slot[] }> }>(aina, 'GET', '/team/weeks')).weeks[0]!
+    expect(seen.appliedCount).toBe(2)
+    expect(seen.slots.map((slot) => [slot.myStatus, slot.applicantCount, slot.needed])).toEqual([
+      ['APPLIED', 2, 2],
+      ['AVAILABLE', 0, 1],
+      ['APPLIED', 1, 1],
+    ])
+    // Counts only: nobody else's name rides along.
+    expect(JSON.stringify(seen)).not.toContain('Amir')
+
+    // The RMS sees exactly what was submitted.
+    const detail = await ok<WeekDetail>(t.b.ownerToken, 'GET', `/rms/team/weeks/${week.week.id}`)
+    expect(detail.slots.map((slot) => slot.applicants.length)).toEqual([2, 0, 1])
+
+    // Over the limit, a shift from another week, or after closing: refused.
+    await ok(t.b.ownerToken, 'PATCH', `/rms/team/weeks/${week.week.id}`, { applicationLimit: 2 })
+    expect((await call(aina, 'PUT', url, { slotIds: [s1, s2, s3] })).json().error).toBe('team:APPLICATION_LIMIT')
+    const other = await openWeek(t, futureMonday(5), [{ day: 0, start: '10:00', end: '14:00' }])
+    expect((await call(aina, 'PUT', url, { slotIds: [other.slots[0]!.id] })).statusCode).toBe(404)
+    await ok(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/status`, { status: 'APPLICATIONS_CLOSED' })
+    expect((await call(aina, 'PUT', url, { slotIds: [] })).json().error).toBe('team:APPLICATIONS_CLOSED')
+
+    // A shift already under way cannot be newly applied for.
+    const past = await openWeek(t, addDays(mondayOf(mytDate(new Date())), -7), [{ day: 0, start: '10:00', end: '14:00' }])
+    const late = await call(aina, 'PUT', `/team/weeks/${past.week.id}/applications`, { slotIds: [past.slots[0]!.id] })
+    expect(late.json().error).toBe('team:SHIFT_STARTED')
+
+    // Withdrawing everything is a submission too.
+    await ok(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/status`, { status: 'APPLICATIONS_OPEN' })
+    expect(await ok(amir, 'PUT', url, { slotIds: [] })).toMatchObject({ applied: 0, removed: 1 })
   })
 })
 
