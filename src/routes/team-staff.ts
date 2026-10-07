@@ -21,6 +21,7 @@ import { exportRoster } from './team-roster.ts'
  */
 
 const ID = z.string().uuid()
+const applicationsBody = z.object({ slotIds: z.array(ID).max(100) })
 
 /** A shift may be clocked into from this long before it starts. */
 const EARLY_CLOCK_IN_MS = 60 * 60_000
@@ -149,7 +150,7 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
         slots: {
           orderBy: { startsAt: 'asc' },
           include: {
-            applications: { where: { staffId }, select: { status: true } },
+            applications: { where: { status: 'APPLIED' }, select: { staffId: true } },
             assignments: { select: { id: true, staffId: true, status: true, staff: { select: { name: true } } } },
             coverage: {
               where: { status: 'OPEN' },
@@ -165,7 +166,7 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
         const start = week.weekStart.toISOString().slice(0, 10)
         const published = week.status === 'PUBLISHED'
         const open = windowOpen(week, now)
-        const appliedCount = week.slots.filter((slot) => slot.applications[0]?.status === 'APPLIED').length
+        const appliedCount = week.slots.filter((slot) => slot.applications.some((application) => application.staffId === staffId)).length
         return {
           id: week.id,
           weekStart: start,
@@ -179,7 +180,7 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
           slots: week.slots.map((slot) => {
             const mine = slot.assignments.find((assignment) => assignment.staffId === staffId && assignment.status === 'ACTIVE')
             const withdrew = slot.assignments.some((assignment) => assignment.staffId === staffId && assignment.status === 'WITHDRAWN')
-            const applied = slot.applications[0]?.status === 'APPLIED'
+            const applied = slot.applications.some((application) => application.staffId === staffId)
             const offer = slot.coverage.flatMap((item) => item.offers)[0]
             let status: MyStatus
             if (published && offer) status = 'REPLACEMENT_OFFERED'
@@ -204,6 +205,11 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
               canUnapply: open && applied,
               canWithdraw: Boolean(mine) && published && now.getTime() < withdrawCutoff,
               withdrawBy: new Date(withdrawCutoff).toISOString(),
+              // How many have applied, never who: the live counter on each shift.
+              applicantCount: slot.applications.length,
+              needed: slot.requiredStaff,
+              // A shift already under way can no longer be applied for.
+              started: slot.startsAt.getTime() <= now.getTime(),
               // Only once published, and only names: the same as the shared roster.
               workingWith: published
                 ? slot.assignments
@@ -251,6 +257,61 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
       await audit(tx, businessId, actor, { action: 'application.applied', entityType: 'shift', entityId: slotId })
     })
     return { ok: true }
+  })
+
+  /**
+   * Submit this week's applications in one go: exactly these shifts, no
+   * others. Staff pick on the phone and confirm with one button, and can
+   * submit a changed set as often as they like while applications are open.
+   */
+  app.put<{ Params: { id: string } }>('/team/weeks/:id/applications', staffOnly, async (request) => {
+    const weekId = ID.parse(request.params.id)
+    const { slotIds } = applicationsBody.parse(request.body)
+    const staffId = me(request)
+    const { db, businessId } = request
+    const actor = await actorOf(request)
+    const wanted = new Set(slotIds)
+    return db.$transaction(async (tx) => {
+      const week = await tx.rosterWeek.findUnique({ where: { id: weekId }, include: { slots: { select: { id: true, startsAt: true } } } })
+      if (!week) throw notFound('team:WEEK_NOT_FOUND')
+      if (!windowOpen(week, new Date())) throw conflict('team:APPLICATIONS_CLOSED')
+      const inWeek = new Set(week.slots.map((slot) => slot.id))
+      if ([...wanted].some((id) => !inWeek.has(id))) throw notFound('team:SHIFT_NOT_FOUND')
+      if (wanted.size > week.applicationLimit) throw conflict('team:APPLICATION_LIMIT')
+      // One submission at a time per person, so a double tap cannot interleave.
+      await tx.$queryRaw`SELECT id FROM staff_members WHERE id = ${staffId} AND business_id = ${businessId} FOR UPDATE`
+
+      const current = await tx.shiftApplication.findMany({
+        where: { staffId, status: 'APPLIED', slot: { rosterWeekId: weekId } },
+        select: { slotId: true },
+      })
+      const had = new Set(current.map((application) => application.slotId))
+      const added = [...wanted].filter((id) => !had.has(id))
+      const now = new Date()
+      const started = new Set(week.slots.filter((slot) => slot.startsAt <= now).map((slot) => slot.id))
+      if (added.some((id) => started.has(id))) throw conflict('team:SHIFT_STARTED')
+      const removed = [...had].filter((id) => !wanted.has(id))
+      if (removed.length > 0) {
+        await tx.shiftApplication.updateMany({ where: { staffId, slotId: { in: removed } }, data: { status: 'WITHDRAWN' } })
+      }
+      for (const slotId of added) {
+        await tx.shiftApplication.upsert({
+          where: { slotId_staffId: { slotId, staffId } },
+          // A shift picked again counts from now, like a fresh application.
+          update: { status: 'APPLIED', createdAt: new Date() },
+          create: { businessId, slotId, staffId },
+        })
+      }
+      if (added.length + removed.length > 0) {
+        await audit(tx, businessId, actor, {
+          action: 'application.submitted',
+          entityType: 'roster_week',
+          entityId: weekId,
+          after: { added, removed, total: wanted.size },
+        })
+      }
+      return { ok: true, applied: wanted.size, added: added.length, removed: removed.length }
+    })
   })
 
   app.delete<{ Params: { id: string } }>('/team/slots/:id/apply', staffOnly, async (request) => {
