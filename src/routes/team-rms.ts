@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { permissionsFor, requirePermission } from '../auth.ts'
+import { permissionsFor, requirePermission, signSession } from '../auth.ts'
 import type { Tx } from '../db.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
 import { actorOf, audit } from '../team/audit.ts'
@@ -400,6 +400,40 @@ export async function teamRmsRoutes(app: FastifyInstance): Promise<void> {
         })
       })
       return { pin }
+    },
+  )
+
+  /**
+   * See the Team app exactly as this staff member does: a STAFF session marked
+   * view-only, for an hour. It reads what they would read and the server
+   * refuses every change (requireStaff). Their own phones are not touched.
+   */
+  app.post<{ Params: { id: string } }>(
+    '/rms/team/staff/:id/view',
+    { preHandler: requirePermission('staff.manage') },
+    async (request) => {
+      const id = ID.parse(request.params.id)
+      const { db, businessId } = request
+      const actor = await actorOf(request)
+      const sessionId = await db.$transaction(async (tx) => {
+        const staff = await tx.staffMember.findUnique({ where: { id } })
+        if (!staff) throw notFound('team:STAFF_NOT_FOUND')
+        if (staff.status !== 'ACTIVE') throw conflict('team:STAFF_INACTIVE')
+        const session = await tx.session.create({
+          data: { businessId, userId: request.user.id, scope: 'STAFF', staffId: id },
+        })
+        await audit(tx, businessId, actor, { action: 'staff.viewed_as', entityType: 'staff', entityId: id })
+        return session.id
+      })
+      const token = signSession((payload, options) => app.jwt.sign(payload, options), {
+        id: request.user.id,
+        email: '',
+        role: 'STAFF',
+        sid: sessionId,
+        scope: 'STAFF',
+        viewOnly: true,
+      })
+      return { token }
     },
   )
 

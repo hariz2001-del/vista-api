@@ -66,7 +66,11 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
       where: { id: me(request) },
       select: { id: true, name: true, staffCode: true },
     })
-    return { staff, org: { id: request.businessId, name: await orgName(request.db, request.businessId) } }
+    return {
+      staff,
+      org: { id: request.businessId, name: await orgName(request.db, request.businessId) },
+      viewOnly: Boolean(request.user.viewOnly),
+    }
   })
 
   /** The front page: am I clocked in, offers waiting for me, my next shifts. */

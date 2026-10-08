@@ -167,6 +167,34 @@ describe('team — staff and PINs', () => {
     expect((await pinOnly(b, pin)).statusCode).toBe(429)
   })
 
+  it('lets management see the app as one staff member does, reading only', async () => {
+    const b = await makeBusiness(app)
+    const { staff, pin } = await addStaff(b, { name: 'Aina' })
+    const own = (await pinOnly(b, pin)).json().token as string
+
+    const opened = await call(b.ownerToken, 'POST', `/rms/team/staff/${staff.id}/view`)
+    expect(opened.statusCode, opened.body).toBe(200)
+    const view = opened.json().token as string
+    const me = await call(view, 'GET', '/team/me')
+    expect(me.json()).toMatchObject({ staff: { name: 'Aina' }, viewOnly: true })
+    expect((await call(view, 'GET', '/team/home')).statusCode).toBe(200)
+    expect((await call(view, 'GET', '/team/pay')).statusCode).toBe(200)
+    // Nothing can be changed from the preview, signing out included.
+    const write = await call(view, 'POST', '/team/attendance/clock-in')
+    expect(write.statusCode).toBe(403)
+    expect(write.json().error).toBe('team:VIEW_ONLY')
+    // Aina's own phone is untouched, and is not view-only.
+    expect((await call(own, 'GET', '/team/me')).json().viewOnly).toBe(false)
+
+    // Only management can open it.
+    expect((await call(own, 'POST', `/rms/team/staff/${staff.id}/view`)).statusCode).toBe(403)
+    expect((await call(b.counterToken, 'POST', `/rms/team/staff/${staff.id}/view`)).statusCode).toBe(403)
+    const other = await makeBusiness(app)
+    expect((await call(other.ownerToken, 'POST', `/rms/team/staff/${staff.id}/view`)).statusCode).toBe(404)
+    await call(b.ownerToken, 'PATCH', `/rms/team/staff/${staff.id}`, { status: 'INACTIVE' })
+    expect((await call(b.ownerToken, 'POST', `/rms/team/staff/${staff.id}/view`)).json().error).toBe('team:STAFF_INACTIVE')
+  })
+
   it('ends a staff member’s sessions when their PIN is reset or they are deactivated', async () => {
     const b = await makeBusiness(app)
     const { staff, pin } = await addStaff(b, { name: 'Sarah' })
