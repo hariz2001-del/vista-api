@@ -123,6 +123,7 @@ export const MESSAGES: Record<string, string> = {
   'team:COVERAGE_NOT_FOUND': 'That cover request no longer exists.',
   'team:COVERAGE_CLOSED': 'That shift has already been covered or the request was cancelled.',
   'team:APPLICATIONS_CLOSED': 'Applications for this week are closed.',
+  'team:VIEW_ONLY': 'This is a preview of what staff see, so nothing can be changed here.',
   'team:SHIFT_STARTED': 'That shift has already started, so it can no longer be applied for.',
   'team:APPLICATION_LIMIT': 'You have applied for the most shifts allowed this week. Remove one to pick another.',
   'team:NOT_PUBLISHED': 'This roster has not been published yet.',

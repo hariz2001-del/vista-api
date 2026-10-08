@@ -36,6 +36,8 @@ export const OWNER_SESSION_TTL = '12h'
 export const HUB_SESSION_TTL = '30m'
 /** A staff phone stays signed in for a month; a PIN reset ends it at once. */
 export const STAFF_SESSION_TTL = '30d'
+/** Management looking at the app as one staff member sees it. */
+export const STAFF_VIEW_TTL = '1h'
 
 export type SessionUser = {
   id: string
@@ -44,6 +46,11 @@ export type SessionUser = {
   /** The session row this token belongs to. Checked on every request. */
   sid: string
   scope: SessionScope
+  /**
+   * A STAFF session opened from the RMS so management can see the app as that
+   * person does: it reads everything they would see and changes nothing.
+   */
+  viewOnly?: boolean
 }
 
 declare module '@fastify/jwt' {
@@ -71,7 +78,7 @@ export function signSession(
 ): string {
   if (payload.scope === 'OWNER') return sign(payload, { expiresIn: OWNER_SESSION_TTL })
   if (payload.scope === 'HUB') return sign(payload, { expiresIn: HUB_SESSION_TTL })
-  if (payload.scope === 'STAFF') return sign(payload, { expiresIn: STAFF_SESSION_TTL })
+  if (payload.scope === 'STAFF') return sign(payload, { expiresIn: payload.viewOnly ? STAFF_VIEW_TTL : STAFF_SESSION_TTL })
   return sign(payload)
 }
 
@@ -153,6 +160,8 @@ export async function requireHub(request: FastifyRequest, _reply: FastifyReply):
 export async function requireStaff(request: FastifyRequest, _reply: FastifyReply): Promise<void> {
   await authenticate(request)
   if (request.user.scope !== 'STAFF' || !request.staffId) throw forbidden('auth:FORBIDDEN')
+  // Management's preview reads; it never applies, accepts, withdraws or clocks in.
+  if (request.user.viewOnly && request.method !== 'GET') throw forbidden('team:VIEW_ONLY')
   const staff = await request.db.staffMember.findUnique({
     where: { id: request.staffId },
     select: { status: true },
