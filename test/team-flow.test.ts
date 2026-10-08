@@ -122,6 +122,70 @@ describe('team — staff pick, management gives', () => {
   })
 })
 
+describe('team — backup staff', () => {
+  type Backup = { id: string; staffId: string; status: string; isBackup: boolean; hoursOnly: boolean; startTime: string; endTime: string; minutes: number }
+  const backups = (detail: WeekDetail) =>
+    (detail.slots[0]!.assignments as unknown as Backup[]).filter((a) => a.status === 'ACTIVE' && a.isBackup)
+
+  it('adds backups beyond the places, with their own times or hours, and pays exactly those', async () => {
+    const t = await team(['Aina', 'Amir', 'Siti'])
+    // Last week: recent enough for the staff app, and over, so its hours can be confirmed.
+    const monday = addDays(mondayOf(mytDate(new Date())), -7)
+    const week = await ok<WeekDetail>(t.b.ownerToken, 'POST', '/rms/team/weeks', { weekStart: monday, fromTemplate: false })
+    const made = await ok<WeekDetail>(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/slots`, {
+      date: addDays(monday, 4), startTime: '16:00', endTime: '22:00', requiredStaff: 1,
+    })
+    const slotId = made.slots[0]!.id
+    await ok(t.b.ownerToken, 'POST', `/rms/team/slots/${slotId}/assignments`, { staffId: t.staff.Aina!.id })
+
+    // Only on a shift that allows backups.
+    const refused = await call(t.b.ownerToken, 'POST', `/rms/team/slots/${slotId}/backups`, { staffId: t.staff.Amir!.id, minutes: 180 })
+    expect(refused.json().error).toBe('team:BACKUP_NOT_ALLOWED')
+    await ok(t.b.ownerToken, 'PATCH', `/rms/team/slots/${slotId}`, { allowsBackup: true })
+
+    await ok(t.b.ownerToken, 'POST', `/rms/team/slots/${slotId}/backups`, { staffId: t.staff.Amir!.id, minutes: 180 })
+    const detail = await ok<WeekDetail>(t.b.ownerToken, 'POST', `/rms/team/slots/${slotId}/backups`, {
+      staffId: t.staff.Siti!.id, startTime: '18:00', endTime: '21:30',
+    })
+    expect(backups(detail).map((b) => [b.staffId, b.startTime, b.endTime, b.minutes, b.hoursOnly])).toEqual([
+      [t.staff.Amir!.id, '16:00', '19:00', 180, true],
+      [t.staff.Siti!.id, '18:00', '21:30', 210, false],
+    ])
+    // Backups fill no place: one of one, not three.
+    const listed = await ok<{ weeks: Array<{ filled: number; seats: number }> }>(t.b.ownerToken, 'GET', '/rms/team/weeks')
+    expect(listed.weeks[0]).toMatchObject({ filled: 1, seats: 1 })
+    // Not twice on one shift.
+    expect((await call(t.b.ownerToken, 'POST', `/rms/team/slots/${slotId}/backups`, { staffId: t.staff.Aina!.id })).json().error).toBe('team:ALREADY_ASSIGNED')
+
+    // Siti's time changes to two hours.
+    const siti = backups(detail).find((b) => b.staffId === t.staff.Siti!.id)!
+    const changed = await ok<WeekDetail>(t.b.ownerToken, 'PATCH', `/rms/team/assignments/${siti.id}/time`, { minutes: 120 })
+    expect(backups(changed).find((b) => b.id === siti.id)).toMatchObject({ startTime: '16:00', endTime: '18:00', minutes: 120, hoursOnly: true })
+
+    await ok(t.b.ownerToken, 'POST', `/rms/team/weeks/${week.week.id}/publish`)
+
+    // Amir sees it as a backup, at his own times.
+    const mine = (await ok<{ weeks: Array<{ slots: Array<{ myStatus: string; backup: boolean; startTime: string; endTime: string }> }> }>(t.staff.Amir!.token, 'GET', '/team/weeks')).weeks[0]!.slots[0]!
+    expect(mine).toMatchObject({ myStatus: 'CONFIRMED', backup: true, startTime: '16:00', endTime: '19:00' })
+
+    // Hours worked: each backup at their own length.
+    const unconfirmed = await ok<{ shifts: Array<{ staffId: string; minutes: number }> }>(t.b.ownerToken, 'GET', `/rms/team/attendance/unconfirmed?start=${monday}&end=${addDays(monday, 6)}`)
+    expect(Object.fromEntries(unconfirmed.shifts.map((s) => [s.staffId, s.minutes]))).toEqual({
+      [t.staff.Aina!.id]: 360,
+      [t.staff.Amir!.id]: 180,
+      [t.staff.Siti!.id]: 120,
+    })
+    const amirShift = (await prisma.assignment.findFirstOrThrow({ where: { staffId: t.staff.Amir!.id } })).id
+    await ok(t.b.ownerToken, 'POST', '/rms/team/attendance/from-roster', { assignmentIds: [amirShift] })
+    const record = await prisma.attendanceRecord.findFirstOrThrow({ where: { assignmentId: amirShift } })
+    expect((record.approvedEndAt!.getTime() - record.approvedStartAt!.getTime()) / 60_000).toBe(180)
+
+    // Taking a backup off a published roster leaves no gap to fill.
+    await ok(t.b.ownerToken, 'DELETE', `/rms/team/assignments/${siti.id}`)
+    expect((await ok<{ coverage: unknown[] }>(t.b.ownerToken, 'GET', '/rms/team/coverage')).coverage).toEqual([])
+  })
+})
+
 describe('team — staff submit their applications', () => {
   it('takes the whole set at once, can be changed while open, and counts applicants per shift', async () => {
     const t = await team(['Aina', 'Amir'])

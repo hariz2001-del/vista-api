@@ -1300,6 +1300,8 @@ model ShiftSlot {
   roleTags      String[] @default([]) @map("role_tags")
   workTypeId    String?  @map("work_type_id")
   label         String?
+  /// Extra people may be added beyond requiredStaff, as backup.
+  allowsBackup  Boolean  @default(false) @map("allows_backup")
 
   rosterWeek   RosterWeek         @relation(fields: [businessId, rosterWeekId], references: [businessId, id], onDelete: Cascade)
   workType     WorkType?          @relation(fields: [businessId, workTypeId], references: [businessId, id], onDelete: Restrict)
@@ -1348,6 +1350,13 @@ model Assignment {
   rateOverrideAt     DateTime?        @map("rate_override_at")
   /// MANAGEMENT ONLY: why the engine chose this person.
   explanation        String?
+  /// A backup: extra to the shift's places, never counted as filling one.
+  isBackup           Boolean          @default(false) @map("is_backup")
+  /// This person's own times on the shift, when not the slot's (backups).
+  startsAt           DateTime?        @map("starts_at") @db.Timestamptz(3)
+  endsAt             DateTime?        @map("ends_at") @db.Timestamptz(3)
+  /// Shown as a number of hours rather than times.
+  hoursOnly          Boolean          @default(false) @map("hours_only")
   endedAt            DateTime?        @map("ended_at")
   createdAt          DateTime         @default(now()) @map("created_at")
   updatedAt          DateTime         @updatedAt @map("updated_at")

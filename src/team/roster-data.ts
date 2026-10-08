@@ -77,10 +77,22 @@ export function engineSlots(week: LoadedWeek): EngineSlot[] {
   }))
 }
 
+/**
+ * When someone actually works a shift: their own times if they have them (a
+ * backup brought in for part of it), otherwise the slot's.
+ */
+export function workTimes(
+  assignment: { startsAt: Date | null; endsAt: Date | null },
+  slot: { startsAt: Date; endsAt: Date },
+): { startsAt: Date; endsAt: Date } {
+  return { startsAt: assignment.startsAt ?? slot.startsAt, endsAt: assignment.endsAt ?? slot.endsAt }
+}
+
+/** The places a shift fills. Backups are extra and never count. */
 export function activePlacements(week: LoadedWeek): Array<Placement & { isLocked: boolean; id: string }> {
   return week.slots.flatMap((slot) =>
     slot.assignments
-      .filter((assignment) => assignment.status === 'ACTIVE')
+      .filter((assignment) => assignment.status === 'ACTIVE' && !assignment.isBackup)
       .map((assignment) => ({ id: assignment.id, slotId: slot.id, staffId: assignment.staffId, isLocked: assignment.isLocked })),
   )
 }
