@@ -19,6 +19,7 @@ import { badRequest, conflict, notFound } from '../errors.ts'
 import { actorOf, audit } from '../team/audit.ts'
 import { fillCoverage, offerNext, openCoverage, replacementQueue } from '../team/coverage.ts'
 import {
+  workTimes,
   activePlacements,
   engineInputFor,
   loadEngineStaff,
@@ -97,8 +98,21 @@ const slotBody = z.object({
   roleTags: TAGS.default([]),
   workTypeId: ID.nullish(),
   label: z.string().trim().max(40).nullish(),
+  allowsBackup: z.boolean().default(false),
 })
 const slotUpdate = slotBody.partial()
+
+/**
+ * A backup's time on the shift: their own start and end (an end at or before
+ * the start runs past midnight), or just a number of hours from the shift's
+ * start. Neither: the shift's own times.
+ */
+const backupTime = z.union([
+  z.object({ startTime: TIME, endTime: TIME }),
+  z.object({ minutes: z.number().int().min(15).max(16 * 60) }),
+  z.object({}),
+])
+const backupBody = z.object({ staffId: ID }).and(backupTime)
 
 const assignBody = z.object({ staffId: ID, isLocked: z.boolean().default(false), workTypeId: ID.nullish() })
 const assignmentUpdate = z
@@ -181,6 +195,7 @@ async function weekDetail(tx: Tx, businessId: string, weekId: string) {
       roleTags: slot.roleTags,
       workTypeId: slot.workTypeId,
       label: slot.label,
+      allowsBackup: slot.allowsBackup,
       applicants: slot.applications.map((application) => ({
         staffId: application.staffId,
         appliedAt: application.createdAt.toISOString(),
@@ -196,6 +211,16 @@ async function weekDetail(tx: Tx, businessId: string, weekId: string) {
         rateOverrideSen: assignment.rateOverrideSen,
         rateOverrideReason: assignment.rateOverrideReason,
         explanation: assignment.explanation,
+        isBackup: assignment.isBackup,
+        hoursOnly: assignment.hoursOnly,
+        ...(() => {
+          const times = workTimes(assignment, slot)
+          return {
+            startTime: mytTime(times.startsAt),
+            endTime: mytTime(times.endsAt),
+            minutes: minutesBetween(times.startsAt, times.endsAt),
+          }
+        })(),
       })),
       // Who left the seat, and who is being asked now (null: nobody left to ask).
       openCoverage: slot.coverage[0]
@@ -263,7 +288,7 @@ export async function exportRoster(tx: Tx, businessId: string, weekId: string) {
           assignments: {
             where: { status: 'ACTIVE' },
             orderBy: { createdAt: 'asc' },
-            select: { staff: { select: { name: true } } },
+            select: { isBackup: true, staff: { select: { name: true } } },
           },
         },
       },
@@ -283,7 +308,7 @@ export async function exportRoster(tx: Tx, businessId: string, weekId: string) {
         startTime: mytTime(slot.startsAt),
         endTime: mytTime(slot.endsAt),
         label: slot.label,
-        staff: slot.assignments.map((assignment) => assignment.staff.name),
+        staff: slot.assignments.map((assignment) => (assignment.isBackup ? `${assignment.staff.name} (backup)` : assignment.staff.name)),
       })),
   }))
   return {
@@ -400,7 +425,7 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
         slots: {
           select: {
             requiredStaff: true,
-            assignments: { where: { status: 'ACTIVE' }, select: { id: true } },
+            assignments: { where: { status: 'ACTIVE', isBackup: false }, select: { id: true } },
             applications: { where: { status: 'APPLIED' }, select: { staffId: true } },
           },
         },
@@ -465,6 +490,7 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
               roleTags: slot.roleTags,
               workTypeId: slot.workTypeId,
               label: slot.label,
+              allowsBackup: slot.allowsBackup,
             },
           })
           created += 1
@@ -670,7 +696,7 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
         const placed = week.slots.flatMap((slot) =>
           slot.assignments
             .filter((assignment) => assignment.status === 'ACTIVE')
-            .map((assignment) => ({ staffId: assignment.staffId, startsAt: slot.startsAt, endsAt: slot.endsAt })),
+            .map((assignment) => ({ staffId: assignment.staffId, ...workTimes(assignment, slot) })),
         )
         const offered = new Map<string, number>()
         for (const slot of week.slots) {
@@ -679,7 +705,7 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
         const added: Array<{ slotId: string; staffId: string }> = []
         let leftOver = 0
         for (const slot of week.slots) {
-          let open = slot.requiredStaff - slot.assignments.filter((assignment) => assignment.status === 'ACTIVE').length
+          let open = slot.requiredStaff - slot.assignments.filter((assignment) => assignment.status === 'ACTIVE' && !assignment.isBackup).length
           const picks = slot.applications.toSorted(
             (a, b) =>
               (offered.get(b.staffId) ?? 0) - (offered.get(a.staffId) ?? 0) || a.createdAt.getTime() - b.createdAt.getTime(),
@@ -754,6 +780,7 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
           roleTags: body.roleTags,
           workTypeId: body.workTypeId ?? null,
           label: body.label ?? null,
+          allowsBackup: body.allowsBackup,
         },
       })
       await touchWeek(tx, weekId)
@@ -853,6 +880,7 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
             roleTags: slot.roleTags,
             workTypeId: slot.workTypeId,
             label: slot.label,
+            allowsBackup: slot.allowsBackup,
           },
         })
       }
@@ -1010,9 +1038,80 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
         entityId: id,
         before: { slotId: assignment.slotId, staffId: assignment.staffId },
       })
-      if (published && vacancy === 'true' && assignment.slot.startsAt > now) {
+      if (published && vacancy === 'true' && !assignment.isBackup && assignment.slot.startsAt > now) {
         await openCoverage(tx, businessId, actor, assignment.slotId, id, now)
       }
+      return weekDetail(tx, businessId, assignment.slot.rosterWeekId)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Backup staff: extra to a shift's places, added any time, with their own
+  // times or just hours. Only on shifts that allow backups.
+  // -------------------------------------------------------------------------
+
+  function backupInstants(slot: { startsAt: Date; endsAt: Date }, time: z.infer<typeof backupTime>) {
+    if ('minutes' in time) {
+      return { startsAt: slot.startsAt, endsAt: new Date(slot.startsAt.getTime() + time.minutes * 60_000), hoursOnly: true }
+    }
+    if ('startTime' in time) {
+      const { startsAt, endsAt } = shiftInstants(mytDate(slot.startsAt), time.startTime, time.endTime)
+      if (endsAt.getTime() - startsAt.getTime() > 16 * 3_600_000) throw badRequest('team:BACKUP_TOO_LONG')
+      return { startsAt, endsAt, hoursOnly: false }
+    }
+    return { startsAt: null, endsAt: null, hoursOnly: false }
+  }
+
+  app.post<{ Params: { id: string } }>('/rms/team/slots/:id/backups', roster, async (request) => {
+    const slotId = ID.parse(request.params.id)
+    const body = backupBody.parse(request.body)
+    const { db, businessId } = request
+    const actor = await actorOf(request)
+    return db.$transaction(async (tx) => {
+      const slot = await tx.shiftSlot.findUnique({ where: { id: slotId } })
+      if (!slot) throw notFound('team:SHIFT_NOT_FOUND')
+      if (!slot.allowsBackup) throw conflict('team:BACKUP_NOT_ALLOWED')
+      const staff = await tx.staffMember.findUnique({ where: { id: body.staffId } })
+      if (!staff) throw notFound('team:STAFF_NOT_FOUND')
+      if (staff.status !== 'ACTIVE') throw conflict('team:STAFF_INACTIVE')
+      if (await tx.assignment.findFirst({ where: { slotId, staffId: body.staffId, status: 'ACTIVE' } })) {
+        throw conflict('team:ALREADY_ASSIGNED')
+      }
+      const times = backupInstants(slot, body)
+      const created = await tx.assignment.create({
+        data: { businessId, slotId, staffId: body.staffId, source: 'MANUAL', isBackup: true, ...times },
+      })
+      await touchWeek(tx, slot.rosterWeekId)
+      await audit(tx, businessId, actor, {
+        action: 'roster.backup_added',
+        entityType: 'assignment',
+        entityId: created.id,
+        after: { slotId, staffId: body.staffId, startsAt: times.startsAt, endsAt: times.endsAt, hoursOnly: times.hoursOnly },
+      })
+      return weekDetail(tx, businessId, slot.rosterWeekId)
+    })
+  })
+
+  /** Change a backup's times or hours. */
+  app.patch<{ Params: { id: string } }>('/rms/team/assignments/:id/time', roster, async (request) => {
+    const id = ID.parse(request.params.id)
+    const time = backupTime.parse(request.body)
+    const { db, businessId } = request
+    const actor = await actorOf(request)
+    return db.$transaction(async (tx) => {
+      const assignment = await tx.assignment.findUnique({ where: { id }, include: { slot: true } })
+      if (!assignment || assignment.status !== 'ACTIVE') throw notFound('team:ASSIGNMENT_NOT_FOUND')
+      if (!assignment.isBackup) throw conflict('team:NOT_A_BACKUP')
+      const times = backupInstants(assignment.slot, time)
+      await tx.assignment.update({ where: { id }, data: times })
+      await touchWeek(tx, assignment.slot.rosterWeekId)
+      await audit(tx, businessId, actor, {
+        action: 'roster.backup_time_changed',
+        entityType: 'assignment',
+        entityId: id,
+        before: { startsAt: assignment.startsAt, endsAt: assignment.endsAt, hoursOnly: assignment.hoursOnly },
+        after: times,
+      })
       return weekDetail(tx, businessId, assignment.slot.rosterWeekId)
     })
   })

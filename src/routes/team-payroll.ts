@@ -8,6 +8,7 @@ import { payableMinutes, recentPeriods } from '../domain/payroll.ts'
 import { splitShared } from '../domain/settlement.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
 import { actorOf, audit } from '../team/audit.ts'
+import { workTimes } from '../team/roster-data.ts'
 import {
   attendanceChanged,
   dateRange,
@@ -198,18 +199,21 @@ export async function teamPayrollRoutes(app: FastifyInstance): Promise<void> {
       orderBy: [{ slot: { startsAt: 'asc' } }, { staff: { name: 'asc' } }],
     })
     return {
-      shifts: assignments.map((assignment) => ({
-        assignmentId: assignment.id,
-        staffId: assignment.staffId,
-        staffName: assignment.staff.name,
-        date: mytDate(assignment.slot.startsAt),
-        startTime: mytTime(assignment.slot.startsAt),
-        endTime: mytTime(assignment.slot.endsAt),
-        startsAt: assignment.slot.startsAt.toISOString(),
-        endsAt: assignment.slot.endsAt.toISOString(),
-        minutes: minutesBetween(assignment.slot.startsAt, assignment.slot.endsAt),
-        label: assignment.slot.label,
-      })),
+      shifts: assignments.map((assignment) => {
+        const times = workTimes(assignment, assignment.slot)
+        return {
+          assignmentId: assignment.id,
+          staffId: assignment.staffId,
+          staffName: assignment.staff.name,
+          date: mytDate(assignment.slot.startsAt),
+          startTime: mytTime(times.startsAt),
+          endTime: mytTime(times.endsAt),
+          startsAt: times.startsAt.toISOString(),
+          endsAt: times.endsAt.toISOString(),
+          minutes: minutesBetween(times.startsAt, times.endsAt),
+          label: assignment.isBackup ? `Backup${assignment.slot.label ? ` · ${assignment.slot.label}` : ''}` : assignment.slot.label,
+        }
+      }),
     }
   })
 
@@ -227,15 +231,17 @@ export async function teamPayrollRoutes(app: FastifyInstance): Promise<void> {
       for (const assignment of assignments) {
         // Already confirmed (a double tap, or two managers): leave it.
         if (assignment.attendance.length > 0) continue
+        // A backup is paid for their own times, not the whole shift.
+        const times = workTimes(assignment, assignment.slot)
         const record = await tx.attendanceRecord.create({
           data: {
             businessId,
             staffId: assignment.staffId,
             assignmentId: assignment.id,
-            clockInAt: assignment.slot.startsAt,
-            clockOutAt: assignment.slot.endsAt,
-            approvedStartAt: assignment.slot.startsAt,
-            approvedEndAt: assignment.slot.endsAt,
+            clockInAt: times.startsAt,
+            clockOutAt: times.endsAt,
+            approvedStartAt: times.startsAt,
+            approvedEndAt: times.endsAt,
             source: 'MANUAL',
             status: 'APPROVED',
             approvedAt: new Date(),

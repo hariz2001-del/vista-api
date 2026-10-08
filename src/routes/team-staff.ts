@@ -8,7 +8,7 @@ import { conflict, notFound } from '../errors.ts'
 import { actorOf, audit } from '../team/audit.ts'
 import { fillCoverage, offerNext, openCoverage } from '../team/coverage.ts'
 import { draftFor } from '../team/payroll-data.ts'
-import { weekPhase } from '../team/roster-data.ts'
+import { weekPhase, workTimes } from '../team/roster-data.ts'
 import { exportRoster } from './team-roster.ts'
 
 /**
@@ -123,10 +123,12 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
       upcoming: upcoming.map((assignment) => ({
         assignmentId: assignment.id,
         date: mytDate(assignment.slot.startsAt),
-        startTime: mytTime(assignment.slot.startsAt),
-        endTime: mytTime(assignment.slot.endsAt),
-        minutes: minutesBetween(assignment.slot.startsAt, assignment.slot.endsAt),
-        label: assignment.slot.label,
+        startTime: mytTime(workTimes(assignment, assignment.slot).startsAt),
+        endTime: mytTime(workTimes(assignment, assignment.slot).endsAt),
+        minutes: minutesBetween(workTimes(assignment, assignment.slot).startsAt, workTimes(assignment, assignment.slot).endsAt),
+        label: assignment.isBackup ? `Backup${assignment.slot.label ? ` · ${assignment.slot.label}` : ''}` : assignment.slot.label,
+        backup: assignment.isBackup,
+        hoursOnly: assignment.hoursOnly,
         canWithdraw:
           assignment.slot.startsAt.getTime() - now.getTime() > assignment.slot.rosterWeek.withdrawalDeadlineHours * 3_600_000,
         withdrawBy: new Date(assignment.slot.startsAt.getTime() - assignment.slot.rosterWeek.withdrawalDeadlineHours * 3_600_000).toISOString(),
@@ -155,7 +157,9 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
           orderBy: { startsAt: 'asc' },
           include: {
             applications: { where: { status: 'APPLIED' }, select: { staffId: true } },
-            assignments: { select: { id: true, staffId: true, status: true, staff: { select: { name: true } } } },
+            assignments: {
+              select: { id: true, staffId: true, status: true, isBackup: true, hoursOnly: true, startsAt: true, endsAt: true, staff: { select: { name: true } } },
+            },
             coverage: {
               where: { status: 'OPEN' },
               select: { offers: { where: { staffId, status: 'PENDING' }, select: { id: true } } },
@@ -183,6 +187,7 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
           withdrawalDeadlineHours: week.withdrawalDeadlineHours,
           slots: week.slots.map((slot) => {
             const mine = slot.assignments.find((assignment) => assignment.staffId === staffId && assignment.status === 'ACTIVE')
+            const myTimes = mine && published ? workTimes(mine, slot) : slot
             const withdrew = slot.assignments.some((assignment) => assignment.staffId === staffId && assignment.status === 'WITHDRAWN')
             const applied = slot.applications.some((application) => application.staffId === staffId)
             const offer = slot.coverage.flatMap((item) => item.offers)[0]
@@ -198,10 +203,12 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
             return {
               id: slot.id,
               date: mytDate(slot.startsAt),
-              startTime: mytTime(slot.startsAt),
-              endTime: mytTime(slot.endsAt),
-              minutes: minutesBetween(slot.startsAt, slot.endsAt),
+              startTime: mytTime(myTimes.startsAt),
+              endTime: mytTime(myTimes.endsAt),
+              minutes: minutesBetween(myTimes.startsAt, myTimes.endsAt),
               label: slot.label,
+              backup: Boolean(mine?.isBackup && published),
+              hoursOnly: Boolean(mine?.hoursOnly && published),
               myStatus: status,
               assignmentId: mine?.id ?? null,
               offerId: offer?.id ?? null,
@@ -361,7 +368,7 @@ export async function teamStaffRoutes(app: FastifyInstance): Promise<void> {
         entityId: id,
         before: { slotId: assignment.slotId, staffId },
       })
-      await openCoverage(tx, businessId, actor, assignment.slotId, id, now)
+      if (!assignment.isBackup) await openCoverage(tx, businessId, actor, assignment.slotId, id, now)
     })
     return { ok: true }
   })
