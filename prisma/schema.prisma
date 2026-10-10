@@ -1564,10 +1564,16 @@ model TeamAuditEntry {
 // ---------------------------------------------------------------------------
 
 /// How full the open container is, by eye.
+/// How full the open one is: 0%, 25%, 50%, 75% or 100%. MORE_THAN_HALF and
+/// LESS_THAN_HALF are the old three-step scale, kept for counts sent before.
 enum StockBalance {
   MORE_THAN_HALF
   HALF
   LESS_THAN_HALF
+  EMPTY
+  QUARTER
+  THREE_QUARTERS
+  FULL
 }
 
 /// One thing the counter checks at closing, as the owner set it up.
