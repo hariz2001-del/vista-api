@@ -142,7 +142,7 @@ describe('stock — counting at the counter and reading it back', () => {
         { stockItemId: milk.item.id, unopenedMilli: 3000, balance: 'HALF' },
         // A balance for an item that does not track one is dropped, and an
         // inactive item's figures are ignored.
-        { stockItemId: cups.item.id, unopenedMilli: 2500, balance: 'LESS_THAN_HALF' },
+        { stockItemId: cups.item.id, unopenedMilli: 2500, balance: 'QUARTER' },
         { stockItemId: hidden.item.id, unopenedMilli: 9000 },
       ],
     })

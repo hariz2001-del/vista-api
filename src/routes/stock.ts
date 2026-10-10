@@ -29,7 +29,8 @@ const OPTIONAL_LABEL = z
   .transform((value) => (value ? value : null))
 /** Thousandths of a unit. 100,000 of anything is not a closing count. */
 const QUANTITY = z.number().int().min(0).max(100_000_000).nullable()
-const BALANCE = z.enum(['MORE_THAN_HALF', 'HALF', 'LESS_THAN_HALF']).nullable()
+/** A new count uses the five-step level; the old three-step values are history only. */
+const BALANCE = z.enum(['EMPTY', 'QUARTER', 'HALF', 'THREE_QUARTERS', 'FULL']).nullable()
 
 const itemBody = z
   .object({
