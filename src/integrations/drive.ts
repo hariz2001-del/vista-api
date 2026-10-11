@@ -5,7 +5,7 @@ import { env } from '../env.ts'
  * Receipt photos in the owner's Google Drive, under their Finances folder:
  *
  *   Finances/Receipts/Unsorted/     until the date on the receipt is known
- *   Finances/Receipts/2026/10/      by the receipt's own date after that
+ *   Finances/Receipts/2026/10 October/Week of 6 Oct/   by the receipt's own date after that
  *
  * The file id is stored on the receipt; the database never depends on file
  * names. A personal Google account cannot take uploads from a service account
@@ -73,11 +73,22 @@ async function folder(parent: string, name: string): Promise<string> {
   return id
 }
 
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+const SHORT = MONTHS.map((month) => month.slice(0, 3))
+
+/** "Week of 6 Oct": the Monday of the receipt's Monday–Sunday week. */
+export function weekFolderName(date: Date): string {
+  const monday = new Date(date.getTime() - ((date.getUTCDay() + 6) % 7) * 86_400_000)
+  return `Week of ${monday.getUTCDate()} ${SHORT[monday.getUTCMonth()]}`
+}
+
+/** Receipts/2026/10 October/Week of 6 Oct — or Receipts/Unsorted until the date is known. */
 async function folderFor(date: Date | null): Promise<string> {
   const receipts = await folder(env.DRIVE_FINANCES_FOLDER_ID!, 'Receipts')
   if (!date) return folder(receipts, 'Unsorted')
   const year = await folder(receipts, String(date.getUTCFullYear()))
-  return folder(year, String(date.getUTCMonth() + 1).padStart(2, '0'))
+  const month = await folder(year, `${String(date.getUTCMonth() + 1).padStart(2, '0')} ${MONTHS[date.getUTCMonth()]}`)
+  return folder(month, weekFolderName(date))
 }
 
 const EXTENSION: Record<string, string> = {
