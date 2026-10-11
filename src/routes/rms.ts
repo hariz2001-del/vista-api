@@ -79,7 +79,7 @@ function optionalText(max: number) {
     .transform((value) => (value ? value : null))
 }
 
-const expenseBody = z.object({
+export const expenseBody = z.object({
   businessDate: DATE,
   amountSen: z.number().int().positive(),
   category: z.enum([
@@ -122,7 +122,7 @@ const expenseBody = z.object({
     .default([]),
 })
 
-type ExpenseBody = z.infer<typeof expenseBody>
+export type ExpenseBody = z.infer<typeof expenseBody>
 
 /**
  * Itemised: the lines are the receipt, so they must add up to the amount
@@ -175,6 +175,82 @@ async function allocate(tx: Tx, body: ExpenseBody, withSettlement: boolean) {
     foodAmountSen: foodSen,
     drinksAmountSen: drinksSen,
   }
+}
+
+/**
+ * Log an expense: the lines must add up, the period must be open, the split is
+ * snapshotted, and money the stall paid leaves the cash book. The one way an
+ * expense is made — by the RMS form and by Sarang AI alike — so both follow
+ * exactly the same rules. Runs inside the caller's transaction.
+ */
+export async function createExpense(
+  tx: Tx,
+  businessId: string,
+  createdById: string,
+  body: ExpenseBody,
+  links: { receiptDocumentId?: string | null } = {},
+): Promise<{ id: string }> {
+  assertItemsAddUp(body)
+  await assertNotLocked(tx, body.businessDate)
+
+  const withSettlement = await settlementEnabled(tx, businessId)
+  if (!withSettlement && body.paidBy !== 'STALL_FUNDS') {
+    throw badRequest('rms:SETTLEMENT_OFF')
+  }
+
+  const allocation = await allocate(tx, body, withSettlement)
+
+  const expense = await tx.expense.create({
+    data: {
+      businessId,
+      businessDate: toDate(body.businessDate),
+      amountSen: body.amountSen,
+      category: body.category,
+      paidBy: body.paidBy,
+      brandId: body.brandId,
+      ...allocation,
+      description: body.description,
+      receiptNo: body.receiptNo,
+      vendor: body.vendor,
+      receiptTime: body.receiptTime,
+      paymentMethod: body.paymentMethod,
+      notes: body.notes,
+      isSettled: body.paidBy === 'STALL_FUNDS',
+      createdById,
+      receiptDocumentId: links.receiptDocumentId ?? null,
+      // Nested through the composite key, so a line can only ever belong to
+      // an expense of the same business.
+      items: { create: itemRows(body.items) },
+    },
+  })
+
+  if (body.paidBy === 'STALL_FUNDS') {
+    await tx.ledgerEntry.create({
+      data: {
+        businessId,
+        businessDate: toDate(body.businessDate),
+        direction: 'MONEY_OUT',
+        amountSen: body.amountSen,
+        category: ledgerCategoryFor(body.category),
+        description: body.description,
+        brandId: body.brandId,
+      },
+    })
+  }
+
+  return { id: expense.id }
+}
+
+/**
+ * What an expense would be written as, without writing it: the split the
+ * books would snapshot. For Sarang AI's confirmation card.
+ */
+export async function previewExpense(tx: Tx, businessId: string, body: ExpenseBody) {
+  assertItemsAddUp(body)
+  await assertNotLocked(tx, body.businessDate)
+  const withSettlement = await settlementEnabled(tx, businessId)
+  if (!withSettlement && body.paidBy !== 'STALL_FUNDS') throw badRequest('rms:SETTLEMENT_OFF')
+  return allocate(tx, body, withSettlement)
 }
 
 /**
@@ -531,58 +607,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
   app.post('/rms/expenses', { preHandler: requireOwner }, async (request) => {
     const body = expenseBody.parse(request.body)
     const { db, businessId } = request
-
-    assertItemsAddUp(body)
-
-    return db.$transaction(async (tx) => {
-      await assertNotLocked(tx, body.businessDate)
-
-      const withSettlement = await settlementEnabled(tx, businessId)
-      if (!withSettlement && body.paidBy !== 'STALL_FUNDS') {
-        throw badRequest('rms:SETTLEMENT_OFF')
-      }
-
-      const allocation = await allocate(tx, body, withSettlement)
-
-      const expense = await tx.expense.create({
-        data: {
-          businessId,
-          businessDate: toDate(body.businessDate),
-          amountSen: body.amountSen,
-          category: body.category,
-          paidBy: body.paidBy,
-          brandId: body.brandId,
-          ...allocation,
-          description: body.description,
-          receiptNo: body.receiptNo,
-          vendor: body.vendor,
-          receiptTime: body.receiptTime,
-          paymentMethod: body.paymentMethod,
-          notes: body.notes,
-          isSettled: body.paidBy === 'STALL_FUNDS',
-          createdById: request.user.id,
-          // Nested through the composite key, so a line can only ever belong to
-          // an expense of the same business.
-          items: { create: itemRows(body.items) },
-        },
-      })
-
-      if (body.paidBy === 'STALL_FUNDS') {
-        await tx.ledgerEntry.create({
-          data: {
-            businessId,
-            businessDate: toDate(body.businessDate),
-            direction: 'MONEY_OUT',
-            amountSen: body.amountSen,
-            category: ledgerCategoryFor(body.category),
-            description: body.description,
-            brandId: body.brandId,
-          },
-        })
-      }
-
-      return { id: expense.id }
-    })
+    return db.$transaction((tx) => createExpense(tx, businessId, request.user.id, body))
   })
 
   /**
