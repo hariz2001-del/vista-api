@@ -195,3 +195,29 @@ describe('sarang ai — receipts', () => {
     expect(open.receipts.map((r) => [r.id, r.status])).toEqual([[receipt.id, 'SKIPPED']])
   })
 })
+
+describe('sarang ai — questions', () => {
+  it('answers sales, expenses, stock, cash and the receipt audit, read-only', async () => {
+    const { b, key } = await setUp()
+    const brands = await prisma.brand.findMany({ where: { businessId: b.businessId }, orderBy: { sortOrder: 'asc' } })
+    await ok(
+      owner(b, 'POST', '/rms/expenses', {
+        businessDate: '2026-10-08', amountSen: 900, category: 'ICE_GAS', paidBy: 'STALL_FUNDS',
+        brandId: brands[0]!.id, foodSplitPct: 100, description: 'Ice',
+      }),
+    )
+    const range = '?from=2026-10-02&to=2026-10-08'
+    const sales = await ok<{ days: unknown[]; totals: { netSen: number } }>(agent(key, '222', 'GET', `/agent/sales${range}`))
+    expect(sales.days).toHaveLength(7)
+    const expenses = await ok<{ expenses: Array<{ amountSen: number; hasReceiptPhoto: boolean }>; totals: { amountSen: number } }>(
+      agent(key, '222', 'GET', `/agent/expenses${range}`),
+    )
+    expect(expenses.totals.amountSen).toBe(900)
+    expect(expenses.expenses[0]).toMatchObject({ amountSen: 900, hasReceiptPhoto: false })
+    expect((await ok<{ count: unknown }>(agent(key, '222', 'GET', '/agent/stock/latest'))).count).toBeNull()
+    const cash = await ok<{ stallBalanceSen: number }>(agent(key, '222', 'GET', '/agent/cash'))
+    expect(cash.stallBalanceSen).toBe(-900)
+    const audit = await ok<{ expensesWithoutReceipt: unknown[] }>(agent(key, '222', 'GET', `/agent/audit${range}`))
+    expect(audit.expensesWithoutReceipt).toHaveLength(1)
+  })
+})

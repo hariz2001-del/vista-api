@@ -1,0 +1,554 @@
+#!/usr/bin/env python3
+"""
+Vista tools for Sarang Books (the Hermes bookkeeping agent).
+
+An MCP server over stdio, standard library only. Every tool is one call to the
+Vista API (`/agent/*`) with the agent key; Vista checks the Telegram user's
+role on each call, so nothing here is trusted to enforce permissions.
+
+Deployed to ~/.hermes/profiles/sarangbooks/integrations/vista_mcp.py.
+Source of truth: api-vista/hermes/vista_mcp.py (versioned with the API).
+
+Money: tools take and show Ringgit (RM 12.50); Vista stores sen (1250).
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+PROFILE = Path(__file__).resolve().parent.parent
+CACHE = PROFILE / "cache" / "receipts"
+
+
+def _dotenv() -> dict[str, str]:
+    """The profile's .env, as a fallback when the gateway did not pass a value."""
+    values: dict[str, str] = {}
+    try:
+        for line in (PROFILE / ".env").read_text().splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                key, _, value = line.partition("=")
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return values
+
+
+def _setting(name: str, default: str = "") -> str:
+    value = os.environ.get(name, "")
+    if not value or value.startswith("${"):
+        value = _dotenv().get(name, "")
+    return value or default
+
+
+def _default_user() -> str:
+    explicit = _setting("VISTA_DEFAULT_TELEGRAM_USER")
+    if explicit:
+        return explicit
+    allowed = _setting("TELEGRAM_ALLOWED_USERS")
+    return allowed.split(",")[0].strip() if allowed else ""
+
+
+# ---------------------------------------------------------------------------
+# Vista API
+# ---------------------------------------------------------------------------
+
+
+class VistaError(Exception):
+    pass
+
+
+def _call(method: str, path: str, body: object | None = None, telegram_user: str | None = None) -> dict:
+    base = _setting("VISTA_API_URL", "https://api.vistahub.my").rstrip("/")
+    key = _setting("VISTA_AGENT_KEY")
+    if not key or key == "pending":
+        raise VistaError("VISTA_AGENT_KEY is not set. Make one in RMS → Settings → Sarang AI and put it in the profile .env.")
+    user = (telegram_user or "").strip() or _default_user()
+    data = json.dumps(body).encode() if body is not None else None
+    request = urllib.request.Request(
+        base + path,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "X-Telegram-User": user,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as error:
+        try:
+            detail = json.loads(error.read())
+            message = detail.get("message") or detail.get("error") or str(detail)
+        except Exception:  # noqa: BLE001 - any body shape
+            message = f"HTTP {error.code}"
+        raise VistaError(message) from None
+    except urllib.error.URLError as error:
+        raise VistaError(f"Cannot reach Vista: {error.reason}") from None
+
+
+# ---------------------------------------------------------------------------
+# Money and shapes
+# ---------------------------------------------------------------------------
+
+
+def _sen(rm: object) -> int:
+    """RM (number or '12.50' / 'RM 12.50') to whole sen."""
+    text = str(rm).replace("RM", "").replace(",", "").strip()
+    return int(round(float(text) * 100))
+
+
+def _rm(sen: object) -> str | None:
+    return None if sen is None else f"RM {int(sen) / 100:,.2f}"
+
+
+def _receipt_view(receipt: dict) -> dict:
+    view = dict(receipt)
+    view["total"] = _rm(receipt.get("totalSen"))
+    return view
+
+
+def _with_rm(value: object) -> object:
+    """Every *Sen figure, also shown in RM, so nobody has to divide by 100."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            out[key] = _with_rm(item)
+            if key.endswith("Sen") and isinstance(item, int):
+                out[key[:-3] + "RM"] = _rm(item)
+            elif key.endswith("Sen") and isinstance(item, dict):
+                out[key[:-3] + "RM"] = {k: _rm(v) for k, v in item.items() if isinstance(v, int)}
+        if "byBrand" in value and isinstance(value["byBrand"], dict):
+            out["byBrandRM"] = {k: _rm(v) for k, v in value["byBrand"].items() if isinstance(v, int)}
+        if "byCategory" in value and isinstance(value["byCategory"], dict):
+            out["byCategoryRM"] = {k: _rm(v) for k, v in value["byCategory"].items() if isinstance(v, int)}
+        return out
+    if isinstance(value, list):
+        return [_with_rm(item) for item in value]
+    return value
+
+
+_options_cache: dict | None = None
+
+
+def _options(user: str | None) -> dict:
+    global _options_cache
+    if _options_cache is None:
+        _options_cache = _call("GET", "/agent/options", telegram_user=user)
+    return _options_cache
+
+
+def _brand_id(name: object, user: str | None) -> str | None:
+    """'Drinks' / 'Bites' → id; 'Shared' (or empty) → None."""
+    if name is None or str(name).strip().lower() in ("", "shared", "both", "split"):
+        return None
+    wanted = str(name).strip().lower()
+    for brand in _options(user)["brands"]:
+        if brand["name"].lower() == wanted:
+            return brand["id"]
+    names = ", ".join(b["name"] for b in _options(user)["brands"])
+    raise VistaError(f"Unknown brand '{name}'. Use one of: {names}, or Shared.")
+
+
+def _entry(raw: dict, user: str | None) -> dict:
+    """An entry as the tools take it (RM, brand names) → Vista's expense body (sen, ids)."""
+    entry: dict = {
+        "businessDate": raw["date"],
+        "amountSen": _sen(raw["amount_rm"]),
+        "category": raw["category"],
+        "paidBy": raw.get("paid_by", "STALL_FUNDS"),
+        "brandId": _brand_id(raw.get("brand"), user),
+        "description": raw["description"],
+    }
+    split = _options(user).get("split")
+    if entry["brandId"] is None:
+        if raw.get("first_brand_pct") is not None:
+            entry["foodSplitPct"] = int(raw["first_brand_pct"])
+        elif split:
+            entry["foodSplitPct"] = split["equipmentFirstPct"] if entry["category"] == "CAPITAL_ASSET" else split["overheadFirstPct"]
+        else:
+            entry["foodSplitPct"] = 100
+    else:
+        entry["foodSplitPct"] = 100
+    for source, target in (
+        ("receipt_no", "receiptNo"),
+        ("vendor", "vendor"),
+        ("receipt_time", "receiptTime"),
+        ("payment_method", "paymentMethod"),
+        ("notes", "notes"),
+    ):
+        if raw.get(source):
+            entry[target] = raw[source]
+    items = []
+    for item in raw.get("items") or []:
+        line = {
+            "name": item["name"],
+            "quantityMilli": int(round(float(item.get("qty", 1)) * 1000)),
+            "unitPriceSen": _sen(item["unit_price_rm"]),
+        }
+        if item.get("unit"):
+            line["unit"] = item["unit"]
+        items.append(line)
+    if items:
+        entry["items"] = items
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+USER = {
+    "type": "string",
+    "description": "Telegram user id of the person who sent the message (from the conversation). Optional; defaults to the owner.",
+}
+
+ENTRY = {
+    "type": "object",
+    "description": "One expense row. A receipt split by brand is several entries.",
+    "properties": {
+        "date": {"type": "string", "description": "YYYY-MM-DD (the receipt's date)"},
+        "amount_rm": {"type": "number", "description": "This row's amount in RM"},
+        "category": {"type": "string", "description": "A category value from vista_options"},
+        "paid_by": {"type": "string", "description": "A paidBy value from vista_options; default STALL_FUNDS"},
+        "brand": {"type": "string", "description": "A brand name from vista_options, or 'Shared'"},
+        "first_brand_pct": {"type": "integer", "description": "Only when Shared: the first brand's % (omit to use the default split)"},
+        "description": {"type": "string"},
+        "receipt_no": {"type": "string"},
+        "vendor": {"type": "string"},
+        "receipt_time": {"type": "string", "description": "HH:MM, 24-hour"},
+        "payment_method": {"type": "string", "description": "CASH, DUITNOW_QR, DEBIT_CARD or BANK_TRANSFER"},
+        "notes": {"type": "string"},
+        "items": {
+            "type": "array",
+            "description": "Optional receipt lines. If given, qty × unit price per line (rounded to the sen) must add up to amount_rm exactly; a discount or rounding is its own negative line.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "qty": {"type": "number"},
+                    "unit": {"type": "string"},
+                    "unit_price_rm": {"type": "number"},
+                },
+                "required": ["name", "unit_price_rm"],
+            },
+        },
+    },
+    "required": ["date", "amount_rm", "category", "description"],
+}
+
+TOOLS: list[dict] = [
+    {
+        "name": "vista_whoami",
+        "description": "Which business and Telegram user Vista sees, and their role (BOOKKEEPER can post; VIEWER can only read).",
+        "inputSchema": {"type": "object", "properties": {"telegram_user_id": USER}},
+    },
+    {
+        "name": "vista_options",
+        "description": "The business's brands, default brand split, expense categories, who-paid choices and payment methods. Use these for buttons; never invent options.",
+        "inputSchema": {"type": "object", "properties": {"telegram_user_id": USER}},
+    },
+    {
+        "name": "vista_upload_receipt",
+        "description": "Store a receipt photo in Vista (and Google Drive). Safe to repeat: the same photo or Telegram message returns the existing receipt. Do this for every receipt photo the user sends, before anything else.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "image_path": {"type": "string", "description": "Path of the received image file"},
+                "image_base64": {"type": "string", "description": "Alternative to image_path"},
+                "mime_type": {"type": "string", "description": "image/jpeg (default), image/png, image/webp, image/heic or application/pdf"},
+                "telegram_chat_id": {"type": "string"},
+                "telegram_message_id": {"type": "string"},
+                "note": {"type": "string"},
+                "telegram_user_id": USER,
+            },
+        },
+    },
+    {
+        "name": "vista_save_reading",
+        "description": "Save what you read off a receipt (provisional — not the books). Never guess: leave unknown fields out and list unsure ones in review_flags.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "receipt_id": {"type": "string"},
+                "vendor": {"type": "string"},
+                "receipt_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "receipt_no": {"type": "string"},
+                "total_rm": {"type": "number"},
+                "lines": {"type": "array", "items": {"type": "object"}, "description": "As read: name, qty, unit, unit_price_rm, amount_rm"},
+                "tax_rm": {"type": "number"},
+                "discount_rm": {"type": "number"},
+                "payment": {"type": "string", "description": "Payment details visible on the receipt"},
+                "confidence": {"type": "object", "description": "Per field, 0–1"},
+                "review_flags": {"type": "array", "items": {"type": "string"}, "description": "Fields you are unsure of"},
+                "telegram_user_id": USER,
+            },
+            "required": ["receipt_id"],
+        },
+    },
+    {
+        "name": "vista_list_receipts",
+        "description": "Receipts by status. status OPEN = not yet posted/linked (uploaded, waiting review, or skipped). order: oldest, newest or random.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["OPEN", "UPLOADED", "PENDING_REVIEW", "SKIPPED", "POSTED", "LINKED", "REJECTED"]},
+                "order": {"type": "string", "enum": ["oldest", "newest", "random"]},
+                "limit": {"type": "integer"},
+                "telegram_user_id": USER,
+            },
+        },
+    },
+    {
+        "name": "vista_get_receipt",
+        "description": "One receipt in full. With with_image=true the photo is saved to a local file (image_path) you can look at or send to the user.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"receipt_id": {"type": "string"}, "with_image": {"type": "boolean"}, "telegram_user_id": USER},
+            "required": ["receipt_id"],
+        },
+    },
+    {
+        "name": "vista_find_matches",
+        "description": "Expenses already in the books that this receipt may be (same receipt number, vendor, amount, date). Check before posting so nothing is entered twice.",
+        "inputSchema": {"type": "object", "properties": {"receipt_id": {"type": "string"}, "telegram_user_id": USER}, "required": ["receipt_id"]},
+    },
+    {
+        "name": "vista_preview",
+        "description": "Show exactly what posting would write — each row's brand split as the books will hold it — and get the preview_token. Always preview and show the user before posting.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"receipt_id": {"type": "string"}, "entries": {"type": "array", "items": ENTRY}, "telegram_user_id": USER},
+            "required": ["receipt_id", "entries"],
+        },
+    },
+    {
+        "name": "vista_post",
+        "description": "Write the previewed entries to the books — ONLY after the user explicitly confirms the preview. Send exactly the same entries and the preview_token. All rows or none; a receipt posts once.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "receipt_id": {"type": "string"},
+                "entries": {"type": "array", "items": ENTRY},
+                "preview_token": {"type": "string"},
+                "allow_total_mismatch": {"type": "boolean", "description": "Only if the user accepted that the rows do not add up to the receipt total"},
+                "telegram_user_id": USER,
+            },
+            "required": ["receipt_id", "entries", "preview_token"],
+        },
+    },
+    {
+        "name": "vista_link",
+        "description": "Attach the receipt to expenses that are already in the books (instead of posting new ones). Only after the user confirms which.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"receipt_id": {"type": "string"}, "expense_ids": {"type": "array", "items": {"type": "string"}}, "telegram_user_id": USER},
+            "required": ["receipt_id", "expense_ids"],
+        },
+    },
+    {
+        "name": "vista_skip",
+        "description": "Put a receipt aside for later (it stays in the open list).",
+        "inputSchema": {"type": "object", "properties": {"receipt_id": {"type": "string"}, "reason": {"type": "string"}, "telegram_user_id": USER}, "required": ["receipt_id"]},
+    },
+    {
+        "name": "vista_reject",
+        "description": "Mark a receipt as not a business expense, or unusable. Only when the user says so.",
+        "inputSchema": {"type": "object", "properties": {"receipt_id": {"type": "string"}, "reason": {"type": "string"}, "telegram_user_id": USER}, "required": ["receipt_id"]},
+    },
+    {
+        "name": "vista_sales",
+        "description": "Net sales per day and per brand, order counts, and the top-selling items, for a date range (default: the last 7 days). Net = after discounts, cancellations and exchanges.",
+        "inputSchema": {"type": "object", "properties": {"from": {"type": "string", "description": "YYYY-MM-DD"}, "to": {"type": "string", "description": "YYYY-MM-DD"}, "telegram_user_id": USER}},
+    },
+    {
+        "name": "vista_expenses",
+        "description": "Expenses in a date range (default: last 7 days): each row with category, brand or Shared, who paid, method, vendor, receipt no. and whether a receipt photo is attached; totals by category and by brand share.",
+        "inputSchema": {"type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}, "telegram_user_id": USER}},
+    },
+    {
+        "name": "vista_stock_latest",
+        "description": "The latest closing stock count: each item's unopened count, how full the opened one is (0-100%), and Finished / Low stock notes.",
+        "inputSchema": {"type": "object", "properties": {"telegram_user_id": USER}},
+    },
+    {
+        "name": "vista_cash",
+        "description": "The stall's cash-book balance (till + counter bank together), money owed to each partner for expenses they paid, and the latest cash-book entries. For comparing with a bank balance — never 'fix' the books to match.",
+        "inputSchema": {"type": "object", "properties": {"telegram_user_id": USER}},
+    },
+    {
+        "name": "vista_audit",
+        "description": "What needs attention in a date range: expenses with no receipt photo, receipts not yet sorted, and possible duplicate expenses.",
+        "inputSchema": {"type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}, "telegram_user_id": USER}},
+    },
+]
+
+
+def _run(name: str, args: dict) -> object:
+    user = args.get("telegram_user_id")
+    if name == "vista_whoami":
+        return _call("GET", "/agent/me", telegram_user=user)
+    if name == "vista_options":
+        global _options_cache
+        _options_cache = None
+        return _options(user)
+    if name == "vista_upload_receipt":
+        if args.get("image_path"):
+            data = Path(args["image_path"]).expanduser().read_bytes()
+            encoded = base64.b64encode(data).decode()
+        elif args.get("image_base64"):
+            encoded = args["image_base64"]
+        else:
+            raise VistaError("Give image_path or image_base64.")
+        mime = args.get("mime_type") or ("image/png" if str(args.get("image_path", "")).lower().endswith(".png") else "image/jpeg")
+        body = {"imageBase64": encoded, "mimeType": mime}
+        for source, target in (("telegram_chat_id", "telegramChatId"), ("telegram_message_id", "telegramMessageId"), ("note", "note")):
+            if args.get(source):
+                body[target] = str(args[source])
+        result = _call("POST", "/agent/receipts", body, user)
+        result["receipt"] = _receipt_view(result["receipt"])
+        return result
+    if name == "vista_save_reading":
+        body: dict = {}
+        if args.get("vendor"):
+            body["vendor"] = args["vendor"]
+        if args.get("receipt_date"):
+            body["receiptDate"] = args["receipt_date"]
+        if args.get("receipt_no"):
+            body["receiptNo"] = args["receipt_no"]
+        if args.get("total_rm") is not None:
+            body["totalSen"] = _sen(args["total_rm"])
+        extracted = {key: args[key] for key in ("lines", "tax_rm", "discount_rm", "payment", "confidence") if args.get(key) is not None}
+        if extracted:
+            body["extracted"] = extracted
+        if args.get("review_flags"):
+            body["reviewFlags"] = args["review_flags"]
+        result = _call("PATCH", f"/agent/receipts/{args['receipt_id']}/extraction", body, user)
+        result["receipt"] = _receipt_view(result["receipt"])
+        return result
+    if name == "vista_list_receipts":
+        query = urllib.parse.urlencode(
+            {"status": args.get("status", "OPEN"), "order": args.get("order", "oldest"), "limit": int(args.get("limit", 5))}
+        )
+        result = _call("GET", f"/agent/receipts?{query}", telegram_user=user)
+        result["receipts"] = [_receipt_view(r) for r in result["receipts"]]
+        return result
+    if name == "vista_get_receipt":
+        receipt = _receipt_view(_call("GET", f"/agent/receipts/{args['receipt_id']}", telegram_user=user)["receipt"])
+        if args.get("with_image"):
+            image = _call("GET", f"/agent/receipts/{args['receipt_id']}/image", telegram_user=user)
+            if image.get("imageBase64"):
+                CACHE.mkdir(parents=True, exist_ok=True)
+                extension = {"image/png": "png", "image/webp": "webp", "application/pdf": "pdf"}.get(image.get("mimeType"), "jpg")
+                path = CACHE / f"{args['receipt_id']}.{extension}"
+                path.write_bytes(base64.b64decode(image["imageBase64"]))
+                receipt["image_path"] = str(path)
+            receipt["drive_url"] = image.get("driveUrl")
+        return {"receipt": receipt}
+    if name == "vista_find_matches":
+        result = _call("GET", f"/agent/receipts/{args['receipt_id']}/matches", telegram_user=user)
+        for match in result["matches"]:
+            match["amount"] = _rm(match["amountSen"])
+        return result
+    if name == "vista_preview":
+        entries = [_entry(entry, user) for entry in args["entries"]]
+        result = _call("POST", f"/agent/receipts/{args['receipt_id']}/preview", {"entries": entries}, user)
+        result["entriesTotal"] = _rm(result.get("entriesTotalSen"))
+        result["receipt"] = _receipt_view(result["receipt"])
+        for entry in result["entries"]:
+            entry["amount"] = _rm(entry.get("amountSen"))
+        return result
+    if name == "vista_post":
+        entries = [_entry(entry, user) for entry in args["entries"]]
+        body = {"entries": entries, "previewToken": args["preview_token"], "allowTotalMismatch": bool(args.get("allow_total_mismatch"))}
+        result = _call("POST", f"/agent/receipts/{args['receipt_id']}/post", body, user)
+        result["receipt"] = _receipt_view(result["receipt"])
+        return result
+    if name == "vista_link":
+        result = _call("POST", f"/agent/receipts/{args['receipt_id']}/link", {"expenseIds": args["expense_ids"]}, user)
+        result["receipt"] = _receipt_view(result["receipt"])
+        return result
+    if name in ("vista_skip", "vista_reject"):
+        path = "skip" if name == "vista_skip" else "reject"
+        body = {"reason": args["reason"]} if args.get("reason") else {}
+        result = _call("POST", f"/agent/receipts/{args['receipt_id']}/{path}", body, user)
+        result["receipt"] = _receipt_view(result["receipt"])
+        return result
+    if name in ("vista_sales", "vista_expenses", "vista_audit"):
+        query = urllib.parse.urlencode({key: args[key] for key in ("from", "to") if args.get(key)})
+        path = {"vista_sales": "/agent/sales", "vista_expenses": "/agent/expenses", "vista_audit": "/agent/audit"}[name]
+        return _with_rm(_call("GET", f"{path}?{query}" if query else path, telegram_user=user))
+    if name == "vista_stock_latest":
+        return _call("GET", "/agent/stock/latest", telegram_user=user)
+    if name == "vista_cash":
+        return _with_rm(_call("GET", "/agent/cash", telegram_user=user))
+    raise VistaError(f"Unknown tool {name}")
+
+
+# ---------------------------------------------------------------------------
+# MCP over stdio (JSON-RPC 2.0, one message per line)
+# ---------------------------------------------------------------------------
+
+
+def _send(message: dict) -> None:
+    sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def _handle(message: dict) -> None:
+    method = message.get("method")
+    ident = message.get("id")
+    if ident is None:
+        return  # a notification (e.g. notifications/initialized)
+    if method == "initialize":
+        version = (message.get("params") or {}).get("protocolVersion", "2025-06-18")
+        _send({
+            "jsonrpc": "2.0",
+            "id": ident,
+            "result": {
+                "protocolVersion": version,
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "vista", "version": "1.0.0"},
+                "instructions": "Vista bookkeeping tools for the Sarang stall. Amounts in RM. Preview before posting; post only after the user confirms.",
+            },
+        })
+    elif method == "ping":
+        _send({"jsonrpc": "2.0", "id": ident, "result": {}})
+    elif method == "tools/list":
+        _send({"jsonrpc": "2.0", "id": ident, "result": {"tools": TOOLS}})
+    elif method == "tools/call":
+        params = message.get("params") or {}
+        try:
+            output = _run(params.get("name", ""), params.get("arguments") or {})
+            _send({"jsonrpc": "2.0", "id": ident, "result": {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False, indent=1)}]}})
+        except (VistaError, KeyError, ValueError, OSError) as error:
+            text = f"Missing field: {error}" if isinstance(error, KeyError) else str(error)
+            _send({"jsonrpc": "2.0", "id": ident, "result": {"content": [{"type": "text", "text": text}], "isError": True}})
+    else:
+        _send({"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": f"Method not found: {method}"}})
+
+
+def main() -> None:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        _handle(message)
+
+
+if __name__ == "__main__":
+    main()
