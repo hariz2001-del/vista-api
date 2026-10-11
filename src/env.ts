@@ -32,6 +32,14 @@ const schema = z.object({
         .map((origin) => origin.trim())
         .filter(Boolean),
     ),
+  /**
+   * Google Drive for receipt photos (Sarang AI). All four or none: without
+   * them, photos stay in the database until Drive is set up.
+   */
+  GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+  GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
+  GOOGLE_REFRESH_TOKEN: z.string().min(1).optional(),
+  DRIVE_FINANCES_FOLDER_ID: z.string().min(1).optional(),
 })
 
 const parsed = schema.safeParse(process.env)

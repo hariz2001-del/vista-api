@@ -7,6 +7,7 @@ import { ZodError } from 'zod'
 import { ATTEMPT_LIMIT, AttemptStore } from './attempts.ts'
 import { env } from './env.ts'
 import { DomainError, messageFor } from './errors.ts'
+import { agentRoutes } from './routes/agent.ts'
 import { authRoutes } from './routes/auth.ts'
 import { bootstrapRoutes } from './routes/bootstrap.ts'
 import { checkoutRoutes } from './routes/checkout.ts'
@@ -143,6 +144,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(teamAuthRoutes, attempts)
   await app.register(teamStaffRoutes)
   await app.register(stockRoutes)
+  await app.register(agentRoutes)
 
   return app
 }

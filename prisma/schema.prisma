@@ -141,6 +141,11 @@ model Business {
   teamSettings   TeamSettings?
   rosterWeeks    RosterWeek[]
   teamAuditLog   TeamAuditEntry[]
+  agentKeys      AgentKey[]
+  agentUsers     AgentUser[]
+  receipts       ReceiptDocument[]
+  receiptImages  ReceiptImage[]
+  agentActions   AgentAction[]
 
   @@map("businesses")
 }
@@ -771,11 +776,15 @@ model Expense {
   createdById     String          @map("created_by_id")
   createdAt       DateTime        @default(now()) @map("created_at")
 
-  brand     Brand?        @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
-  createdBy User          @relation("ExpensesCreated", fields: [businessId, createdById], references: [businessId, id], onDelete: Restrict)
-  items     ExpenseItem[]
+  brand             Brand?           @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+  createdBy         User             @relation("ExpensesCreated", fields: [businessId, createdById], references: [businessId, id], onDelete: Restrict)
+  items             ExpenseItem[]
   /// Set when this expense is a paid payslip's wages.
-  payslip   Payslip?
+  payslip           Payslip?
+  /// The physical receipt behind it. One receipt may back several expenses
+  /// (a Drinks row and a Bites row from one supplier bill).
+  receiptDocumentId String?          @map("receipt_document_id")
+  receiptDocument   ReceiptDocument? @relation(fields: [businessId, receiptDocumentId], references: [businessId, id], onDelete: Restrict)
 
   @@unique([businessId, id])
   @@index([businessId, businessDate])
@@ -1660,4 +1669,144 @@ model StockCountLine {
 
   @@index([countId])
   @@map("stock_count_lines")
+}
+
+// ---------------------------------------------------------------------------
+// Sarang AI — the bookkeeping agent (Hermes on Telegram) and its receipt inbox
+// ---------------------------------------------------------------------------
+
+/// What a Telegram user may do through the agent. Enforced by the API on every
+/// call, never by the agent's own instructions.
+enum AgentRole {
+  /// Everything below, and the same reach as the owner over the books.
+  OWNER
+  /// Upload, sort and post receipts; read everything.
+  BOOKKEEPER
+  /// Read only.
+  VIEWER
+}
+
+enum ReceiptStatus {
+  /// Stored; not read yet.
+  UPLOADED
+  /// Read, waiting for someone to sort it.
+  PENDING_REVIEW
+  /// Turned into new expenses.
+  POSTED
+  /// Attached to expenses that already existed.
+  LINKED
+  /// Put aside for later.
+  SKIPPED
+  /// Not a business receipt, or a bad photo.
+  REJECTED
+}
+
+/// A key the agent uses to reach /agent routes, made in RMS Settings. Only its
+/// SHA-256 is kept; the key itself is shown once.
+model AgentKey {
+  id         String    @id @default(uuid())
+  businessId String    @map("business_id")
+  label      String
+  keyHash    String    @unique @map("key_hash")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@unique([businessId, id])
+  @@map("agent_keys")
+}
+
+/// Someone allowed to use the agent, by Telegram user id (never by username).
+model AgentUser {
+  id             String    @id @default(uuid())
+  businessId     String    @map("business_id")
+  telegramUserId BigInt    @map("telegram_user_id")
+  name           String
+  role           AgentRole
+  isActive       Boolean   @default(true) @map("is_active")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  business Business          @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  uploads  ReceiptDocument[] @relation("ReceiptUploadedBy")
+  actions  AgentAction[]
+
+  @@unique([businessId, telegramUserId])
+  @@unique([businessId, id])
+  @@map("agent_users")
+}
+
+/// One physical receipt: its photo (in Google Drive, or held here until Drive
+/// takes it), what was read off it, and where it stands. Read values are
+/// provisional; nothing reaches the books until a person confirms it.
+model ReceiptDocument {
+  id                String        @id @default(uuid())
+  businessId        String        @map("business_id")
+  status            ReceiptStatus @default(UPLOADED)
+  /// Of the image bytes: the same photo sent twice is the same receipt.
+  sha256            String
+  /// Where it came from, so Telegram delivering one message twice is one receipt.
+  telegramChatId    BigInt?       @map("telegram_chat_id")
+  telegramMessageId BigInt?       @map("telegram_message_id")
+  mimeType          String        @map("mime_type")
+  driveFileId       String?       @map("drive_file_id")
+  driveUrl          String?       @map("drive_url")
+  // What was read off it — provisional until confirmed.
+  vendor            String?
+  receiptDate       DateTime?     @map("receipt_date") @db.Date
+  receiptNo         String?       @map("receipt_no")
+  totalSen          Int?          @map("total_sen")
+  /// Lines, tax, discount, payment and per-field confidence, as read.
+  extracted         Json?
+  /// Fields the reader was unsure of, e.g. ["total", "date"].
+  reviewFlags       String[]      @default([]) @map("review_flags")
+  notes             String?
+  uploadedById      String?       @map("uploaded_by_id")
+  resolvedAt        DateTime?     @map("resolved_at")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  business   Business      @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  uploadedBy AgentUser?    @relation("ReceiptUploadedBy", fields: [businessId, uploadedById], references: [businessId, id], onDelete: Restrict)
+  image      ReceiptImage?
+  expenses   Expense[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, sha256])
+  @@unique([businessId, telegramChatId, telegramMessageId])
+  @@index([businessId, status, createdAt])
+  @@map("receipt_documents")
+}
+
+/// The photo itself, kept here only until it is safely in Google Drive.
+model ReceiptImage {
+  receiptId  String   @id @map("receipt_id")
+  businessId String   @map("business_id")
+  bytes      Bytes
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  business Business        @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  receipt  ReceiptDocument @relation(fields: [businessId, receiptId], references: [businessId, id], onDelete: Cascade)
+
+  @@unique([businessId, receiptId])
+  @@map("receipt_images")
+}
+
+/// Everything the agent changed, and for whom. Append-only.
+model AgentAction {
+  id          BigInt   @id @default(autoincrement())
+  businessId  String   @map("business_id")
+  agentUserId String?  @map("agent_user_id")
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    String   @map("entity_id")
+  detail      Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  business  Business   @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  agentUser AgentUser? @relation(fields: [businessId, agentUserId], references: [businessId, id], onDelete: Restrict)
+
+  @@index([businessId, createdAt])
+  @@map("agent_actions")
 }

@@ -1,4 +1,5 @@
 import bcrypt from 'bcryptjs'
+import { createHash, randomBytes } from 'node:crypto'
 import type { PrismaClient } from '@prisma/client'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { forBusiness, prisma } from './db.ts'
@@ -68,8 +69,13 @@ declare module 'fastify' {
     db: PrismaClient
     /** Set for a STAFF session only: the staff member, from the session row. */
     staffId: string | undefined
+    /** Set on /agent routes only: the Telegram user Sarang AI is acting for. */
+    agentUser: AgentPrincipal | undefined
   }
 }
+
+export type AgentRole = 'OWNER' | 'BOOKKEEPER' | 'VIEWER'
+export type AgentPrincipal = { id: string; name: string; role: AgentRole; telegramUserId: string }
 
 /** Sign a token for a new session row. Only the owner and hub sessions expire. */
 export function signSession(
@@ -205,5 +211,59 @@ export function requirePermission(permission: TeamPermission) {
   return async function guard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     await requireOwner(request, reply)
     if (!permissionsFor(request.user.scope).has(permission)) throw forbidden('auth:FORBIDDEN')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sarang AI (the Hermes bookkeeping agent)
+// ---------------------------------------------------------------------------
+
+/** Every agent key starts with this, so it can never be mistaken for a session token. */
+export const AGENT_KEY_PREFIX = 'vak_'
+
+export function newAgentKey(): string {
+  return AGENT_KEY_PREFIX + randomBytes(32).toString('base64url')
+}
+
+export function hashAgentKey(key: string): string {
+  return createHash('sha256').update(key).digest('hex')
+}
+
+const AGENT_RANK: Record<AgentRole, number> = { VIEWER: 0, BOOKKEEPER: 1, OWNER: 2 }
+
+/**
+ * Sarang AI's routes. Two things decide what a call may do, and neither is the
+ * agent's own say-so:
+ *
+ *  - the agent key (`Authorization: Bearer vak_…`), made in RMS Settings, which
+ *    fixes the business; and
+ *  - the Telegram user it acts for (`X-Telegram-User: <id>`), who must be on
+ *    that business's list in RMS Settings, with a role high enough.
+ *
+ * The key holder (the Sarang Hermes profile) passes on who sent the message.
+ */
+export function requireAgent(minimum: AgentRole) {
+  return async function guard(request: FastifyRequest, _reply: FastifyReply): Promise<void> {
+    const header = request.headers.authorization ?? ''
+    const key = header.startsWith('Bearer ') ? header.slice(7).trim() : ''
+    if (!key.startsWith(AGENT_KEY_PREFIX)) throw unauthorized('agent:UNAUTHORIZED')
+    const row = await prisma.agentKey.findUnique({ where: { keyHash: hashAgentKey(key) } })
+    if (!row || row.revokedAt) throw unauthorized('agent:UNAUTHORIZED')
+
+    const telegram = String(request.headers['x-telegram-user'] ?? '').trim()
+    if (!/^\d{1,20}$/.test(telegram)) throw forbidden('agent:UNKNOWN_USER')
+    const user = await prisma.agentUser.findUnique({
+      where: { businessId_telegramUserId: { businessId: row.businessId, telegramUserId: BigInt(telegram) } },
+    })
+    if (!user || !user.isActive) throw forbidden('agent:UNKNOWN_USER')
+    if (AGENT_RANK[user.role] < AGENT_RANK[minimum]) throw forbidden('agent:NOT_ALLOWED')
+
+    if (!row.lastUsedAt || Date.now() - row.lastUsedAt.getTime() > TOUCH_EVERY_MS) {
+      await prisma.agentKey.update({ where: { id: row.id }, data: { lastUsedAt: new Date() } })
+    }
+    request.businessId = row.businessId
+    request.db = forBusiness(row.businessId)
+    request.staffId = undefined
+    request.agentUser = { id: user.id, name: user.name, role: user.role, telegramUserId: telegram }
   }
 }
