@@ -1752,6 +1752,8 @@ model ReceiptDocument {
   mimeType          String        @map("mime_type")
   driveFileId       String?       @map("drive_file_id")
   driveUrl          String?       @map("drive_url")
+  scanDriveFileId   String?       @map("scan_drive_file_id")
+  scanDriveUrl      String?       @map("scan_drive_url")
   // What was read off it — provisional until confirmed.
   vendor            String?
   receiptDate       DateTime?     @map("receipt_date") @db.Date
@@ -1784,6 +1786,7 @@ model ReceiptImage {
   receiptId  String   @id @map("receipt_id")
   businessId String   @map("business_id")
   bytes      Bytes
+  scanBytes  Bytes?   @map("scan_bytes")
   createdAt  DateTime @default(now()) @map("created_at")
 
   business Business        @relation(fields: [businessId], references: [id], onDelete: Restrict)

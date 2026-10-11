@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { Prisma } from '@prisma/client'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { hashAgentKey, newAgentKey, requireAgent, requireOwner } from '../auth.ts'
@@ -6,6 +7,7 @@ import type { Tx } from '../db.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
 import { driveConfigured, fileByDate, readFromDrive, storeReceiptImage } from '../integrations/drive.ts'
 import { createExpense, expenseBody, previewExpense } from './rms.ts'
+import { receiptScan } from '../integrations/receipt-scan.ts'
 
 /**
  * Sarang AI — the bookkeeping agent (a Hermes profile on Telegram).
@@ -92,6 +94,8 @@ function serialiseReceipt(receipt: ReceiptRow & { expenses?: Array<{ id: string;
     mimeType: receipt.mimeType,
     inDrive: Boolean(receipt.driveFileId),
     driveUrl: receipt.driveUrl,
+    scanDriveUrl: receipt.scanDriveUrl,
+    hasScan: Boolean(receipt.scanDriveFileId || (receipt.extracted && typeof receipt.extracted === 'object' && 'scan' in receipt.extracted)),
     createdAt: receipt.createdAt.toISOString(),
     updatedAt: receipt.updatedAt.toISOString(),
     expenses: receipt.expenses?.map((expense) => ({
@@ -152,7 +156,7 @@ const extractionBody = z.object({
   totalSen: z.number().int().min(0).max(100_000_000).nullish(),
   /** Lines, tax, discount, payment and per-field confidence — kept as read. */
   extracted: z.record(z.string(), z.unknown()).nullish(),
-  reviewFlags: z.array(z.string().max(40)).max(20).optional(),
+  reviewFlags: z.array(z.string().max(400)).max(20).optional(),
 })
 
 const listQuery = z.object({
@@ -317,7 +321,11 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         },
         include: { expenses: { select: { id: true, amountSen: true, description: true, brandId: true } } },
       })
-      if (existing) return { duplicate: true, receipt: serialiseReceipt(existing) }
+      if (existing) {
+        await storeReceiptImage(db, existing.id).catch((error: unknown) => request.log.warn({ err: error, receiptId: existing.id }, 'Receipt Drive retry failed'))
+        const fresh = await db.receiptDocument.findUniqueOrThrow({ where: { id: existing.id } })
+        return { duplicate: true, receipt: serialiseReceipt(fresh), drive: fresh.driveFileId ? 'stored' : 'pending' }
+      }
 
       const receipt = await db.$transaction(async (tx) => {
         const created = await tx.receiptDocument.create({
@@ -338,7 +346,10 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
 
       // Drive is best effort here: a failure leaves the photo safe in the
       // database, and a later upload retries it.
-      const drive = await storeReceiptImage(db, receipt.id).catch(() => null)
+      const drive = await storeReceiptImage(db, receipt.id).catch((error: unknown) => {
+        request.log.warn({ err: error, receiptId: receipt.id }, 'Receipt Drive upload failed')
+        return null
+      })
       const fresh = await db.receiptDocument.findUniqueOrThrow({ where: { id: receipt.id } })
       return { duplicate: false, receipt: serialiseReceipt(fresh), drive: drive ? 'stored' : 'pending' }
     },
@@ -367,7 +378,10 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
   })
 
   app.get<{ Params: { id: string } }>('/agent/receipts/:id', { preHandler: requireAgent('VIEWER') }, async (request) => {
-    return { receipt: serialiseReceipt(await requireReceipt(request.db, ID.parse(request.params.id))) }
+    const id = ID.parse(request.params.id)
+    await requireReceipt(request.db, id)
+    await storeReceiptImage(request.db, id).catch((error: unknown) => request.log.warn({ err: error, receiptId: id }, 'Receipt Drive retry failed'))
+    return { receipt: serialiseReceipt(await requireReceipt(request.db, id)) }
   })
 
   /** The photo itself, to show while sorting. */
@@ -375,12 +389,31 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const id = ID.parse(request.params.id)
     const receipt = await requireReceipt(request.db, id)
     const image = await request.db.receiptImage.findUnique({ where: { receiptId: id } })
-    const bytes = image ? Buffer.from(image.bytes) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
+    const original = z.object({ original: z.enum(['true', 'false']).optional() }).parse(request.query).original === 'true'
+    const scanned = !original && (image?.scanBytes || receipt.scanDriveFileId)
+    const bytes = scanned ? image?.scanBytes ? Buffer.from(image.scanBytes) : await readFromDrive(receipt.scanDriveFileId!) : image ? Buffer.from(image.bytes) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
     return {
-      mimeType: receipt.mimeType,
-      driveUrl: receipt.driveUrl,
+      mimeType: scanned ? 'image/jpeg' : receipt.mimeType,
+      driveUrl: scanned ? receipt.scanDriveUrl : receipt.driveUrl,
       imageBase64: bytes ? bytes.toString('base64') : null,
     }
+  })
+
+  app.post<{ Params: { id: string } }>('/agent/receipts/:id/scan', { preHandler: requireAgent('BOOKKEEPER') }, async (request) => {
+    const id = ID.parse(request.params.id)
+    const body = z.object({ corners: z.array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) })).length(4).optional() }).parse(request.body ?? {})
+    const receipt = await requireReceipt(request.db, id)
+    if (receipt.mimeType === 'application/pdf') throw badRequest('validation:INVALID_REQUEST')
+    const image = await request.db.receiptImage.findUnique({ where: { receiptId: id } })
+    const bytes = image ? Buffer.from(image.bytes) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
+    if (!bytes) throw notFound('agent:RECEIPT_NOT_FOUND')
+    const scan = await receiptScan(bytes, body.corners)
+    await request.db.receiptImage.upsert({ where: { receiptId: id }, create: { receiptId: id, businessId: request.businessId, bytes: new Uint8Array(bytes), scanBytes: new Uint8Array(scan) }, update: { scanBytes: new Uint8Array(scan) } })
+    await request.db.receiptDocument.update({ where: { id }, data: { extracted: JSON.parse(JSON.stringify({ ...(typeof receipt.extracted === 'object' && receipt.extracted ? receipt.extracted : {}), scan: { corners: body.corners ?? null, madeAt: new Date().toISOString(), originalPreserved: true } })) } })
+    await act(request.db, request, 'receipt.scanned', 'receipt', id, { corners: body.corners, originalPreserved: true })
+    let driveError: string | null = null
+    try { await storeReceiptImage(request.db, id) } catch (error) { driveError = error instanceof Error ? error.message : 'Drive upload failed' }
+    return { receipt: serialiseReceipt(await requireReceipt(request.db, id)), scanned: true, driveError }
   })
 
   /** What was read off the photo. Provisional until someone posts it. */
@@ -400,7 +433,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
             ...(body.receiptDate !== undefined ? { receiptDate: body.receiptDate ? new Date(`${body.receiptDate}T00:00:00Z`) : null } : {}),
             ...(body.receiptNo !== undefined ? { receiptNo: body.receiptNo } : {}),
             ...(body.totalSen !== undefined ? { totalSen: body.totalSen } : {}),
-            ...(body.extracted !== undefined ? { extracted: body.extracted === null ? undefined : JSON.parse(JSON.stringify(body.extracted)) } : {}),
+            ...(body.extracted !== undefined ? { extracted: body.extracted === null ? Prisma.DbNull : JSON.parse(JSON.stringify({ ...(typeof receipt.extracted === 'object' && receipt.extracted ? receipt.extracted : {}), ...body.extracted })) } : {}),
             ...(body.reviewFlags ? { reviewFlags: body.reviewFlags } : {}),
             status: receipt.status === 'UPLOADED' ? 'PENDING_REVIEW' : receipt.status,
           },
@@ -408,9 +441,15 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         await act(tx, request, 'receipt.read', 'receipt', id, body)
       })
       // Drive is best effort: a failure leaves the photo safe in the database.
-      await storeReceiptImage(request.db, id).catch(() => null)
-      await fileByDate(request.db, id).catch(() => null)
-      return { receipt: serialiseReceipt(await requireReceipt(request.db, id)), driveConfigured: driveConfigured() }
+      let driveError: string | null = null
+      try {
+        await storeReceiptImage(request.db, id)
+        await fileByDate(request.db, id)
+      } catch (error) {
+        request.log.warn({ err: error, receiptId: id }, 'Receipt Drive filing failed')
+        driveError = error instanceof Error ? error.message : 'Drive filing failed'
+      }
+      return { receipt: serialiseReceipt(await requireReceipt(request.db, id)), driveConfigured: driveConfigured(), driveError }
     },
   )
 

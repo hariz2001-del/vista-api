@@ -16,6 +16,7 @@ export const SYSTEM_ACTOR: Actor = { kind: 'SYSTEM', id: null, label: 'System' }
  * staff session is the staff member on its row.
  */
 export async function actorOf(request: FastifyRequest): Promise<Actor> {
+  if (request.agentUser) return { kind: 'OWNER', id: request.agentUser.id, label: `${request.agentUser.name} via Hermes` }
   if (request.user.scope === 'STAFF' && request.staffId) {
     const staff = await request.db.staffMember.findUnique({
       where: { id: request.staffId },

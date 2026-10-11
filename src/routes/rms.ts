@@ -393,7 +393,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       db.ledgerEntry.findMany({ orderBy: [{ businessDate: 'asc' }, { id: 'asc' }] }),
       db.expense.findMany({
         orderBy: [{ businessDate: 'desc' }, { createdAt: 'desc' }],
-        include: { items: { orderBy: { sortOrder: 'asc' } } },
+        include: { items: { orderBy: { sortOrder: 'asc' } }, receiptDocument: { select: { driveUrl: true, scanDriveUrl: true } } },
       }),
       db.periodClosure.findMany({ orderBy: { endDate: 'asc' } }),
       db.terminalStatus.findUnique({ where: { businessId } }),
@@ -546,7 +546,8 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         foodAmountSen: expense.foodAmountSen,
         drinksAmountSen: expense.drinksAmountSen,
         description: expense.description,
-        receiptUrl: expense.receiptUrl,
+        receiptUrl: expense.receiptDocument?.scanDriveUrl ?? expense.receiptDocument?.driveUrl ?? expense.receiptUrl,
+        receiptDocumentId: expense.receiptDocumentId,
         receiptNo: expense.receiptNo,
         vendor: expense.vendor,
         receiptTime: expense.receiptTime,

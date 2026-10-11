@@ -35,7 +35,10 @@ async function accessToken(): Promise<string> {
       grant_type: 'refresh_token',
     }),
   })
-  if (!response.ok) throw new Error(`google token: ${response.status}`)
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(`Google sign-in failed (${response.status}, ${error.error ?? 'unknown'}). Check the OAuth client and refresh token in Vercel.`)
+  }
   const body = (await response.json()) as { access_token: string; expires_in: number }
   cached = { token: body.access_token, until: Date.now() + body.expires_in * 1000 }
   return cached.token
@@ -46,7 +49,10 @@ async function drive<T>(url: string, init: RequestInit = {}): Promise<T> {
     ...init,
     headers: { Authorization: `Bearer ${await accessToken()}`, ...init.headers },
   })
-  if (!response.ok) throw new Error(`drive ${init.method ?? 'GET'} ${response.status}: ${(await response.text()).slice(0, 200)}`)
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({})) as { error?: { message?: string } }
+    throw new Error(`Drive ${init.method ?? 'GET'} failed (${response.status}): ${error.error?.message ?? 'request refused'}`)
+  }
   return (await response.json()) as T
 }
 
@@ -107,7 +113,13 @@ export async function storeReceiptImage(db: Tx, receiptId: string): Promise<bool
   if (!driveConfigured()) return false
   const receipt = await db.receiptDocument.findUnique({ where: { id: receiptId }, include: { image: true } })
   if (!receipt) return false
-  if (receipt.driveFileId || !receipt.image) return Boolean(receipt.driveFileId)
+  if (!env.DRIVE_BUSINESS_ID || receipt.businessId !== env.DRIVE_BUSINESS_ID) return false
+  if (receipt.driveFileId) {
+    if (receipt.image?.scanBytes) await storeReceiptScan(db, receiptId)
+    else if (receipt.image) await db.receiptImage.deleteMany({ where: { receiptId } })
+    return true
+  }
+  if (!receipt.image) return false
   const parent = await folderFor(receipt.receiptDate)
   const name = `R-${receipt.id.slice(0, 6).toUpperCase()}${receipt.vendor ? ` ${receipt.vendor}` : ''}.${EXTENSION[receipt.mimeType] ?? 'jpg'}`
   const boundary = `vista-${receipt.id}`
@@ -123,7 +135,8 @@ export async function storeReceiptImage(db: Tx, receiptId: string): Promise<bool
     body,
   })
   await db.receiptDocument.update({ where: { id: receiptId }, data: { driveFileId: file.id, driveUrl: file.webViewLink } })
-  await db.receiptImage.deleteMany({ where: { receiptId } })
+  if (receipt.image.scanBytes) await storeReceiptScan(db, receiptId)
+  else await db.receiptImage.deleteMany({ where: { receiptId } })
   return true
 }
 
@@ -132,14 +145,18 @@ export async function fileByDate(db: Tx, receiptId: string): Promise<void> {
   if (!driveConfigured()) return
   const receipt = await db.receiptDocument.findUnique({ where: { id: receiptId } })
   if (!receipt?.driveFileId || !receipt.receiptDate) return
+  if (!env.DRIVE_BUSINESS_ID || receipt.businessId !== env.DRIVE_BUSINESS_ID) return
+  const current = await drive<{ parents?: string[]; appProperties?: Record<string, string> }>(`${API}/files/${receipt.driveFileId}?fields=parents,appProperties`)
+  // An owner-directed organisation stays put when automatic filing retries.
+  if (current.appProperties?.vistaFolderMode === 'manual') return
   const target = await folderFor(receipt.receiptDate)
-  const current = await drive<{ parents?: string[] }>(`${API}/files/${receipt.driveFileId}?fields=parents`)
   if (current.parents?.includes(target)) return
   await drive(`${API}/files/${receipt.driveFileId}?addParents=${target}&removeParents=${(current.parents ?? []).join(',')}&fields=id`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
   })
+  if (receipt.scanDriveFileId) await editDriveFile(receipt.scanDriveFileId, { parentId: target })
 }
 
 /** The photo's bytes, from Drive. */
@@ -147,4 +164,98 @@ export async function readFromDrive(fileId: string): Promise<Buffer> {
   const response = await fetch(`${API}/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${await accessToken()}` } })
   if (!response.ok) throw new Error(`drive read ${response.status}`)
   return Buffer.from(await response.arrayBuffer())
+}
+
+export type DriveFile = { id: string; name: string; mimeType: string; parents?: string[]; webViewLink?: string; size?: string; capabilities?: { canAddChildren?: boolean; canEdit?: boolean }; appProperties?: Record<string, string>; trashed?: boolean }
+const FIELDS = 'id,name,mimeType,parents,webViewLink,size,capabilities(canAddChildren,canEdit),appProperties,trashed'
+
+export async function driveFile(id: string): Promise<DriveFile> {
+  return drive(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`)
+}
+
+/** No arbitrary Google Drive access: both source and destination must descend from Finances. */
+export async function withinFinances(id: string): Promise<DriveFile> {
+  if (!driveConfigured()) throw new Error('Google Drive is not configured on this deployment.')
+  const original = await driveFile(id)
+  const pending = [original]
+  const seen = new Set<string>()
+  while (pending.length && seen.size < 100) {
+    const file = pending.shift()!
+    if (file.trashed) continue
+    if (file.id === env.DRIVE_FINANCES_FOLDER_ID) return original
+    if (seen.has(file.id)) continue
+    seen.add(file.id)
+    for (const parent of file.parents ?? []) pending.push(await driveFile(parent))
+  }
+  throw new Error('This file or folder is outside the configured Finances folder.')
+}
+
+export async function listDrive(parent = env.DRIVE_FINANCES_FOLDER_ID!, pageToken?: string) {
+  const file = await withinFinances(parent)
+  if (file.mimeType !== FOLDER) throw new Error('The parent must be a folder.')
+  const q = `'${file.id}' in parents and trashed = false`
+  return drive<{ files: DriveFile[]; nextPageToken?: string }>(`${API}/files?q=${encodeURIComponent(q)}&fields=nextPageToken,files(${FIELDS})&pageSize=100&orderBy=folder,name${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`)
+}
+
+export async function createDriveFolder(parent: string, name: string) {
+  const file = await withinFinances(parent)
+  if (file.mimeType !== FOLDER) throw new Error('The parent must be a folder.')
+  return driveFile(await folder(parent, name))
+}
+
+export async function editDriveFile(id: string, changes: { name?: string; parentId?: string; description?: string }) {
+  const file = await withinFinances(id)
+  if (id === env.DRIVE_FINANCES_FOLDER_ID) throw new Error('The Finances root cannot be moved or renamed.')
+  if (changes.parentId) {
+    const parent = await withinFinances(changes.parentId)
+    if (parent.mimeType !== FOLDER) throw new Error('The destination must be a folder.')
+    if (file.mimeType === FOLDER) {
+      const queue = [parent]
+      const seen = new Set<string>()
+      while (queue.length && seen.size < 100) {
+        const item = queue.shift()!
+        if (item.id === id) throw new Error('A folder cannot move inside itself.')
+        if (seen.has(item.id)) continue
+        seen.add(item.id)
+        for (const ancestor of item.parents ?? []) queue.push(await driveFile(ancestor))
+      }
+    }
+  }
+  const query = changes.parentId ? `&addParents=${encodeURIComponent(changes.parentId)}&removeParents=${(file.parents ?? []).map(encodeURIComponent).join(',')}` : ''
+  const result = await drive<DriveFile>(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}${query}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...(changes.name ? { name: changes.name } : {}), ...(changes.description !== undefined ? { description: changes.description } : {}), ...(changes.parentId && file.appProperties?.vistaReceiptId ? { appProperties: { ...file.appProperties, vistaFolderMode: 'manual' } } : {}) }),
+  })
+  folders.clear()
+  return result
+}
+
+export async function writeDriveFile(input: { parentId?: string; fileId?: string; name: string; mimeType: string; bytes: Buffer; appProperties?: Record<string, string> }) {
+  if (input.fileId) {
+    const existing = await withinFinances(input.fileId)
+    if (existing.appProperties?.vistaReceiptId && existing.appProperties.vistaVariant !== 'scan') throw new Error('Receipt originals are preserved. Create a separate file or update the scan instead.')
+    if (existing.mimeType.startsWith('application/vnd.google-apps.')) throw new Error('Use a regular file for content replacement; native Google documents are not supported here.')
+    await drive(`${UPLOAD}/files/${encodeURIComponent(input.fileId)}?uploadType=media&fields=id`, { method: 'PATCH', headers: { 'Content-Type': input.mimeType }, body: input.bytes })
+    return editDriveFile(input.fileId, { name: input.name })
+  }
+  const parent = await withinFinances(input.parentId ?? env.DRIVE_FINANCES_FOLDER_ID!)
+  if (parent.mimeType !== FOLDER) throw new Error('The destination must be a folder.')
+  const boundary = `vista-${crypto.randomUUID()}`
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({ name: input.name, parents: [parent.id], appProperties: input.appProperties })}\r\n--${boundary}\r\nContent-Type: ${input.mimeType}\r\n\r\n`),
+    input.bytes, Buffer.from(`\r\n--${boundary}--`),
+  ])
+  return drive<DriveFile>(`${UPLOAD}/files?uploadType=multipart&fields=${FIELDS}`, { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body })
+}
+
+export async function storeReceiptScan(db: Tx, receiptId: string): Promise<boolean> {
+  if (!driveConfigured()) return false
+  const receipt = await db.receiptDocument.findUnique({ where: { id: receiptId }, include: { image: true } })
+  if (!receipt?.driveFileId || !receipt.image?.scanBytes || !env.DRIVE_BUSINESS_ID || receipt.businessId !== env.DRIVE_BUSINESS_ID) return false
+  const original = await driveFile(receipt.driveFileId)
+  const name = `R-${receipt.id.slice(0, 6).toUpperCase()}${receipt.vendor ? ` ${receipt.vendor}` : ''} - scan.jpg`
+  const file = await writeDriveFile({ fileId: receipt.scanDriveFileId ?? undefined, parentId: original.parents?.[0], name, mimeType: 'image/jpeg', bytes: Buffer.from(receipt.image.scanBytes), appProperties: { vistaReceiptId: receipt.id, vistaVariant: 'scan' } })
+  await db.receiptDocument.update({ where: { id: receiptId }, data: { scanDriveFileId: file.id, scanDriveUrl: file.webViewLink } })
+  await db.receiptImage.deleteMany({ where: { receiptId } })
+  return true
 }

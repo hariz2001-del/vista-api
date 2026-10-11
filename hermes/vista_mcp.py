@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -90,6 +91,8 @@ def _call(method: str, path: str, body: object | None = None, telegram_user: str
         try:
             detail = json.loads(error.read())
             message = detail.get("message") or detail.get("error") or str(detail)
+            if detail.get("fields"):
+                message += " " + "; ".join(f"{field['path']}: {field['message']}" for field in detail["fields"])
         except Exception:  # noqa: BLE001 - any body shape
             message = f"HTTP {error.code}"
         raise VistaError(message) from None
@@ -314,7 +317,7 @@ TOOLS: list[dict] = [
         "description": "One receipt in full. With with_image=true the photo is saved to a local file (image_path) you can look at or send to the user.",
         "inputSchema": {
             "type": "object",
-            "properties": {"receipt_id": {"type": "string"}, "with_image": {"type": "boolean"}, "telegram_user_id": USER},
+            "properties": {"receipt_id": {"type": "string"}, "with_image": {"type": "boolean"}, "original": {"type": "boolean", "description": "Read the untouched original for OCR or crop coordinates"}, "telegram_user_id": USER},
             "required": ["receipt_id"],
         },
     },
@@ -393,9 +396,94 @@ TOOLS: list[dict] = [
     },
 ]
 
+def _tool(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
+    return {"name": name, "description": description, "inputSchema": {"type": "object", "properties": {**properties, "telegram_user_id": USER}, "required": required or []}}
+
+TOOLS += [
+    _tool("vista_drive_status", "Check the actual Google sign-in and Finances root, edit/create permissions and receipts awaiting upload. Reports real failures, not just whether env vars exist.", {}),
+    _tool("vista_drive_list", "List files/folders under Finances, or a child folder. Page through next_page_token when returned. Never access outside Finances.", {"parent_id": {"type": "string"}, "page_token": {"type": "string"}}),
+    _tool("vista_drive_folder", "Create/reuse a named folder inside Finances. The owner allows sensible organisation according to Vista dates and records.", {"name": {"type": "string"}, "parent_id": {"type": "string"}}, ["name"]),
+    _tool("vista_drive_edit", "Rename, move or change the description of a file/folder within Finances. IDs and Vista links survive moves. Owner-directed receipt folders are respected by automatic filing.", {"file_id": {"type": "string"}, "name": {"type": "string"}, "parent_id": {"type": "string"}, "description": {"type": "string"}}, ["file_id"]),
+    _tool("vista_drive_write", "Upload a report/local file or text document under Finances; with file_id, replace a regular file's content. Never replace receipt originals. No deletion or access outside Finances.", {"name": {"type": "string"}, "parent_id": {"type": "string"}, "file_id": {"type": "string"}, "local_path": {"type": "string"}, "text": {"type": "string"}, "mime_type": {"type": "string"}}, ["name"]),
+    _tool("vista_drive_read", "Download a regular file under Finances to a local cache path (up to 3 MB), for reading or sending to the user.", {"file_id": {"type": "string"}}, ["file_id"]),
+    _tool("vista_drive_sync", "Retry receipt originals and scans still cached in Vista, without posting expenses. Use after connecting Google or when inDrive is false. Each receipt reports stored or its actual failure.", {"receipt_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}),
+    _tool("vista_scan_receipt", "Make a cropped, straightened, clean scan while preserving the original. Inspect the original photo with vision; supply its four paper corners in clockwise order top-left, top-right, bottom-right, bottom-left, with x/y fractions 0..1 in the auto-oriented image. Keep every printed edge. Omit corners if paper edges are uncertain; then only enhance contrast. Never invent receipt content.", {"receipt_id": {"type": "string"}, "corners": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "object", "properties": {"x": {"type": "number", "minimum": 0, "maximum": 1}, "y": {"type": "number", "minimum": 0, "maximum": 1}}, "required": ["x", "y"]}}}, ["receipt_id"]),
+    _tool("vista_receipt_choices", "Build live button choices for a receipt step from Vista options. Returns question/choices for clarify (at most four; categories are paged, never silently truncated), and choice values. Steps: start, review, edit, brand, category, paid_by, payment_method, split, confirm. Always show start after saving each new photo.", {"step": {"type": "string", "enum": ["start", "review", "edit", "brand", "category", "paid_by", "payment_method", "split", "confirm"]}, "page": {"type": "integer", "minimum": 0}}, ["step"]),
+    _tool("vista_operations", "Vista staff/roster, schedule, stock sheet/count history, coverage, attendance and payroll reads, plus owner-authorised roster/stock edits. Without path: discover supported routes. Use the exact API fields documented in sarang-bookkeeping. method GET reads; mutation methods require the owner request. Never fabricate count values or publish a roster without instruction.", {"method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]}, "path": {"type": "string", "description": "An /agent/team/... or /agent/stock/... path from the operations catalog"}, "query": {"type": "object"}, "body": {"type": "object"}}),
+    _tool("vista_report", "Generate a real PDF or PNG from Vista records, cache locally, and return a path to send as a Telegram attachment. Kinds: roster, stock-checklist, stock-count, sales, expenses, audit. roster and stock-count require an ID from operations. Can then upload this path to Finances with vista_drive_write.", {"kind": {"type": "string", "enum": ["roster", "stock-checklist", "stock-count", "sales", "expenses", "audit"]}, "format": {"type": "string", "enum": ["pdf", "png"]}, "id": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"}}, ["kind"]),
+]
+
 
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name == "vista_drive_status":
+        return _call("GET", "/agent/drive/status", telegram_user=user)
+    if name == "vista_drive_list":
+        query = urllib.parse.urlencode({target: args[source] for source, target in (("parent_id", "parentId"), ("page_token", "pageToken")) if args.get(source)})
+        return _call("GET", "/agent/drive/files" + ("?" + query if query else ""), telegram_user=user)
+    if name == "vista_drive_folder":
+        return _call("POST", "/agent/drive/folders", {"name": args["name"], **({"parentId": args["parent_id"]} if args.get("parent_id") else {})}, user)
+    if name == "vista_drive_edit":
+        body = {target: args[source] for source, target in (("name", "name"), ("parent_id", "parentId"), ("description", "description")) if source in args}
+        return _call("PATCH", "/agent/drive/files/" + urllib.parse.quote(args["file_id"], safe=""), body, user)
+    if name == "vista_drive_sync":
+        body = {target: args[source] for source, target in (("receipt_id", "receiptId"), ("limit", "limit")) if source in args}
+        return _call("POST", "/agent/drive/sync", body, user)
+    if name == "vista_drive_write":
+        data = Path(args["local_path"]).expanduser().read_bytes() if args.get("local_path") else str(args.get("text", "")).encode()
+        mime = args.get("mime_type") or ({".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg"}.get(Path(args.get("local_path", "")).suffix.lower(), "text/plain"))
+        body = {"name": args["name"], "mimeType": mime, "contentBase64": base64.b64encode(data).decode(), **{target: args[source] for source, target in (("parent_id", "parentId"), ("file_id", "fileId")) if args.get(source)}}
+        return _call("POST", "/agent/drive/files", body, user)
+    if name == "vista_drive_read":
+        result = _call("GET", "/agent/drive/files/" + urllib.parse.quote(args["file_id"], safe="") + "/content", telegram_user=user)
+        folder = PROFILE / "cache" / "drive"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / (args["file_id"] + "-" + Path(result["file"]["name"]).name)
+        path.write_bytes(base64.b64decode(result.pop("contentBase64")))
+        return {**result, "local_path": str(path)}
+    if name == "vista_scan_receipt":
+        return _call("POST", f"/agent/receipts/{args['receipt_id']}/scan", {"corners": args["corners"]} if args.get("corners") else {}, user)
+    if name == "vista_receipt_choices":
+        step = args["step"]
+        static = {
+            "start": ("What would you like to do with this receipt?", ["Key in", "Stash for later", "Edit reading", "View scan"]),
+            "review": ("Is this reading correct?", ["Continue", "Edit reading", "Adjust crop", "Stash for later"]),
+            "edit": ("What would you like to edit?", ["Line items", "Total / tax / discount", "Vendor / date / receipt number", "Back"]),
+            "confirm": ("Post these exact entries to Vista?", ["Post to Vista", "Change details", "Edit line items", "Stash for later"]),
+            "split": ("How should this shared expense be split?", ["Use Vista default", "50/50", "Custom split", "Back"]),
+        }
+        if step in static:
+            question, choices = static[step]
+            return {"question": question, "choices": choices, "step": step}
+        options = _options(user)
+        if step == "brand":
+            values = [{"label": b["name"], "value": b["id"]} for b in options["brands"]] + [{"label": "Shared", "value": None}]
+        else:
+            key = {"category": "categories", "paid_by": "paidBy", "payment_method": "paymentMethods"}[step]
+            values = options[key]
+        page = int(args.get("page", 0))
+        if page * 3 >= len(values): page = 0
+        selected = values[page * 3:page * 3 + 3]
+        choices = [v["label"] for v in selected]
+        if len(values) > 3: choices.append("More choices" if (page + 1) * 3 < len(values) else "First page")
+        return {"question": {"brand": "Which brand does this belong to?", "category": "Choose the Vista category", "paid_by": "Who paid?", "payment_method": "How was it paid?"}[step], "choices": choices, "values": selected, "page": page, "next_page": page + 1 if (page + 1) * 3 < len(values) else 0}
+    if name == "vista_operations":
+        if not args.get("path"): return _call("GET", "/agent/operations", telegram_user=user)
+        path = args["path"]
+        method = args.get("method", "GET")
+        catalog = _call("GET", "/agent/operations", telegram_user=user)
+        allowed = any(route["method"] == method and re.fullmatch(re.sub(r":[A-Za-z]+", r"[^/?]+", re.escape(route["path"])), path) for route in catalog["routes"])
+        if not allowed: raise VistaError("Choose a method/path from vista_operations' catalog.")
+        query = urllib.parse.urlencode(args.get("query", {}))
+        return _with_rm(_call(method, path + ("?" + query if query else ""), args.get("body") if method != "GET" else None, user))
+    if name == "vista_report":
+        query = urllib.parse.urlencode({key: args[key] for key in ("kind", "format", "id", "from", "to") if args.get(key)})
+        result = _call("GET", "/agent/reports?" + query, telegram_user=user)
+        folder = PROFILE / "cache" / "reports"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / Path(result["filename"]).name
+        path.write_bytes(base64.b64decode(result.pop("contentBase64")))
+        return {**result, "local_path": str(path), "attachment": "MEDIA:" + str(path)}
     if name == "vista_whoami":
         return _call("GET", "/agent/me", telegram_user=user)
     if name == "vista_options":
@@ -420,18 +508,18 @@ def _run(name: str, args: dict) -> object:
         return result
     if name == "vista_save_reading":
         body: dict = {}
-        if args.get("vendor"):
+        if "vendor" in args:
             body["vendor"] = args["vendor"]
-        if args.get("receipt_date"):
+        if "receipt_date" in args:
             body["receiptDate"] = args["receipt_date"]
-        if args.get("receipt_no"):
+        if "receipt_no" in args:
             body["receiptNo"] = args["receipt_no"]
         if args.get("total_rm") is not None:
             body["totalSen"] = _sen(args["total_rm"])
         extracted = {key: args[key] for key in ("lines", "tax_rm", "discount_rm", "payment", "confidence") if args.get(key) is not None}
         if extracted:
             body["extracted"] = extracted
-        if args.get("review_flags"):
+        if "review_flags" in args:
             body["reviewFlags"] = args["review_flags"]
         result = _call("PATCH", f"/agent/receipts/{args['receipt_id']}/extraction", body, user)
         result["receipt"] = _receipt_view(result["receipt"])
@@ -446,11 +534,12 @@ def _run(name: str, args: dict) -> object:
     if name == "vista_get_receipt":
         receipt = _receipt_view(_call("GET", f"/agent/receipts/{args['receipt_id']}", telegram_user=user)["receipt"])
         if args.get("with_image"):
-            image = _call("GET", f"/agent/receipts/{args['receipt_id']}/image", telegram_user=user)
+            image = _call("GET", f"/agent/receipts/{args['receipt_id']}/image" + ("?original=true" if args.get("original") else ""), telegram_user=user)
             if image.get("imageBase64"):
                 CACHE.mkdir(parents=True, exist_ok=True)
                 extension = {"image/png": "png", "image/webp": "webp", "application/pdf": "pdf"}.get(image.get("mimeType"), "jpg")
-                path = CACHE / f"{args['receipt_id']}.{extension}"
+                variant = 'original' if args.get('original') else 'scan' if receipt.get('hasScan') else 'photo'
+                path = CACHE / f"{args['receipt_id']}-{variant}.{extension}"
                 path.write_bytes(base64.b64decode(image["imageBase64"]))
                 receipt["image_path"] = str(path)
             receipt["drive_url"] = image.get("driveUrl")
@@ -518,8 +607,8 @@ def _handle(message: dict) -> None:
             "result": {
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "vista", "version": "1.0.0"},
-                "instructions": "Vista bookkeeping tools for the Sarang stall. Amounts in RM. Preview before posting; post only after the user confirms.",
+                "serverInfo": {"name": "vista", "version": "2.0.0"},
+                "instructions": "Vista tools for Sarang receipts, Finances Drive files, staff rosters, stock, payroll reads and PDF/PNG reports. For every new receipt photo: save, read, make a scan, then clarify buttons Key in / Stash / Edit / View scan. All form options come from vista_receipt_choices. Amounts in RM. Preview before posting; post only after the user confirms.",
             },
         })
     elif method == "ping":

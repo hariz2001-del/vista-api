@@ -9,6 +9,10 @@ import { env } from './env.ts'
 import { DomainError, messageFor } from './errors.ts'
 import { agentReadRoutes } from './routes/agent-reads.ts'
 import { agentRoutes } from './routes/agent.ts'
+import { agentDriveRoutes } from './routes/agent-drive.ts'
+import { collectAgentOperations } from './agent-operations.ts'
+import { agentReportRoutes } from './routes/agent-reports.ts'
+import { expenseReceiptRoutes } from './routes/expense-receipts.ts'
 import { authRoutes } from './routes/auth.ts'
 import { bootstrapRoutes } from './routes/bootstrap.ts'
 import { checkoutRoutes } from './routes/checkout.ts'
@@ -56,6 +60,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     // which Vercel sets and overwrites — a client cannot supply its own.
     trustProxy: true,
   })
+  const registerAgentOperations = collectAgentOperations(app)
 
   // The methods must be listed: @fastify/cors defaults to GET, HEAD and POST
   // only, so a browser's preflight for the RMS's PUT (settings), PATCH and
@@ -112,6 +117,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       return reply.status(400).send({
         error: 'validation:INVALID_REQUEST',
         message: messageFor('validation:INVALID_REQUEST'),
+        fields: error.issues.slice(0, 10).map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
         ...(env.NODE_ENV !== 'production' ? { detail: error.issues } : {}),
       })
     }
@@ -147,6 +153,10 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(stockRoutes)
   await app.register(agentRoutes)
   await app.register(agentReadRoutes)
+  registerAgentOperations()
+  await app.register(agentDriveRoutes)
+  await app.register(agentReportRoutes)
+  await app.register(expenseReceiptRoutes)
 
   return app
 }
