@@ -8,6 +8,7 @@ import { badRequest, conflict, notFound } from '../errors.ts'
 import { driveConfigured, fileByDate, readFromDrive, storeReceiptImage } from '../integrations/drive.ts'
 import { createExpense, expenseBody, previewExpense } from './rms.ts'
 import { receiptScan } from '../integrations/receipt-scan.ts'
+import { sameVendor } from '../receipt-matching.ts'
 
 /**
  * Sarang AI — the bookkeeping agent (a Hermes profile on Telegram).
@@ -118,7 +119,8 @@ async function requireReceipt(tx: Tx, id: string) {
 
 const OPEN_STATUSES = ['UPLOADED', 'PENDING_REVIEW', 'SKIPPED'] as const
 
-function assertOpen(receipt: { status: string }): void {
+function assertOpen(receipt: { status: string }, append = false): void {
+  if (append && ['POSTED', 'LINKED'].includes(receipt.status)) return
   if (!(OPEN_STATUSES as readonly string[]).includes(receipt.status)) throw conflict('agent:RECEIPT_DONE')
 }
 
@@ -147,9 +149,11 @@ const uploadBody = z.object({
   telegramChatId: TELEGRAM_ID.or(z.string().regex(/^-\d{1,20}$/)).optional(),
   telegramMessageId: z.string().regex(/^\d{1,20}$/).optional(),
   note: z.string().trim().max(500).optional(),
+  deferProcessing: z.boolean().default(false),
 })
 
 const extractionBody = z.object({
+  onlyMissing: z.boolean().default(false),
   vendor: z.string().trim().max(120).nullish(),
   receiptDate: DATE.nullish(),
   receiptNo: z.string().trim().max(60).nullish(),
@@ -167,6 +171,7 @@ const listQuery = z.object({
 
 const entriesBody = z.object({
   entries: z.array(expenseBody).min(1).max(10),
+  append: z.boolean().default(false),
 })
 const postBody = entriesBody.extend({
   previewToken: z.string().min(1),
@@ -322,9 +327,12 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         include: { expenses: { select: { id: true, amountSen: true, description: true, brandId: true } } },
       })
       if (existing) {
-        await storeReceiptImage(db, existing.id).catch((error: unknown) => request.log.warn({ err: error, receiptId: existing.id }, 'Receipt Drive retry failed'))
-        const fresh = await db.receiptDocument.findUniqueOrThrow({ where: { id: existing.id } })
-        return { duplicate: true, receipt: serialiseReceipt(fresh), drive: fresh.driveFileId ? 'stored' : 'pending' }
+        const duplicateOf = typeof existing.extracted === 'object' && existing.extracted && 'duplicateOf' in existing.extracted ? existing.extracted.duplicateOf : null
+        const canonicalId = typeof duplicateOf === 'string' ? duplicateOf : existing.id
+        if (!body.deferProcessing) await storeReceiptImage(db, canonicalId).catch((error: unknown) => request.log.warn({ err: error, receiptId: canonicalId }, 'Receipt Drive retry failed'))
+        const fresh = await requireReceipt(db, canonicalId)
+        if (body.deferProcessing && ['UPLOADED', 'PENDING_REVIEW', 'SKIPPED'].includes(fresh.status)) await db.receiptJob.upsert({ where: { receiptId: fresh.id }, create: { businessId, receiptId: fresh.id }, update: {} })
+        return { duplicate: true, duplicateReason: existing.sha256 === sha256 ? 'identical image bytes' : 'same Telegram message delivered again', receipt: serialiseReceipt(fresh), drive: fresh.driveFileId ? 'stored' : 'pending' }
       }
 
       const receipt = await db.$transaction(async (tx) => {
@@ -341,12 +349,13 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
           },
         })
         await act(tx, request, 'receipt.uploaded', 'receipt', created.id, { sha256, size: bytes.length })
+        if (body.deferProcessing) await tx.receiptJob.create({ data: { businessId, receiptId: created.id } })
         return created
       })
 
       // Drive is best effort here: a failure leaves the photo safe in the
       // database, and a later upload retries it.
-      const drive = await storeReceiptImage(db, receipt.id).catch((error: unknown) => {
+      const drive = body.deferProcessing ? false : await storeReceiptImage(db, receipt.id).catch((error: unknown) => {
         request.log.warn({ err: error, receiptId: receipt.id }, 'Receipt Drive upload failed')
         return null
       })
@@ -426,6 +435,14 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       await request.db.$transaction(async (tx) => {
         const receipt = await requireReceipt(tx, id)
         assertOpen(receipt)
+        if (body.onlyMissing) {
+          if (receipt.vendor !== null) delete body.vendor
+          if (receipt.receiptDate !== null) delete body.receiptDate
+          if (receipt.receiptNo !== null) delete body.receiptNo
+          if (receipt.totalSen !== null) delete body.totalSen
+          if (body.extracted) body.extracted = { ...body.extracted, ...(receipt.extracted as object) }
+          if (body.reviewFlags) body.reviewFlags = [...new Set([...receipt.reviewFlags, ...body.reviewFlags])].slice(0, 20)
+        }
         await tx.receiptDocument.update({
           where: { id },
           data: {
@@ -484,9 +501,9 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       },
       take: 400,
     })
-    const vendorWords = (receipt.vendor ?? '').toLowerCase().split(/\W+/).filter((word) => word.length > 2)
     const groups = new Map<string, number>()
-    for (const row of candidates) if (row.receiptNo) groups.set(row.receiptNo.toLowerCase(), (groups.get(row.receiptNo.toLowerCase()) ?? 0) + row.amountSen)
+    const groupKey = (row: typeof candidates[number]) => `${row.receiptNo?.toLowerCase()}|${row.vendor?.toLowerCase()}|${iso(row.businessDate)}`
+    for (const row of candidates) if (row.receiptNo) groups.set(groupKey(row), (groups.get(groupKey(row)) ?? 0) + row.amountSen)
     const scored = candidates
       .map((row) => {
         const why: string[] = []
@@ -495,14 +512,14 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
           score += 4
           why.push('same receipt number')
         }
-        if (vendorWords.length && row.vendor && vendorWords.some((word) => row.vendor!.toLowerCase().includes(word))) {
+        if (sameVendor(receipt.vendor, row.vendor)) {
           score += 2
           why.push('same vendor')
         }
         if (receipt.totalSen !== null && row.amountSen === receipt.totalSen) {
           score += 3
           why.push('same amount')
-        } else if (receipt.totalSen !== null && row.receiptNo && groups.get(row.receiptNo.toLowerCase()) === receipt.totalSen) {
+        } else if (receipt.totalSen !== null && row.receiptNo && groups.get(groupKey(row)) === receipt.totalSen) {
           score += 3
           why.push('rows with this receipt number add up to the total')
         }
@@ -545,11 +562,11 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
    */
   app.post<{ Params: { id: string } }>('/agent/receipts/:id/preview', { preHandler: requireAgent('BOOKKEEPER') }, async (request) => {
     const id = ID.parse(request.params.id)
-    const { entries } = entriesBody.parse(request.body)
+    const { entries, append } = entriesBody.parse(request.body)
     const { db, businessId } = request
     return db.$transaction(async (tx) => {
       const receipt = await requireReceipt(tx, id)
-      assertOpen(receipt)
+      assertOpen(receipt, append)
       const brands = await tx.brand.findMany({ orderBy: { sortOrder: 'asc' } })
       const name = (brandId: string | null) => (brandId === null ? 'Shared' : (brands.find((b) => b.id === brandId)?.name ?? '?'))
       const rows = []
@@ -564,12 +581,17 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         })
       }
       const sum = entries.reduce((total, entry) => total + entry.amountSen, 0)
+      const allocatedSen = receipt.expenses.reduce((total, entry) => total + entry.amountSen, 0)
       return {
         receipt: serialiseReceipt(receipt),
         entries: rows,
         entriesTotalSen: sum,
-        matchesReceiptTotal: receipt.totalSen === null ? null : sum === receipt.totalSen,
-        previewToken: previewToken(receipt, entries),
+        allocatedSen,
+        remainingSen: receipt.totalSen === null ? null : receipt.totalSen - allocatedSen,
+        combinedTotalSen: allocatedSen + sum,
+        append,
+        matchesReceiptTotal: receipt.totalSen === null ? null : allocatedSen + sum === receipt.totalSen,
+        previewToken: previewToken(receipt, { entries, append }),
       }
     })
   })
@@ -583,9 +605,9 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       // One post at a time per receipt: a double tap waits, then finds it done.
       await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id = ${id} AND business_id = ${businessId} FOR UPDATE`
       const receipt = await requireReceipt(tx, id)
-      assertOpen(receipt)
-      if (previewToken(receipt, body.entries) !== body.previewToken) throw conflict('agent:PREVIEW_STALE')
-      const sum = body.entries.reduce((total, entry) => total + entry.amountSen, 0)
+      assertOpen(receipt, body.append)
+      if (previewToken(receipt, { entries: body.entries, append: body.append }) !== body.previewToken) throw conflict('agent:PREVIEW_STALE')
+      const sum = body.entries.reduce((total, entry) => total + entry.amountSen, 0) + receipt.expenses.reduce((total, entry) => total + entry.amountSen, 0)
       if (receipt.totalSen !== null && sum !== receipt.totalSen && !body.allowTotalMismatch) throw conflict('agent:TOTAL_MISMATCH')
       const createdById = await ownerUserId(tx)
       const ids: string[] = []
@@ -610,14 +632,16 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const id = ID.parse(request.params.id)
     const { expenseIds } = linkBody.parse(request.body)
     return request.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id = ${id} AND business_id = ${request.businessId} FOR UPDATE`
       const receipt = await requireReceipt(tx, id)
-      assertOpen(receipt)
+      assertOpen(receipt, true)
       const expenses = await tx.expense.findMany({ where: { id: { in: expenseIds } } })
       if (expenses.length !== expenseIds.length) throw notFound('rms:EXPENSE_NOT_FOUND')
       if (expenses.some((expense) => expense.receiptDocumentId && expense.receiptDocumentId !== id)) {
         throw conflict('agent:EXPENSE_HAS_RECEIPT')
       }
       await tx.expense.updateMany({ where: { id: { in: expenseIds } }, data: { receiptDocumentId: id } })
+      await tx.reconciliationCase.updateMany({ where: { key: { in: expenseIds.map(expenseId => `missing:${expenseId}`) }, kind: 'MISSING_RECEIPT', status: 'OPEN' }, data: { status: 'RESOLVED', resolution: `Receipt ${id} attached after user confirmation.` } })
       await tx.receiptDocument.update({ where: { id }, data: { status: 'LINKED', resolvedAt: new Date() } })
       await act(tx, request, 'receipt.linked', 'receipt', id, { expenseIds })
       return { receipt: serialiseReceipt(await requireReceipt(tx, id)) }

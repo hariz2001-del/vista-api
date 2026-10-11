@@ -331,7 +331,7 @@ TOOLS: list[dict] = [
         "description": "Show exactly what posting would write — each row's brand split as the books will hold it — and get the preview_token. Always preview and show the user before posting.",
         "inputSchema": {
             "type": "object",
-            "properties": {"receipt_id": {"type": "string"}, "entries": {"type": "array", "items": ENTRY}, "telegram_user_id": USER},
+            "properties": {"receipt_id": {"type": "string"}, "entries": {"type": "array", "items": ENTRY}, "append": {"type": "boolean", "description": "Explicit additional brand allocation; show existing entries and remaining total first"}, "telegram_user_id": USER},
             "required": ["receipt_id", "entries"],
         },
     },
@@ -343,6 +343,7 @@ TOOLS: list[dict] = [
             "properties": {
                 "receipt_id": {"type": "string"},
                 "entries": {"type": "array", "items": ENTRY},
+                "append": {"type": "boolean"},
                 "preview_token": {"type": "string"},
                 "allow_total_mismatch": {"type": "boolean", "description": "Only if the user accepted that the rows do not add up to the receipt total"},
                 "telegram_user_id": USER,
@@ -400,6 +401,14 @@ def _tool(name: str, description: str, properties: dict, required: list[str] | N
     return {"name": name, "description": description, "inputSchema": {"type": "object", "properties": {**properties, "telegram_user_id": USER}, "required": required or []}}
 
 TOOLS += [
+    _tool("vista_receipt_notify", "Send ONE reading/duplicate warning with real receipt buttons back to the stored originating Telegram photo. Background worker only after reading saved; no arbitrary destination/text and no expense posted. Token stays private. Skips an already-notified receipt.", {"receipt_id": {"type": "string"}}, ["receipt_id"]),
+    _tool("vista_business_data", "Discover/read paginated business data: products/menu/addons, orders/items, sold addons, ledger, expenses, receipts. Owner only; no raw SQL/secrets. Staff/rosters/stock: vista_operations.", {"resource": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "id": {"type": "string"}}),
+    _tool("vista_item_sales", "Actual addon names, quantities/revenue per sold item/date from historical snapshots. Base sales/addons/discounts separate; NOT ingredient costs or realised profit.", {"from": {"type": "string"}, "to": {"type": "string"}, "product_id": {"type": "string"}, "name": {"type": "string"}}, ["from", "to"]),
+    _tool("vista_receipt_duplicates", "Compare a newly read receipt to existing receipts even if a different photo. Explains merchant/invoice/date/total, linked entries and remaining amount. Ask WHY resent: split, historical attachment or different purchase; never assume duplicate spending.", {"receipt_id": {"type": "string"}}, ["receipt_id"]),
+    _tool("vista_reuse_receipt", "Only after confirmation of SAME physical receipt: resolve a newly staged alternate photo as duplicate, return original UUID/Drive files to reuse for further allocations/linking. No expense created or evidence deleted.", {"receipt_id": {"type": "string"}, "canonical_id": {"type": "string"}, "reason": {"type": "string"}}, ["receipt_id", "canonical_id", "reason"]),
+    _tool("vista_receipt_queue", "Durable OCR/scan queue. list reads; claim leases one job for 10min; finish requires exact lease_token. Failure error enables bounded retries. Worker NEVER posts/links financial records.", {"action": {"type": "string", "enum": ["list", "claim", "finish"]}, "job_id": {"type": "string"}, "lease_token": {"type": "string"}, "error": {"type": "string"}}),
+    _tool("vista_reconciliation", "Persistent discrepancy cases. list/record/update; key deduplicates across sessions. Resolution changes issue state only, NOT ledger. Bank comparison is combined stall book, not a separate bank account ledger.", {"action": {"type": "string", "enum": ["list", "record", "update"]}, "status": {"type": "string", "enum": ["OPEN", "RESOLVED", "ALL"]}, "case_id": {"type": "string"}, "key": {"type": "string"}, "kind": {"type": "string", "enum": ["MISSING_RECEIPT", "POSSIBLE_DUPLICATE", "BANK_DIFFERENCE", "OTHER"]}, "detail": {"type": "object"}, "resolution": {"type": "string"}}),
+    _tool("vista_recipe_cost", "Read recipe cost, or save owner-CONFIRMED ingredient quantities/unit costs/source. quantityMilli=quantity*1000; unitCostSen=cost PER declared unit. Missing recipe: ask owner, NEVER derive from sale price or fabricate. Not historical realised profit.", {"product_id": {"type": "string"}, "recipe": {"type": "object", "description": "{components:[{name,unit,quantityMilli,unitCostSen}],overheadSen,source,effectiveDate}"}}, ["product_id"]),
     _tool("vista_drive_status", "Check the actual Google sign-in and Finances root, edit/create permissions and receipts awaiting upload. Reports real failures, not just whether env vars exist.", {}),
     _tool("vista_drive_list", "List files/folders under Finances, or a child folder. Page through next_page_token when returned. Never access outside Finances.", {"parent_id": {"type": "string"}, "page_token": {"type": "string"}}),
     _tool("vista_drive_folder", "Create/reuse a named folder inside Finances. The owner allows sensible organisation according to Vista dates and records.", {"name": {"type": "string"}, "parent_id": {"type": "string"}}, ["name"]),
@@ -414,8 +423,66 @@ TOOLS += [
 ]
 
 
+for _definition in TOOLS:
+    if _definition['name'] == 'vista_save_reading':
+        _definition['inputSchema']['properties']['only_missing'] = {'type': 'boolean', 'description': 'Background OCR only: fill missing fields but never overwrite saved user readings/corrections.'}
+    if _definition['name'] == 'vista_reconciliation':
+        _definition['inputSchema']['properties']['action']['enum'].append('refresh')
+    if _definition['name'] == 'vista_post':
+        _definition['description'] = 'Post only the user-confirmed NEW previewed entries atomically. append=true adds a further brand allocation to an existing receipt after showing prior/remaining/combined totals. Pass the same append flag and NEW preview token; repeated taps are refused.'
+
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name == 'vista_receipt_notify':
+        rid = args['receipt_id']
+        context = _call('GET', f'/agent/receipts/{rid}/telegram-context', telegram_user=user)
+        if context['notified'] or not context['chatId']: return {'sent': False, 'reason': 'already notified or no Telegram origin'}
+        r = _call('GET', f'/agent/receipts/{rid}', telegram_user=user)['receipt']
+        candidates = _call('GET', f'/agent/receipts/{rid}/duplicates', telegram_user=user)['candidates']
+        total_text = f"RM {r['totalSen']/100:.2f}" if r.get('totalSen') is not None else 'Total needs review'
+        text = f"{r['ref']} · {r.get('vendor') or 'Merchant needs review'} · {total_text}\n"
+        if candidates:
+            c = candidates[0]
+            text += f"Possible same receipt as {c['ref']}: {', '.join(c['reasons'])}. It may be another brand allocation, not duplicate spending. Tap Key in to choose split/link/different purchase.\n"
+        if r.get('reviewFlags'): text += 'Needs review: ' + '; '.join(r['reviewFlags'])[:600] + '\n'
+        text += 'Reading saved. Choose what to do; nothing has been posted.'
+        keyboard = [[{'text': label, 'callback_data': f'vr:{rid}:{action}'} for label, action in row] for row in [[('Key in', 'key'), ('Stash for later', 'stash')], [('Edit reading', 'edit'), ('View scan', 'scan')]]]
+        # Never inherit the personal/marketing bot token from a multiplexed host.
+        token = _dotenv().get('TELEGRAM_BOT_TOKEN', '')
+        if not token: raise VistaError('Finance Telegram send credential missing')
+        body = {'chat_id': context['chatId'], 'text': text, 'reply_markup': {'inline_keyboard': keyboard}}
+        if context['messageId']: body['reply_parameters'] = {'message_id': int(context['messageId']), 'allow_sending_without_reply': True}
+        req = urllib.request.Request('https://api.telegram.org/bot' + token + '/sendMessage', data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response: result = json.load(response)
+            if not result.get('ok'): raise VistaError('Telegram rejected receipt notice')
+        except Exception: raise VistaError('Telegram receipt notice failed; credential not logged') from None
+        _call('POST', f'/agent/receipts/{rid}/notification', {}, user)
+        return {'sent': True, 'message_id': result['result']['message_id']}
+    if name == 'vista_business_data':
+        path = '/agent/data' + ('/' + urllib.parse.quote(args['resource'], safe='') if args.get('resource') else '')
+        query = urllib.parse.urlencode({k: args[k] for k in ('offset', 'limit', 'id') if k in args})
+        return _with_rm(_call('GET', path + ('?' + query if query else ''), telegram_user=user))
+    if name == 'vista_item_sales':
+        query = urllib.parse.urlencode({('productId' if k == 'product_id' else k): args[k] for k in ('from', 'to', 'product_id', 'name') if args.get(k)})
+        return _with_rm(_call('GET', '/agent/item-sales?' + query, telegram_user=user))
+    if name == 'vista_receipt_duplicates':
+        return _with_rm(_call('GET', f"/agent/receipts/{args['receipt_id']}/duplicates", telegram_user=user))
+    if name == 'vista_reuse_receipt':
+        return _call('POST', f"/agent/receipts/{args['receipt_id']}/reuse", {'canonicalId': args['canonical_id'], 'reason': args['reason']}, user)
+    if name == 'vista_receipt_queue':
+        action = args.get('action', 'list')
+        if action == 'list': return _call('GET', '/agent/queue', telegram_user=user)
+        if action == 'claim': return _call('POST', '/agent/queue/claim', {}, user)
+        return _call('POST', f"/agent/queue/{args['job_id']}/finish", {'leaseToken': args['lease_token'], **({'error': args['error']} if args.get('error') else {})}, user)
+    if name == 'vista_reconciliation':
+        action = args.get('action', 'list')
+        if action == 'refresh': return _call('POST', '/agent/reconciliation/refresh', {}, user)
+        if action == 'list': return _call('GET', '/agent/reconciliation?' + urllib.parse.urlencode({'status': args.get('status', 'OPEN')}), telegram_user=user)
+        if action == 'record': return _call('POST', '/agent/reconciliation', {k: args[k] for k in ('key', 'kind', 'detail')}, user)
+        return _call('PATCH', '/agent/reconciliation/' + args['case_id'], {k: args[k] for k in ('status', 'resolution')}, user)
+    if name == 'vista_recipe_cost':
+        return _with_rm(_call('PUT' if args.get('recipe') else 'GET', '/agent/products/' + args['product_id'] + '/cost', args.get('recipe'), user))
     if name == "vista_drive_status":
         return _call("GET", "/agent/drive/status", telegram_user=user)
     if name == "vista_drive_list":
@@ -507,7 +574,7 @@ def _run(name: str, args: dict) -> object:
         result["receipt"] = _receipt_view(result["receipt"])
         return result
     if name == "vista_save_reading":
-        body: dict = {}
+        body: dict = {'onlyMissing': bool(args.get('only_missing'))}
         if "vendor" in args:
             body["vendor"] = args["vendor"]
         if "receipt_date" in args:
@@ -551,7 +618,7 @@ def _run(name: str, args: dict) -> object:
         return result
     if name == "vista_preview":
         entries = [_entry(entry, user) for entry in args["entries"]]
-        result = _call("POST", f"/agent/receipts/{args['receipt_id']}/preview", {"entries": entries}, user)
+        result = _call("POST", f"/agent/receipts/{args['receipt_id']}/preview", {"entries": entries, "append": bool(args.get('append'))}, user)
         result["entriesTotal"] = _rm(result.get("entriesTotalSen"))
         result["receipt"] = _receipt_view(result["receipt"])
         for entry in result["entries"]:
@@ -559,7 +626,7 @@ def _run(name: str, args: dict) -> object:
         return result
     if name == "vista_post":
         entries = [_entry(entry, user) for entry in args["entries"]]
-        body = {"entries": entries, "previewToken": args["preview_token"], "allowTotalMismatch": bool(args.get("allow_total_mismatch"))}
+        body = {"entries": entries, "append": bool(args.get('append')), "previewToken": args["preview_token"], "allowTotalMismatch": bool(args.get("allow_total_mismatch"))}
         result = _call("POST", f"/agent/receipts/{args['receipt_id']}/post", body, user)
         result["receipt"] = _receipt_view(result["receipt"])
         return result

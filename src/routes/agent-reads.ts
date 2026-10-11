@@ -109,7 +109,7 @@ export async function agentReadRoutes(app: FastifyInstance): Promise<void> {
         [`${first?.name ?? 'first'}Sen`]: rows.reduce((sum, row) => sum + row.foodAmountSen, 0),
         [`${second?.name ?? 'second'}Sen`]: rows.reduce((sum, row) => sum + row.drinksAmountSen, 0),
         byCategory,
-        withoutReceipt: rows.filter((row) => !row.receiptDocumentId).length,
+        withoutReceipt: rows.filter((row) => !row.receiptDocumentId && !row.receiptUrl).length,
       },
       expenses: rows.map((row) => ({
         id: row.id,
@@ -124,7 +124,7 @@ export async function agentReadRoutes(app: FastifyInstance): Promise<void> {
         vendor: row.vendor,
         receiptNo: row.receiptNo,
         description: row.description,
-        hasReceiptPhoto: Boolean(row.receiptDocumentId),
+        hasReceiptPhoto: Boolean(row.receiptDocumentId || row.receiptUrl),
       })),
     }
   })
@@ -199,14 +199,14 @@ export async function agentReadRoutes(app: FastifyInstance): Promise<void> {
     const { from, to, gte, lte } = await range(db, businessId, request.query)
     const [missing, open, rows] = await Promise.all([
       db.expense.findMany({
-        where: { businessDate: { gte, lte }, receiptDocumentId: null, category: { not: 'WAGES' } },
+        where: { businessDate: { gte, lte }, receiptDocumentId: null, OR: [{ receiptUrl: null }, { receiptUrl: '' }], category: { not: 'WAGES' } },
         orderBy: { businessDate: 'asc' },
-        select: { id: true, businessDate: true, amountSen: true, vendor: true, receiptNo: true, description: true },
+        select: { id: true, businessDate: true, amountSen: true, vendor: true, receiptNo: true, description: true, receiptDocumentId: true, brandId: true },
       }),
       db.receiptDocument.groupBy({ by: ['status'], where: { status: { in: ['UPLOADED', 'PENDING_REVIEW', 'SKIPPED'] } }, _count: { _all: true } }),
       db.expense.findMany({
         where: { businessDate: { gte, lte } },
-        select: { id: true, businessDate: true, amountSen: true, vendor: true, receiptNo: true, description: true },
+        select: { id: true, businessDate: true, amountSen: true, vendor: true, receiptNo: true, description: true, receiptDocumentId: true, brandId: true },
       }),
     ])
     const seen = new Map<string, typeof rows>()
@@ -220,7 +220,7 @@ export async function agentReadRoutes(app: FastifyInstance): Promise<void> {
       expensesWithoutReceipt: missing.map((row) => ({ ...row, businessDate: iso(row.businessDate) })),
       receiptsNotSorted: Object.fromEntries(open.map((group) => [group.status, group._count._all])),
       possibleDuplicates: [...seen.values()]
-        .filter((group) => group.length > 1)
+        .filter((group) => group.length > 1 && !(group.every(row => row.receiptDocumentId && row.receiptDocumentId === group[0]!.receiptDocumentId) && new Set(group.map(row => row.brandId)).size > 1))
         .map((group) => group.map((row) => ({ ...row, businessDate: iso(row.businessDate) }))),
       note: 'A missing photo does not make an expense wrong — it only means there is nothing on file to back it.',
     }

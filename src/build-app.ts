@@ -8,6 +8,7 @@ import { ATTEMPT_LIMIT, AttemptStore } from './attempts.ts'
 import { env } from './env.ts'
 import { DomainError, messageFor } from './errors.ts'
 import { agentReadRoutes } from './routes/agent-reads.ts'
+import { agentBusinessRoutes } from './routes/agent-business.ts'
 import { agentRoutes } from './routes/agent.ts'
 import { agentDriveRoutes } from './routes/agent-drive.ts'
 import { collectAgentOperations } from './agent-operations.ts'
@@ -153,6 +154,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(stockRoutes)
   await app.register(agentRoutes)
   await app.register(agentReadRoutes)
+  await app.register(agentBusinessRoutes)
   registerAgentOperations()
   await app.register(agentDriveRoutes)
   await app.register(agentReportRoutes)

@@ -35,5 +35,12 @@ export default async function setup(): Promise<void> {
   const run = (command: string) => execSync(command, { stdio: 'inherit', env: process.env })
 
   run('npx prisma migrate deploy')
+  // Only the validated *_test database: these new rows have RESTRICT FKs.
+  const cleanup = new PrismaClient({ datasourceUrl: url })
+  try {
+    await cleanup.receiptJob.deleteMany()
+    await cleanup.reconciliationCase.deleteMany()
+    await cleanup.productRecipe.deleteMany()
+  } finally { await cleanup.$disconnect() }
   run('npx tsx prisma/seed.ts')
 }

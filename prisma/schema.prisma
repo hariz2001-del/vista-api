@@ -146,6 +146,9 @@ model Business {
   receipts       ReceiptDocument[]
   receiptImages  ReceiptImage[]
   agentActions   AgentAction[]
+  receiptJobs    ReceiptJob[]
+  reconciliationCases ReconciliationCase[]
+  productRecipes ProductRecipe[]
 
   @@map("businesses")
 }
@@ -333,6 +336,7 @@ model Product {
   modifierGroups   ModifierGroup[]
   orderItems       OrderItem[]
   promotionTargets PromotionTarget[]
+  recipe           ProductRecipe?
 
   @@unique([businessId, id])
   @@index([brandId])
@@ -1773,6 +1777,7 @@ model ReceiptDocument {
   uploadedBy AgentUser?    @relation("ReceiptUploadedBy", fields: [businessId, uploadedById], references: [businessId, id], onDelete: Restrict)
   image      ReceiptImage?
   expenses   Expense[]
+  job        ReceiptJob?
 
   @@unique([businessId, id])
   @@unique([businessId, sha256])
@@ -1794,6 +1799,59 @@ model ReceiptImage {
 
   @@unique([businessId, receiptId])
   @@map("receipt_images")
+}
+
+/// Durable OCR/scan queue; leased workers retry after a crash without posting expenses.
+model ReceiptJob {
+  id String @id @default(uuid())
+  businessId String @map("business_id")
+  receiptId String @unique @map("receipt_id")
+  status String @default("PENDING")
+  attempts Int @default(0)
+  leaseUntil DateTime? @map("lease_until")
+  error String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  receipt ReceiptDocument @relation(fields: [businessId, receiptId], references: [businessId, id], onDelete: Cascade)
+  @@unique([businessId, id])
+  @@unique([businessId, receiptId])
+  @@index([businessId, status, createdAt])
+  @@map("receipt_jobs")
+}
+
+/// Unresolved issues survive chat sessions; resolving never changes the ledger.
+model ReconciliationCase {
+  id String @id @default(uuid())
+  businessId String @map("business_id")
+  key String
+  kind String
+  status String @default("OPEN")
+  detail Json
+  resolution String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  @@unique([businessId, id])
+  @@unique([businessId, key])
+  @@map("reconciliation_cases")
+}
+
+/// Owner-provided recipe quantities and unit costs, not inferred from sales prices.
+model ProductRecipe {
+  id String @id @default(uuid())
+  businessId String @map("business_id")
+  productId String @unique @map("product_id")
+  components Json
+  overheadSen Int @default(0) @map("overhead_sen")
+  source String
+  effectiveDate DateTime @map("effective_date") @db.Date
+  updatedAt DateTime @updatedAt @map("updated_at")
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  product Product @relation(fields: [businessId, productId], references: [businessId, id], onDelete: Restrict)
+  @@unique([businessId, id])
+  @@unique([businessId, productId])
+  @@map("product_recipes")
 }
 
 /// Everything the agent changed, and for whom. Append-only.
