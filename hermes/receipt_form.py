@@ -132,16 +132,8 @@ async def handoff(adapter,query,rid,request):
 
 async def continue_inbox(adapter,query,rid,view,m,user):
     if not view.get('readOnly'):return
-    try:
-        result=await asyncio.to_thread(m._call,'POST','/agent/inbox/next',{'receiptId':rid},user)
-        if result.get('next'):
-            v=result['next']['form']
-            await adapter._bot.send_message(chat_id=query.message.chat.id,text='Next receipt in your review list:\n\n'+text(v),reply_markup=markup(keyboard(v)))
-        elif result.get('endOfPage'):
-            await adapter._bot.send_message(chat_id=query.message.chat.id,text='This review page is finished. Open the inbox for any remaining receipts.',reply_markup=markup([[button('Receipt inbox','vi:review:oldest')]]))
-    except Exception:
-        # Failure advancing the UI must never masquerade as financial failure.
-        logging.getLogger(__name__).warning('Chopper inbox continuation unavailable: receipt=%s',rid)
+    import receipt_inbox
+    await adapter._bot.send_message(chat_id=query.message.chat.id,text=f"✅ {view['receipt']['ref']} handled. Choose what to do next.",reply_markup=markup(receipt_inbox.progress(rid)))
 
 async def callback(adapter,query,data,m):
     match=re.fullmatch(r'vf:([a-f0-9-]{36}):(.+)',data)
@@ -198,8 +190,10 @@ async def callback(adapter,query,data,m):
         elif action.startswith('post:'):
             result=await call('POST','/post',{'confirmationId':action.split(':')[1]})
             next_view=result['next']
-            await query.edit_message_text(text=f"✅ Selected group saved as {len(result.get('expenseIds',[]))} Vista entries.\n\n"+text(next_view),reply_markup=markup(keyboard(next_view)))
-            await continue_inbox(adapter,query,rid,next_view,m,user)
+            if next_view.get('readOnly'):
+                import receipt_inbox
+                await query.edit_message_text(text=f"✅ {next_view['receipt']['ref']} saved to Vista.",reply_markup=markup(receipt_inbox.progress(rid)))
+            else:await query.edit_message_text(text=f"✅ Selected group saved as {len(result.get('expenseIds',[]))} Vista entries.\n\n"+text(next_view),reply_markup=markup(keyboard(next_view)))
         elif action.startswith('discard:'):
             if action.split(':')[1]!=stamp(view):raise ValueError('stale')
             preview=await call('POST','/scrap-preview')
@@ -207,8 +201,10 @@ async def callback(adapter,query,data,m):
             await query.edit_message_text(text=body[:3900],reply_markup=markup([[button('Confirm scrap',f'vf:{rid}:scrap:{preview["confirmationId"]}')],[button('Back',f'vf:{rid}:page:0'),button('Cancel',f'vf:{rid}:cancel')]]))
         elif action.startswith('scrap:'):
             result=await call('POST','/scrap',{'confirmationId':action.split(':')[1]})
-            await query.edit_message_text(text='Selected items scrapped; no expense posted for them.\n\n'+text(result['next']),reply_markup=markup(keyboard(result['next'])))
-            await continue_inbox(adapter,query,rid,result['next'],m,user)
+            if result['next'].get('readOnly'):
+                import receipt_inbox
+                await query.edit_message_text(text='Selected items scrapped; no expense posted for them.',reply_markup=markup(receipt_inbox.progress(rid)))
+            else:await query.edit_message_text(text='Selected items scrapped; no expense posted for them.\n\n'+text(result['next']),reply_markup=markup(keyboard(result['next'])))
         else:return False
         return True
     except Exception as error:

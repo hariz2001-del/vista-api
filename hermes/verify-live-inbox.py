@@ -19,7 +19,7 @@ for r in rows:
     checked+=1;print('Cross-check metadata refreshed: '+r['ref'],flush=True)
 result=m._call('POST','/agent/inbox/review',{'order':'flags'},USER)
 text,buttons=inbox.card(result)
-assert 'Reply with a number' in text and all(len(b['callback_data'].encode())<=64 for row in buttons for b in row)
+assert (not result['entries'] or text.startswith('1. R-')) and all(len(b['callback_data'].encode())<=64 for row in buttons for b in row)
 if result['entries']:
     view=m._call('GET',f'/agent/receipts/{result["entries"][0]["id"]}/form',telegram_user=USER)
     assert view['form']['paidBy']=='STALL_FUNDS'

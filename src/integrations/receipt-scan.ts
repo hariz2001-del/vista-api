@@ -42,5 +42,5 @@ export async function receiptScan(bytes: Buffer, corners?: Point[]) {
     }
     image = sharp(output, { raw: { width, height, channels: 3 } })
   }
-  return image.resize({ width: 1400, height: 6000, fit: 'inside', withoutEnlargement: true }).grayscale().normalise({ lower: 1, upper: 99 }).sharpen().jpeg({ quality: 90 }).toBuffer()
+  return image.resize({ width: 1400, height: 6000, fit: 'inside', withoutEnlargement: true }).normalise({ lower: 1, upper: 99 }).sharpen().jpeg({ quality: 92, chromaSubsampling: '4:4:4' }).toBuffer()
 }

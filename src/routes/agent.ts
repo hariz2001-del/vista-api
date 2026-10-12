@@ -331,11 +331,12 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       if (existing) {
         const duplicateOf = typeof existing.extracted === 'object' && existing.extracted && 'duplicateOf' in existing.extracted ? existing.extracted.duplicateOf : null
         const canonicalId = typeof duplicateOf === 'string' ? duplicateOf : existing.id
+        if (inbox.bulkId && inbox.bulk) await act(db,request,'receipt.bulk.received','receipt-inbox',canonicalId,{bulkId:inbox.bulkId,duplicate:true})
         if (!body.deferProcessing) await storeReceiptImage(db, canonicalId).catch((error: unknown) => request.log.warn({ err: error, receiptId: canonicalId }, 'Receipt Drive retry failed'))
         const fresh = await requireReceipt(db, canonicalId)
         if (inbox.autoStash) await act(db, request, 'receipt.inbox.duplicate', 'receipt-inbox', canonicalId, { reason: 'Same saved photo/message; review existing allocations before any new spending.' })
         if (body.deferProcessing && ['UPLOADED', 'PENDING_REVIEW', 'SKIPPED'].includes(fresh.status)) await db.receiptJob.upsert({ where: { receiptId: fresh.id }, create: { businessId, receiptId: fresh.id }, update: {} })
-        return { duplicate: true, autoStash: inbox.autoStash, duplicateReason: existing.sha256 === sha256 ? 'identical image bytes' : 'same Telegram message delivered again', receipt: serialiseReceipt(fresh), drive: fresh.driveFileId ? 'stored' : 'pending' }
+        return { duplicate: true, autoStash: inbox.autoStash, bulk: inbox.bulk, duplicateReason: existing.sha256 === sha256 ? 'identical image bytes' : 'same Telegram message delivered again', receipt: serialiseReceipt(fresh), drive: fresh.driveFileId ? 'stored' : 'pending' }
       }
 
       const receipt = await db.$transaction(async (tx) => {
@@ -348,11 +349,12 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
             mimeType: body.mimeType,
             notes: body.note ?? null,
             uploadedById: request.agentUser?.id ?? null,
-            ...(inbox.autoStash ? { status: 'SKIPPED', extracted: { _inbox: { stashed: true, suppressNotification: true } } } : {}),
+            ...(inbox.autoStash ? { status: 'SKIPPED', extracted: { _inbox: { stashed: true, suppressNotification: true, ...(inbox.bulk ? { bulkId: inbox.bulkId, scanOnly: body.mimeType!=='application/pdf', scanOnlyAuthorisedBy: request.agentUser!.id } : {}) } } } : {}),
             image: { create: { bytes } },
           },
         })
         await act(tx, request, 'receipt.uploaded', 'receipt', created.id, { sha256, size: bytes.length })
+        if(inbox.bulk && inbox.bulkId) await act(tx,request,'receipt.bulk.received','receipt-inbox',created.id,{bulkId:inbox.bulkId})
         if (body.deferProcessing) await tx.receiptJob.create({ data: { businessId, receiptId: created.id } })
         return created
       })
@@ -364,7 +366,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         return null
       })
       const fresh = await db.receiptDocument.findUniqueOrThrow({ where: { id: receipt.id } })
-      return { duplicate: false, autoStash: inbox.autoStash, receipt: serialiseReceipt(fresh), drive: drive ? 'stored' : 'pending' }
+      return { duplicate: false, autoStash: inbox.autoStash, bulk: inbox.bulk, receipt: serialiseReceipt(fresh), drive: drive ? 'stored' : 'pending' }
     },
   )
 
@@ -404,7 +406,8 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const image = await request.db.receiptImage.findUnique({ where: { receiptId: id } })
     if((receipt.extracted as any)?._deletedEvidence)throw conflict('agent:DUPLICATE_PHOTOS_REMOVED','Duplicate photos were removed; use the preserved canonical receipt instead.')
     const original = z.object({ original: z.enum(['true', 'false']).optional() }).parse(request.query).original === 'true'
-    const scanned = !original && (image?.scanBytes || receipt.scanDriveFileId)
+    const scanOnly=Boolean((receipt.extracted as any)?._inbox?.originalRetired)
+    const scanned = (!original || scanOnly) && (image?.scanBytes || receipt.scanDriveFileId)
     const bytes = scanned ? image?.scanBytes ? Buffer.from(image.scanBytes) : await readFromDrive(receipt.scanDriveFileId!) : image ? Buffer.from(image.bytes) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
     return {
       mimeType: scanned ? 'image/jpeg' : receipt.mimeType,
@@ -420,14 +423,15 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     if (receipt.mimeType === 'application/pdf') throw badRequest('validation:INVALID_REQUEST')
     if(receipt.status==='REJECTED'||(receipt.extracted as any)?._deletedEvidence)throw conflict('agent:RECEIPT_DONE')
     const image = await request.db.receiptImage.findUnique({ where: { receiptId: id } })
-    const bytes = image ? Buffer.from(image.bytes) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
+    const retainedScan=Boolean((receipt.extracted as any)?._inbox?.originalRetired)
+    const bytes = image ? Buffer.from(image.bytes) : retainedScan && receipt.scanDriveFileId ? await readFromDrive(receipt.scanDriveFileId) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
     if (!bytes) throw notFound('agent:RECEIPT_NOT_FOUND')
     const scan = await receiptScan(bytes, body.corners)
     await request.db.receiptImage.upsert({ where: { receiptId: id }, create: { receiptId: id, businessId: request.businessId, bytes: new Uint8Array(bytes), scanBytes: new Uint8Array(scan) }, update: { scanBytes: new Uint8Array(scan) } })
     await request.db.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id = ${id} AND business_id = ${request.businessId} FOR UPDATE`
       const latest = await requireReceipt(tx, id)
-      await tx.receiptDocument.update({ where: { id }, data: { extracted: JSON.parse(JSON.stringify({ ...(typeof latest.extracted === 'object' && latest.extracted ? latest.extracted : {}), scan: { corners: body.corners ?? null, madeAt: new Date().toISOString(), originalPreserved: true } })) } })
+      await tx.receiptDocument.update({ where: { id }, data: { extracted: JSON.parse(JSON.stringify({ ...(typeof latest.extracted === 'object' && latest.extracted ? latest.extracted : {}), scan: { corners: body.corners ?? null, madeAt: new Date().toISOString(), style: 'colour', sha256: createHash('sha256').update(scan).digest('hex'), originalPreserved: !(latest.extracted as any)?._inbox?.originalRetired } })) } })
     })
     await act(request.db, request, 'receipt.scanned', 'receipt', id, { corners: body.corners, originalPreserved: true })
     let driveError: string | null = null

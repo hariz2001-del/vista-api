@@ -1,5 +1,7 @@
 import type { Tx } from '../db.ts'
 import { env } from '../env.ts'
+import { createHash } from 'node:crypto'
+import sharp from 'sharp'
 
 /**
  * Receipt photos in the owner's Google Drive, under their Finances folder:
@@ -151,6 +153,33 @@ export async function storeReceiptImage(db: Tx, receiptId: string): Promise<bool
   if (receipt.image.scanBytes) await storeReceiptScan(db, receiptId)
   else await db.receiptImage.deleteMany({ where: { receiptId } })
   return true
+}
+
+/** Opt-in ONLY at new /bulk upload. Verify colour crop readback before Trash. */
+export async function retainBulkScanOnly(db: Tx, receiptId: string) {
+  const receipt=await db.receiptDocument.findUnique({where:{id:receiptId}}), x=receipt?.extracted as any
+  if(!receipt || !x?._inbox?.scanOnly || x._inbox.originalRetired)return {retired:Boolean(x?._inbox?.originalRetired),notRequested:!x?._inbox?.scanOnly}
+  if(!driveConfigured() || env.DRIVE_BUSINESS_ID!==receipt.businessId)throw new Error('Bulk Drive connection unavailable; original retained.')
+  if(!x._inbox.bulkId || x._inbox.scanOnlyAuthorisedBy!==receipt.uploadedById || !receipt.scanDriveFileId || !receipt.driveFileId || receipt.scanDriveFileId===receipt.driveFileId || x.scan?.style!=='colour' || !x.scan?.sha256 || !x.scan?.corners?.length || !(x.lines?.length || x.document_type==='bank_screenshot') || receipt.totalSen===null || receipt.reviewFlags.some(f=>/crop|corners|edges|scan/i.test(f)))return {retired:false,reason:'Complete colour crop/reading required; original retained.'}
+  const scan=await withinFinances(receipt.scanDriveFileId)
+  if(scan.appProperties?.vistaReceiptId!==receiptId || scan.appProperties?.vistaVariant!=='scan' || scan.mimeType!=='image/jpeg')throw new Error('Stored scan association invalid; original retained.')
+  const bytes=await readFromDrive(scan.id), meta=await sharp(bytes,{limitInputPixels:40_000_000}).metadata()
+  if(!meta.width || !meta.height || meta.width<2 || meta.height<2 || meta.channels!==3 || createHash('sha256').update(bytes).digest('hex')!==x.scan.sha256)throw new Error('Stored colour scan readback invalid; original retained.')
+  const original=await driveFile(receipt.driveFileId)
+  if(original.mimeType===FOLDER || original.appProperties?.vistaReceiptId!==receiptId || original.appProperties?.vistaVariant==='scan')throw new Error('Original association invalid; original retained.')
+  if(!original.trashed)await withinFinances(original.id)
+  await (db as any).$transaction(async(tx:Tx)=>{
+    await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id=${receiptId} AND business_id=${receipt.businessId} FOR UPDATE`
+    const fresh=await tx.receiptDocument.findUniqueOrThrow({where:{id:receiptId}}), latest=fresh.extracted as any
+    if(latest._inbox?.originalRetired)return
+    if(fresh.driveFileId!==original.id || fresh.scanDriveFileId!==scan.id || latest.scan?.sha256!==x.scan.sha256)throw new Error('Receipt scan changed; original retained.')
+    if(!original.trashed)await drive(`${API}/files/${encodeURIComponent(original.id)}?fields=id,trashed`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({trashed:true})})
+    if(!(await driveFile(original.id)).trashed)throw new Error('Original Trash action not verified.')
+    await tx.receiptDocument.update({where:{id:receiptId},data:{driveFileId:scan.id,driveUrl:scan.webViewLink??fresh.scanDriveUrl,extracted:JSON.parse(JSON.stringify({...latest,scan:{...latest.scan,originalPreserved:false},_inbox:{...latest._inbox,originalRetired:true,retiredOriginalDriveId:original.id,retiredAt:new Date().toISOString()}}))}})
+    await tx.receiptImage.deleteMany({where:{receiptId}})
+    await tx.agentAction.create({data:{businessId:receipt.businessId,agentUserId:receipt.uploadedById,action:'receipt.bulk.original.trashed',entityType:'receipt',entityId:receiptId,detail:{scanId:scan.id,originalId:original.id,scanSha256:x.scan.sha256,recoverable:'Drive Trash'}}})
+  },{timeout:60000})
+  return {retired:true,scanId:scan.id,recoverable:'Drive Trash'}
 }
 
 /** Once the receipt's date is known, file the photo under its year and month. */

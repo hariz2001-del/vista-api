@@ -97,4 +97,14 @@ class FormTests(unittest.IsolatedAsyncioTestCase):
     def test_funding_and_method_display_current_assumptions(self):
         v=fixture();labels=[b['text'] for row in form.keyboard(v) for b in row]
         self.assertIn('Funding: Business till',labels);self.assertIn('Method: —',labels)
+    async def test_completion_does_not_auto_advance_the_next_receipt(self):
+        b=Bridge();q=Query();v=fixture();v['readOnly']=True
+        def call(method,path,body=None,user=None):
+            b.calls.append((method,path,body,user))
+            return {'expenseIds':['saved'],'next':v} if path.endswith('/post') else fixture()
+        b._call=call;old=form.markup;form.markup=lambda x:x
+        try:await form.callback(types.SimpleNamespace(),q,f'vf:{RID}:post:42',b)
+        finally:form.markup=old
+        self.assertFalse(any('/inbox/next' in c[1] for c in b.calls))
+        self.assertEqual([x['text'] for row in q.edits[-1]['reply_markup'] for x in row],['Next receipt','End','Choose custom receipt'])
 if __name__=='__main__':unittest.main()

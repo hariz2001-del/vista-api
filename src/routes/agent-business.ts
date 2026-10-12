@@ -5,7 +5,7 @@ import { conflict, notFound } from '../errors.ts'
 import { sameVendor } from '../receipt-matching.ts'
 import { agentClock } from '../domain/agent-clock.ts'
 import { env } from '../env.ts'
-import { driveConfigured } from '../integrations/drive.ts'
+import { driveConfigured, retainBulkScanOnly } from '../integrations/drive.ts'
 import { readingHash } from '../receipt-form.ts'
 
 const id = z.string().uuid()
@@ -137,6 +137,9 @@ export async function agentBusinessRoutes(app: FastifyInstance) {
     if(!body.error && boundDrive && candidate?.status==='RUNNING' && candidate.leaseUntil?.toISOString()===body.leaseToken) {
       const result=await app.inject({method:'POST',url:`/agent/receipts/${candidate.receiptId}/checks`,payload:{},headers:{authorization:request.headers.authorization!,'x-telegram-user':request.agentUser!.telegramUserId}})
       if(result.statusCode>=400) body.error='Evidence cross-check incomplete; retry needed.'
+      if(!body.error){
+        try{const retention=await retainBulkScanOnly(request.db,candidate.receiptId);if(!retention.notRequested && !retention.retired)body.error='Colour crop/readback incomplete; original retained.'}catch{body.error='Verified scan-only retention incomplete; retry safely.'}
+      }
     }
     return request.db.$transaction(async tx => {
     const job = await tx.receiptJob.findUnique({ where: { id: jobId } })
@@ -151,7 +154,7 @@ export async function agentBusinessRoutes(app: FastifyInstance) {
     // lose that newer work by marking the old generation DONE.
     const result = await tx.receiptJob.updateMany({ where: { id: jobId, status: 'RUNNING', leaseUntil: new Date(body.leaseToken) }, data: { status: body.error || needsAnnotation || needsEvidence ? job.attempts >= 5 ? 'FAILED' : 'PENDING' : 'DONE', error: body.error ?? (needsEvidence ? 'Reading/scan/Drive/checks incomplete.' : needsAnnotation ? 'Newer allocation annotation pending.' : null), leaseUntil: null } })
     if (!result.count) throw conflict('agent:LEASE_STALE')
-    return { saved: true }
+    return { saved: true,receiptId:job.receiptId }
     })
   })
 

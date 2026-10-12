@@ -194,3 +194,37 @@ cache and retains an audited ReceiptDocument tombstone. Drive Trash is
 recoverable; canonical originals and all accounting remain unchanged. Tools
 offer preview only; cron transport cannot access either maintenance tool.
 No production receipt was deleted or expense edited by implementation tests.
+
+## /bulk, /endbulk, colour scan retention and business-shared preferences
+
+New native commands are registered in the finance bot's Telegram menu only.
+/bulk creates a durable per-actor batch, silently stores uploads (no per-photo
+message/menu/model turn) and processes OCR/colour perspective cropping/Drive.
+Only new batch originals opt into scan-only retention; after complete reading,
+real paper corners, source/scan tags, exact SHA256 readback and image validation,
+queue finish trashes the original recoverably, points canonical storage at the
+scan and clears image cache. Invalid crop/readback retains original and retries.
+Existing receipts/exact repeated historical photos never receive this policy.
+PDF originals stay unchanged. Original=true on retired sources safely returns
+retained scan instead. No financial data or receipt IDs are rewritten.
+
+/endbulk closes intake, waits for in-flight scans and delivers a durable leased
+list of its batch only. Lists are standardized numbered lines with ref, merchant,
+DD/MM/YYYY date and RM amount, no flag paragraphs/OCR summaries. Paging keeps
+global numbers and actor-bound list IDs. Failed jobs are retained/listed, not
+silently omitted. Selecting number sends actual stored scan then initial five
+action buttons; native Save prompts success + Next receipt/End/Choose custom,
+never automatic next. Remaining split groups remain on their existing card.
+
+Shared preferences have a business-scoped audited registry, accessible to every
+registered role. vista_preferences list/set/append/forget handles response style,
+terminology, report/receipt/workflow preferences and reusable clarification
+lessons. Telegram turns inject current shared preferences with a bounded fetch.
+No financial figures, protected staff facts, credentials or permission grants
+are learned; hard backend/session guards remain. Batch/progress/confirmations
+stay actor-specific, while confirmed item-history suggestions remain shared.
+
+Tests cover invalid readback before Trash, colour pixels, retry idempotence,
+non-retroactive retention, command silence, initial scan+menu delivery, manual
+advance, global numbered pages, completion-delivery lease and shared preferences
+across OWNER/BOOKKEEPER/VIEWER with cross-business/unknown-actor isolation.

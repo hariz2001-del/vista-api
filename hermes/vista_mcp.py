@@ -412,6 +412,7 @@ TOOLS += [
     _tool("vista_receipt_duplicates", "Compare a newly read receipt to existing receipts even if a different photo. Explains merchant/invoice/date/total, linked entries and remaining amount. Ask WHY resent ONLY if candidates exist; split is not duplicate spending.", {"receipt_id": {"type": "string"}}, ["receipt_id"]),
     _tool("vista_receipt_inbox", "Persistent receipt inbox. mode sets auto_stash until stopped for actual sender; review gives numbered list + flagged-first/other-first buttons; select opens number from latest list; defer marks revisit. Stashing never posts; background OCR/crop/Drive/checks continue.", {"action":{"type":"string","enum":["settings","mode","review","select","defer"]},"auto_stash":{"type":"boolean"},"order":{"type":"string","enum":["flags","others","oldest"]},"offset":{"type":"integer","minimum":0},"number":{"type":"integer","minimum":1,"maximum":20},"list_id":{"type":"string"},"receipt_id":{"type":"string"},"sequential":{"type":"boolean"},"show_buttons":{"type":"boolean"}},["action"]),
     _tool("vista_receipt_checks", "Persist separate checks of receipt documents, split allocations, Vista ledger and bounded Finances Drive invoice metadata. Evidence only; no post/link. Stash silently then review flags later.",{"receipt_id":{"type":"string"}},["receipt_id"]),
+    _tool("vista_preferences", "Shared business preferences/clarification lessons for EVERY authorised account, not individual chat memory. list/set/append/forget. Remember useful corrections to answer style/terminology/report or receipt preferences, never financial figures, credentials, protected staff/payroll facts or permissions. Does not change access rights or execute workflows.",{"action":{"type":"string","enum":["list","set","append","forget"]},"key":{"type":"string","enum":["response_style","terminology","report_defaults","receipt_preferences","workflow_preferences","clarification_lessons"]},"value":{"type":"string"}},["action"]),
     _tool("vista_edit_expense", "OWNER only: read existing expense, or preview changes to actual Vista expense fields (integer sen). With changes: show exact before/after and native Confirm edit buttons. Never edits without actual sender confirmation; original receipt preserved. No new expense.",{"expense_id":{"type":"string"},"changes":{"type":"object"},"show_buttons":{"type":"boolean"}},["expense_id"]),
     _tool("vista_cleanup_receipt", "OWNER only: preview removal of an explicitly canonicalised, unlinked duplicate receipt's photos from Vista cache and recoverable Drive Trash. Never removes canonical or booked evidence. First explicitly choose/reuse canonical source. Native confirmation required.",{"receipt_id":{"type":"string"},"show_buttons":{"type":"boolean"}},["receipt_id"]),
     _tool("vista_reuse_receipt", "Only after confirmation of SAME physical receipt: resolve a newly staged alternate photo as duplicate, return original UUID/Drive files to reuse for further allocations/linking. No expense created or evidence deleted.", {"receipt_id": {"type": "string"}, "canonical_id": {"type": "string"}, "reason": {"type": "string"}}, ["receipt_id", "canonical_id", "reason"]),
@@ -433,6 +434,11 @@ TOOLS += [
 
 
 for _definition in TOOLS:
+    if _definition['name']=='vista_receipt_inbox':
+        props=_definition['inputSchema']['properties'];props['number']['maximum']=10000
+        props['scope']={'type':'string','enum':['all','batch']};props['bulk_id']={'type':'string'}
+        props['action']['enum'] += ['bulk','endbulk']
+        _definition['description']='Persistent actor-bound bulk capture/review: bulk silently queues colour crop/OCR/storage; endbulk closes intake and delivers numbered batch list when ready. review scope=batch/all, select number opens stored scan + initial action menu. Never auto advance; native Next/End/Choose custom buttons. No expense posting.'
     if _definition['name'] == 'vista_save_reading':
         _definition['inputSchema']['properties']['only_missing'] = {'type': 'boolean', 'description': 'Background OCR only: fill missing fields but never overwrite saved user readings/corrections.'}
     if _definition['name'] == 'vista_reconciliation':
@@ -459,8 +465,46 @@ def _receipt_card_send(rid, view, user):
     except Exception:raise VistaError('Telegram receipt card failed; credential not logged') from None
     return {'sent':True,'message_id':result['result']['message_id']}
 
+def _receipt_open_send(rid,view,user):
+    import receipt_inbox
+    image=_call('GET',f'/agent/receipts/{rid}/image',telegram_user=user)
+    token=_dotenv().get('TELEGRAM_BOT_TOKEN','');destination=user or _default_user()
+    if image.get('imageBase64'):
+        boundary='chopper-'+rid
+        fields={'chat_id':destination,'caption':f"{view['receipt']['ref']} — {view['receipt'].get('vendor') or 'Receipt'} · {receipt_inbox.date_label(view['receipt'].get('date'))}"}
+        chunks=[f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode() for k,v in fields.items()]
+        chunks += [f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="scan.jpg"\r\nContent-Type: {image["mimeType"]}\r\n\r\n'.encode(),base64.b64decode(image['imageBase64']),f'\r\n--{boundary}--\r\n'.encode()]
+        req=urllib.request.Request('https://api.telegram.org/bot'+token+'/sendPhoto',data=b''.join(chunks),headers={'Content-Type':'multipart/form-data; boundary='+boundary},method='POST')
+        try:
+            with urllib.request.urlopen(req,timeout=30) as response:result=json.load(response)
+            if not result.get('ok'):raise VistaError('Telegram scan delivery rejected')
+        except Exception:raise VistaError('Stored scan could not be delivered; credentials not logged') from None
+    req=urllib.request.Request('https://api.telegram.org/bot'+token+'/sendMessage',data=json.dumps({'chat_id':destination,'text':__import__('receipt_form').text(view),'reply_markup':{'inline_keyboard':receipt_inbox.action_menu(rid)}}).encode(),headers={'Content-Type':'application/json'},method='POST')
+    try:
+        with urllib.request.urlopen(req,timeout=30) as response:result=json.load(response)
+        if not result.get('ok'):raise VistaError('Telegram receipt menu rejected')
+    except Exception:raise VistaError('Receipt action menu delivery failed; credentials not logged') from None
+    return {'sent':True,'message_id':result['result']['message_id']}
+
+def _bulk_notify(user,receipt_id=None):
+    result=_call('POST','/agent/inbox/bulk/ready',{'receiptId':receipt_id} if receipt_id else {},user)
+    delivery=result.get('delivery')
+    if not delivery:return {'sent':False,'pending':result.get('pending',0),'already_delivered':not result.get('pending')}
+    import receipt_inbox
+    body,rows=receipt_inbox.card(delivery['result']);token=_dotenv().get('TELEGRAM_BOT_TOKEN','')
+    req=urllib.request.Request('https://api.telegram.org/bot'+token+'/sendMessage',data=json.dumps({'chat_id':delivery['chatId'],'text':body,'reply_markup':{'inline_keyboard':rows}}).encode(),headers={'Content-Type':'application/json'},method='POST')
+    try:
+        with urllib.request.urlopen(req,timeout=30) as response:sent=json.load(response)
+        if not sent.get('ok'):raise VistaError('Telegram rejected batch list')
+    except Exception:raise VistaError('Batch list delivery unavailable; credentials not logged') from None
+    _call('POST','/agent/inbox/bulk/delivered',{'id':delivery['id'],'leaseToken':delivery['leaseToken'],'messageId':sent['result']['message_id']},user)
+    return {'sent':True,'message_id':sent['result']['message_id'],'total':delivery['result']['total']}
+
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name=='vista_preferences':
+        if args['action']=='list':return _call('GET','/agent/preferences',telegram_user=user)
+        return _call('POST','/agent/preferences',{k:args[k] for k in ('action','key','value') if k in args},user)
     if name in ('vista_edit_expense','vista_cleanup_receipt'):
         kind='e' if name=='vista_edit_expense' else 'd';id=args['expense_id' if kind=='e' else 'receipt_id']
         if kind=='e' and 'changes' not in args:return _call('GET',f'/agent/expenses/{id}/edit',telegram_user=user)
@@ -481,6 +525,10 @@ def _run(name: str, args: dict) -> object:
         return _call('POST',f'/agent/receipts/{args["receipt_id"]}/checks',{},user)
     if name == 'vista_receipt_inbox':
         action=args['action']
+        if action in ('bulk','endbulk'):
+            result=_call('POST','/agent/inbox/bulk/'+('start' if action=='bulk' else 'end'),{},user)
+            if action=='endbulk' and args.get('show_buttons',True):result['notification']=_bulk_notify(user)
+            return result
         if action=='settings':return _call('GET','/agent/inbox/settings',telegram_user=user)
         if action=='mode':return _call('PATCH','/agent/inbox/settings',{'autoStash':args['auto_stash']},user)
         if action=='defer':return _call('POST',f'/agent/receipts/{args["receipt_id"]}/defer',{},user)
@@ -488,9 +536,9 @@ def _run(name: str, args: dict) -> object:
             body={'number':args['number']}
             if args.get('list_id'):body['listId']=args['list_id']
             result=_call('POST','/agent/inbox/select',body,user)
-            if args.get('show_buttons',True):result['notification']=_receipt_card_send(result['receiptId'],result['form'],user)
+            if args.get('show_buttons',True):result['notification']=_receipt_open_send(result['receiptId'],result['form'],user)
             return result
-        result=_call('POST','/agent/inbox/review',{'order':args.get('order','oldest'),'offset':args.get('offset',0),'sequential':args.get('sequential',False)},user)
+        result=_call('POST','/agent/inbox/review',{'order':args.get('order','oldest'),'offset':args.get('offset',0),'sequential':args.get('sequential',True),'scope':args.get('scope','all'),**({'bulkId':args['bulk_id']} if args.get('bulk_id') else {})},user)
         if args.get('show_buttons',True):
             import receipt_inbox
             body,rows=receipt_inbox.card(result)
@@ -563,7 +611,11 @@ def _run(name: str, args: dict) -> object:
         action = args.get('action', 'list')
         if action == 'list': return _call('GET', '/agent/queue', telegram_user=user)
         if action == 'claim': return _call('POST', '/agent/queue/claim', {}, user)
-        return _call('POST', f"/agent/queue/{args['job_id']}/finish", {'leaseToken': args['lease_token'], **({'error': args['error']} if args.get('error') else {})}, user)
+        result=_call('POST', f"/agent/queue/{args['job_id']}/finish", {'leaseToken': args['lease_token'], **({'error': args['error']} if args.get('error') else {})}, user)
+        if result.get('receiptId'):
+            try:result['bulkNotification']=_bulk_notify(user,result['receiptId'])
+            except VistaError:result['bulkNotification']={'sent':False,'pendingDelivery':True}
+        return result
     if name == 'vista_reconciliation':
         action = args.get('action', 'list')
         if action == 'refresh': return _call('POST', '/agent/reconciliation/refresh', {}, user)

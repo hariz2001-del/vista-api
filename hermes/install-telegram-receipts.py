@@ -62,3 +62,16 @@ if 'VISTA_RECEIPT_MAINTENANCE_V1' not in text:
     if text.count(anchor)!=1:raise SystemExit('Maintenance callback anchor changed; inspect first.')
     text=text.replace(anchor,"        # VISTA_RECEIPT_MAINTENANCE_V1\n        if data.startswith(('vr:', 'vf:', 'vi:', 'vm:')):")
     compile(text,str(target),'exec');target.write_text(text)
+if 'VISTA_BULK_MENU_V1' not in text:
+    anchor='\n        bot_commands = self._bot_commands(menu_commands)\n'
+    if text.count(anchor)!=1:raise SystemExit('Bulk command-menu anchor changed; inspect first.')
+    text=text.replace(anchor,'\n        # VISTA_BULK_MENU_V1\n        '+loader+'\n        menu_commands = _vista_receipts.menu_commands(self, menu_commands)\n        bot_commands = self._bot_commands(menu_commands)\n')
+    forum='\n                bot_commands = self._bot_commands(menu_commands)\n'
+    if text.count(forum)!=1:raise SystemExit('Forum command-menu anchor changed; inspect first.')
+    text=text.replace(forum,'\n                '+loader.replace('\n        ','\n                ')+'\n                menu_commands = _vista_receipts.menu_commands(self, menu_commands)\n                bot_commands = self._bot_commands(menu_commands)\n')
+    compile(text,str(target),'exec');target.write_text(text)
+if 'VISTA_SHARED_PREFERENCES_V1' not in text:
+    anchor='        event = _vista_receipts.business_context(self, event)\n'
+    if text.count(anchor)!=1:raise SystemExit('Shared preferences anchor changed; inspect first.')
+    text=text.replace(anchor,anchor+'        # VISTA_SHARED_PREFERENCES_V1\n        event = await _vista_receipts.shared_preferences(self, event)\n')
+    compile(text,str(target),'exec');target.write_text(text)
