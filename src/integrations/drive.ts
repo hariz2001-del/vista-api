@@ -124,6 +124,7 @@ const EXTENSION: Record<string, string> = {
 export async function storeReceiptImage(db: Tx, receiptId: string): Promise<boolean> {
   if (!driveConfigured()) return false
   const receipt = await db.receiptDocument.findUnique({ where: { id: receiptId }, include: { image: true } })
+  if((receipt?.extracted as any)?._deletedEvidence)return false
   if (!receipt) return false
   if (!env.DRIVE_BUSINESS_ID || receipt.businessId !== env.DRIVE_BUSINESS_ID) return false
   if (receipt.driveFileId) {

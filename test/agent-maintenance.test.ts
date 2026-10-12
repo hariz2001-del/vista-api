@@ -53,6 +53,7 @@ it('cleans only explicitly reused duplicate cache and keeps canonical metadata/e
   expect(await prisma.receiptImage.findUnique({where:{receiptId:canonical}})).not.toBeNull()
   expect(await prisma.receiptDocument.findUnique({where:{id:duplicate}})).not.toBeNull()
   expect((await s.call('GET',`/agent/receipts/${duplicate}/image`)).statusCode).toBe(409)
+  expect((await s.call('POST',`/agent/receipts/${duplicate}/scan`,{})).statusCode).toBe(409)
   expect(await prisma.expense.count({where:{businessId:s.b.businessId}})).toBe(1)
 })
 it('refuses cleanup if source becomes linked or canonical evidence is lost',async()=>{

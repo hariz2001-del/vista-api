@@ -418,6 +418,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const body = z.object({ corners: z.array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) })).length(4).optional() }).parse(request.body ?? {})
     const receipt = await requireReceipt(request.db, id)
     if (receipt.mimeType === 'application/pdf') throw badRequest('validation:INVALID_REQUEST')
+    if(receipt.status==='REJECTED'||(receipt.extracted as any)?._deletedEvidence)throw conflict('agent:RECEIPT_DONE')
     const image = await request.db.receiptImage.findUnique({ where: { receiptId: id } })
     const bytes = image ? Buffer.from(image.bytes) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
     if (!bytes) throw notFound('agent:RECEIPT_NOT_FOUND')
