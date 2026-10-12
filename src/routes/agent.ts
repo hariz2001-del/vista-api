@@ -9,6 +9,7 @@ import { driveConfigured, fileByDate, readFromDrive, storeReceiptImage } from '.
 import { createExpense, expenseBody, previewExpense } from './rms.ts'
 import { receiptScan } from '../integrations/receipt-scan.ts'
 import { sameVendor } from '../receipt-matching.ts'
+import { inboxSettings } from '../receipt-inbox.ts'
 
 /**
  * Sarang AI — the bookkeeping agent (a Hermes profile on Telegram).
@@ -314,6 +315,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       if (bytes.length > MAX_IMAGE_BYTES) throw badRequest('agent:IMAGE_TOO_LARGE')
       const sha256 = createHash('sha256').update(bytes).digest('hex')
       const { db, businessId } = request
+      const inbox = await inboxSettings(db, request.agentUser!.id)
       const chatId = body.telegramChatId ? BigInt(body.telegramChatId) : null
       const messageId = body.telegramMessageId ? BigInt(body.telegramMessageId) : null
 
@@ -331,8 +333,9 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         const canonicalId = typeof duplicateOf === 'string' ? duplicateOf : existing.id
         if (!body.deferProcessing) await storeReceiptImage(db, canonicalId).catch((error: unknown) => request.log.warn({ err: error, receiptId: canonicalId }, 'Receipt Drive retry failed'))
         const fresh = await requireReceipt(db, canonicalId)
+        if (inbox.autoStash) await act(db, request, 'receipt.inbox.duplicate', 'receipt-inbox', canonicalId, { reason: 'Same saved photo/message; review existing allocations before any new spending.' })
         if (body.deferProcessing && ['UPLOADED', 'PENDING_REVIEW', 'SKIPPED'].includes(fresh.status)) await db.receiptJob.upsert({ where: { receiptId: fresh.id }, create: { businessId, receiptId: fresh.id }, update: {} })
-        return { duplicate: true, duplicateReason: existing.sha256 === sha256 ? 'identical image bytes' : 'same Telegram message delivered again', receipt: serialiseReceipt(fresh), drive: fresh.driveFileId ? 'stored' : 'pending' }
+        return { duplicate: true, autoStash: inbox.autoStash, duplicateReason: existing.sha256 === sha256 ? 'identical image bytes' : 'same Telegram message delivered again', receipt: serialiseReceipt(fresh), drive: fresh.driveFileId ? 'stored' : 'pending' }
       }
 
       const receipt = await db.$transaction(async (tx) => {
@@ -345,6 +348,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
             mimeType: body.mimeType,
             notes: body.note ?? null,
             uploadedById: request.agentUser?.id ?? null,
+            ...(inbox.autoStash ? { status: 'SKIPPED', extracted: { _inbox: { stashed: true, suppressNotification: true } } } : {}),
             image: { create: { bytes } },
           },
         })
@@ -360,7 +364,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         return null
       })
       const fresh = await db.receiptDocument.findUniqueOrThrow({ where: { id: receipt.id } })
-      return { duplicate: false, receipt: serialiseReceipt(fresh), drive: drive ? 'stored' : 'pending' }
+      return { duplicate: false, autoStash: inbox.autoStash, receipt: serialiseReceipt(fresh), drive: drive ? 'stored' : 'pending' }
     },
   )
 
@@ -398,6 +402,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const id = ID.parse(request.params.id)
     const receipt = await requireReceipt(request.db, id)
     const image = await request.db.receiptImage.findUnique({ where: { receiptId: id } })
+    if((receipt.extracted as any)?._deletedEvidence)throw conflict('agent:DUPLICATE_PHOTOS_REMOVED','Duplicate photos were removed; use the preserved canonical receipt instead.')
     const original = z.object({ original: z.enum(['true', 'false']).optional() }).parse(request.query).original === 'true'
     const scanned = !original && (image?.scanBytes || receipt.scanDriveFileId)
     const bytes = scanned ? image?.scanBytes ? Buffer.from(image.scanBytes) : await readFromDrive(receipt.scanDriveFileId!) : image ? Buffer.from(image.bytes) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
@@ -442,7 +447,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         assertOpen(receipt)
         const workflow = (receipt.extracted as any)?._lineWorkflow
         if (workflow?.decisions.some((d: any) => d.state !== 'pending') && !body.onlyMissing) throw conflict('agent:READING_ALLOCATED', 'Allocated/excluded receipt items cannot be rewritten. Edit the accounting entries through Vista corrections instead.')
-        if (body.extracted && ['_lineWorkflow', '_entryForms'].some(k => k in body.extracted!)) throw badRequest('validation:INVALID_REQUEST')
+        if (body.extracted && Object.keys(body.extracted).some(k => k.startsWith('_'))) throw badRequest('validation:INVALID_REQUEST')
         if (body.onlyMissing) {
           if (receipt.vendor !== null) delete body.vendor
           if (receipt.receiptDate !== null) delete body.receiptDate
@@ -506,6 +511,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         category: true,
         paidBy: true,
         receiptDocumentId: true,
+        receiptUrl: true,
       },
       take: 400,
     })
@@ -557,7 +563,8 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         brandId: row.brandId,
         category: row.category,
         paidBy: row.paidBy,
-        alreadyHasReceipt: Boolean(row.receiptDocumentId),
+        alreadyHasReceipt: Boolean(row.receiptDocumentId || row.receiptUrl),
+        receiptDocumentId: row.receiptDocumentId,
         score,
         why,
       })),
@@ -669,8 +676,9 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         assertOpen(receipt)
         await tx.receiptDocument.update({
           where: { id },
-          data: { status, ...(reason ? { notes: [receipt.notes, reason].filter(Boolean).join(' · ') } : {}) },
+          data: { status, ...(path === 'skip' ? { extracted: JSON.parse(JSON.stringify({ ...(receipt.extracted as object), _inbox: { ...(receipt.extracted as any)?._inbox, stashed: true, suppressNotification: true } })) } : {}), ...(reason ? { notes: [receipt.notes, reason].filter(Boolean).join(' · ') } : {}) },
         })
+        if(path === 'skip') await tx.receiptJob.upsert({where:{receiptId:id},create:{businessId:request.businessId,receiptId:id},update:{}})
         await act(tx, request, action, 'receipt', id, { reason })
         return { receipt: serialiseReceipt(await requireReceipt(tx, id)) }
       })

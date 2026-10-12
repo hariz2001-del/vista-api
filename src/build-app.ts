@@ -10,6 +10,8 @@ import { DomainError, messageFor } from './errors.ts'
 import { agentReadRoutes } from './routes/agent-reads.ts'
 import { agentBusinessRoutes } from './routes/agent-business.ts'
 import { agentReceiptFormRoutes } from './routes/agent-receipt-form.ts'
+import { agentReceiptInboxRoutes } from './routes/agent-receipt-inbox.ts'
+import { collectAgentMaintenance } from './routes/agent-maintenance.ts'
 import { agentRoutes } from './routes/agent.ts'
 import { agentDriveRoutes } from './routes/agent-drive.ts'
 import { collectAgentOperations } from './agent-operations.ts'
@@ -63,6 +65,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     trustProxy: true,
   })
   const registerAgentOperations = collectAgentOperations(app)
+  const registerAgentMaintenance = collectAgentMaintenance(app)
 
   // The methods must be listed: @fastify/cors defaults to GET, HEAD and POST
   // only, so a browser's preflight for the RMS's PUT (settings), PATCH and
@@ -157,7 +160,9 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(agentReadRoutes)
   await app.register(agentBusinessRoutes)
   await app.register(agentReceiptFormRoutes)
+  await app.register(agentReceiptInboxRoutes)
   registerAgentOperations()
+  registerAgentMaintenance()
   await app.register(agentDriveRoutes)
   await app.register(agentReportRoutes)
   await app.register(expenseReceiptRoutes)

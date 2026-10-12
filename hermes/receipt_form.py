@@ -3,7 +3,7 @@
 No model calls for selecting category/brand/funding/method or preview/confirm.
 Callback values are indexes bound to the live options and draft version.
 """
-import asyncio, dataclasses, hashlib, json, re
+import asyncio, dataclasses, hashlib, json, re, logging
 
 def money(sen):
     return 'needs review' if sen is None else f'RM{sen/100:.2f}'
@@ -21,6 +21,7 @@ def stamp(view):
 def text(view, page=0):
     r,f,o=view['receipt'],view['form'],view['options']
     lines=[r.get('vendor') or 'Merchant needs review',r.get('date') or 'Date needs review','']
+    if f.get('documentType')=='bank_screenshot':lines += ['Bank screenshot — custom transaction evidence, not a supplier receipt.',f"Direction: {f.get('transactionDirection') or 'needs review'}. Confirm purpose/type using Edit receipt.",'']
     pending=view.get('workflow',{}).get('pendingIndices',list(range(len(f['lines']))))
     selected=f.get('selectedIndices',pending);stage=f.get('stage','configure')
     indices=selected if stage=='configure' else pending
@@ -41,9 +42,11 @@ def text(view, page=0):
     if view.get('workflow',{}).get('postedSen') or view.get('workflow',{}).get('scrappedSen'):
         lines.append(f"Already booked: {money(view['workflow']['postedSen'])} · Scrapped: {money(view['workflow']['scrappedSen'])}")
     if r.get('reviewFlags'): lines.append('Review: '+'; '.join(r['reviewFlags'])[:400])
+    if f.get('suggestions'):lines.append('Suggested category/brand from your confirmed Vista item history — review before saving.')
     if view.get('readingChanged'):lines.append('The reading changed; earlier category choices were reset. Review again.')
     for c in view.get('duplicates',[])[:2]: lines.append(f"Possible same paper as {c['ref']}: {', '.join(c['reasons'])}. Ask Hermes to explain/reuse/split before saving.")
     if view.get('matches'):lines.append('Existing transactions may match. Link those instead of posting the purchase again; ask Hermes to review the evidence.')
+    if f.get('checks',{}).get('drive',{}).get('candidates'):lines.append('Possible matching Drive files — review their evidence before a new key-in.')
     if view.get('readOnly'):lines.append('No further unassigned items can be booked from this card. Original receipt preserved.')
     return '\n'.join(lines)[:3900]
 
@@ -79,15 +82,18 @@ def keyboard(view,page=0):
         rows += [[button('Select all',prefix+f'all:{s}'),button('Clear',prefix+f'split:{s}')],[button('Continue → Categorise',prefix+f'cont:{s}')],[button('Scrap selected',prefix+f'discard:{s}'),button('Cancel',prefix+'cancel')]]
         return rows
     group_brands={f['lines'][i]['brand'] for i in selected}
-    brand_label=label(o,'brand',next(iter(group_brands))) if len(group_brands)==1 else 'Choose'
-    rows.append([button('All categories',prefix+f'pick:c:a:{page}'),button('Brand: '+brand_label,prefix+f'pick:b:a:{page}')])
-    rows.append([button('Funding',prefix+f'pick:f:a:{page}'),button('Method',prefix+f'pick:m:a:{page}')])
+    brand_label=label(o,'brand',next(iter(group_brands))) if len(group_brands)==1 else 'Mixed — split or change'
+    categories={f['lines'][i]['category'] for i in selected}
+    category_label=label(o,'category',next(iter(categories))) if len(categories)==1 else 'Mixed'
+    rows.append([button('Category: '+category_label,prefix+f'pick:c:a:{page}'),button('Brand: '+brand_label,prefix+f'pick:b:a:{page}')])
+    rows.append([button('Funding: '+label(o,'funding',f['paidBy']),prefix+f'pick:f:a:{page}'),button('Method: '+label(o,'method',f['paymentMethod']),prefix+f'pick:m:a:{page}')])
     if o.get('split') and any(l['brand']=='SHARED' for l in f['lines']):rows.append([button('Shared split %',prefix+f'pick:s:a:{page}')])
     rows.append([button('✅ Save (preview)',prefix+f'save:{s}'),button('Cancel',prefix+'cancel')])
     rows.append([button('Edit receipt',f'vr:{rid}:edit'),button('View scan',f'vr:{rid}:scan')])
     rows.append([button('Split receipt',prefix+f'split:{s}')])
+    rows.append([button('Revisit later',f'vi:defer:{rid}'),button('Receipt inbox','vi:review:oldest')])
     rows += annotation_row
-    if view.get('matches') or view.get('duplicates'):rows.append([button('Explain duplicate / Link existing',prefix+'help')])
+    if view.get('matches') or view.get('duplicates') or f.get('checks',{}).get('drive',{}).get('candidates'):rows.append([button('Explain duplicate / Link existing',prefix+'help')])
     if view.get('duplicates'):rows.extend(duplicate_keyboard(rid))
     return rows
 
@@ -124,6 +130,19 @@ async def handoff(adapter,query,rid,request):
     event.message_id=f'vista-form-{query.id}'
     await adapter.handle_message(event)
 
+async def continue_inbox(adapter,query,rid,view,m,user):
+    if not view.get('readOnly'):return
+    try:
+        result=await asyncio.to_thread(m._call,'POST','/agent/inbox/next',{'receiptId':rid},user)
+        if result.get('next'):
+            v=result['next']['form']
+            await adapter._bot.send_message(chat_id=query.message.chat.id,text='Next receipt in your review list:\n\n'+text(v),reply_markup=markup(keyboard(v)))
+        elif result.get('endOfPage'):
+            await adapter._bot.send_message(chat_id=query.message.chat.id,text='This review page is finished. Open the inbox for any remaining receipts.',reply_markup=markup([[button('Receipt inbox','vi:review:oldest')]]))
+    except Exception:
+        # Failure advancing the UI must never masquerade as financial failure.
+        logging.getLogger(__name__).warning('Chopper inbox continuation unavailable: receipt=%s',rid)
+
 async def callback(adapter,query,data,m):
     match=re.fullmatch(r'vf:([a-f0-9-]{36}):(.+)',data)
     if not match:return False
@@ -143,7 +162,10 @@ async def callback(adapter,query,data,m):
             if reason=='brand':request='I resent this paper for another brand allocation. Inspect the native receipt form and remaining-item tracking. For tracked receipts show the remaining-item card, then Split receipt for the next group; never use legacy append or re-book consumed items. Only older untracked receipts may need explicitly previewed append allocations.'
             await handoff(adapter,query,rid,request)
         elif action=='help':
-            await handoff(adapter,query,rid,'Explain duplicate receipt evidence and matching transactions. Ask why: another brand allocation, attach existing entries, or different purchase. Review prior allocations and remaining total. Give real choice buttons.')
+            if not view.get('duplicates') and not view.get('matches') and not view['form'].get('checks',{}).get('drive',{}).get('candidates'):
+                await show(query,view)
+            else:
+                await handoff(adapter,query,rid,'Explain the actual duplicate evidence and matching transactions. Only ask why resent if an actual candidate exists. Review prior split allocations and remaining items; same paper is not duplicate spending. Give real choice buttons.')
         elif action.startswith('page:'):await show(query,view,int(action.split(':')[1]))
         elif action.startswith(('split:','all:','tick:','cont:')):
             parts=action.split(':');kind=parts[0]
@@ -177,6 +199,7 @@ async def callback(adapter,query,data,m):
             result=await call('POST','/post',{'confirmationId':action.split(':')[1]})
             next_view=result['next']
             await query.edit_message_text(text=f"✅ Selected group saved as {len(result.get('expenseIds',[]))} Vista entries.\n\n"+text(next_view),reply_markup=markup(keyboard(next_view)))
+            await continue_inbox(adapter,query,rid,next_view,m,user)
         elif action.startswith('discard:'):
             if action.split(':')[1]!=stamp(view):raise ValueError('stale')
             preview=await call('POST','/scrap-preview')
@@ -185,12 +208,24 @@ async def callback(adapter,query,data,m):
         elif action.startswith('scrap:'):
             result=await call('POST','/scrap',{'confirmationId':action.split(':')[1]})
             await query.edit_message_text(text='Selected items scrapped; no expense posted for them.\n\n'+text(result['next']),reply_markup=markup(keyboard(result['next'])))
+            await continue_inbox(adapter,query,rid,result['next'],m,user)
         else:return False
         return True
     except Exception as error:
         # Do not expose raw transport/provider errors or credentials.
+        logging.getLogger(__name__).warning('Chopper receipt callback failed: receipt=%s action=%s type=%s',rid,action.split(':')[0],type(error).__name__)
         message='The form changed or an option is unavailable. Reopen Categorise; nothing new was posted.'
-        if action.startswith(('post:','scrap:')):message='Could not confirm the result. Reopen Categorise to check its current status before retrying.'
+        if action.startswith(('post:','scrap:')):
+            try:
+                result=await call('GET','/confirmations/'+action.split(':')[1])
+                if result['state'] in ('posted','scrapped'):
+                    message=('✅ Verified: this selection is already saved in Vista. No duplicate was posted.' if result['state']=='posted' else 'Verified: these items were already scrapped; no expense posted for them.')
+                    await adapter._bot.send_message(chat_id=query.message.chat.id,text=message+'\n\n'+text(result['next']),reply_markup=markup(keyboard(result['next'])))
+                    return True
+                message='This confirmation was not saved. Reopen Categorise and review a fresh preview.'
+            except Exception:
+                message='Could not verify the saved result. Reopen Categorise to check its current status before retrying.'
+        if isinstance(error,m.VistaError) and 'FORM_STALE' in str(error):message='The selection or settings changed after preview. Reopen Categorise and review again; this confirmation was not saved.'
         if isinstance(error,m.VistaError) and 'FORM_INCOMPLETE' in str(error):message=str(error)[:180]
         if isinstance(error,m.VistaError) and 'FORM_INCOMPLETE' in str(error) and 'Something went wrong' in message:
             message='Choose a category and brand for every line, and review missing receipt fields, then Save again. Nothing was posted.'

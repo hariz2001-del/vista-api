@@ -49,3 +49,16 @@ if 'VISTA_RECEIPT_FORM_V1' not in text:
     compile(text, str(target), 'exec')
     target.write_text(text)
 print('Receipt hooks, native categorisation and business capability context installed; non-Sarang bots unchanged.')
+if 'VISTA_RECEIPT_INBOX_V1' not in text:
+    callback_old="if data.startswith(('vr:', 'vf:')):"
+    if text.count(callback_old)!=1:raise SystemExit('Inbox callback anchor changed; inspect first.')
+    text=text.replace(callback_old,"if data.startswith(('vr:', 'vf:', 'vi:')):")
+    anchor='        event = _vista_receipts.business_context(self, event)\n'
+    if text.count(anchor)!=1:raise SystemExit('Inbox message anchor changed; inspect first.')
+    text=text.replace(anchor,'        # VISTA_RECEIPT_INBOX_V1\n        if await _vista_receipts.text_command(self, event):\n            return\n'+anchor)
+    compile(text,str(target),'exec');target.write_text(text)
+if 'VISTA_RECEIPT_MAINTENANCE_V1' not in text:
+    anchor="        if data.startswith(('vr:', 'vf:', 'vi:')):"
+    if text.count(anchor)!=1:raise SystemExit('Maintenance callback anchor changed; inspect first.')
+    text=text.replace(anchor,"        # VISTA_RECEIPT_MAINTENANCE_V1\n        if data.startswith(('vr:', 'vf:', 'vi:', 'vm:')):")
+    compile(text,str(target),'exec');target.write_text(text)

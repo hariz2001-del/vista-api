@@ -146,3 +146,51 @@ durable receipt jobs retry the annotation-only path. The cron transport guard
 permits form READS with notifications forcibly disabled and annotation writes,
 but still blocks expense posting/linking/scrapping and arbitrary Drive changes.
 No separate financial engine or new destructive migration is introduced.
+
+## 2026-10-12 bulk inbox / confirmation recovery
+
+Incident R-E076B0 (Speed Mart RM17.95) was already posted once to Bites; a
+subsequent native confirmation returned RECEIPT_DONE, wrongly displayed as an
+unknown save result. Native recovery now reads the exact actor-bound durable
+confirmation result and never retries financial posting. Drive annotations
+are queued after commit, not awaited in the save HTTP response.
+
+Persistent actor-specific auto-stash uses audited AgentAction settings;
+originals are immediately safe, complete OCR/crop/Drive/checks run in the
+existing durable worker. No link/categorise interruption while stashing.
+Numbered, actor-bound inbox lists support flags-first, other-first, sequential
+review, paging and Revisit later. Exact reuploads of fully booked receipts
+create review events, not duplicate documents/spending. Fresh-photo/invoice
+checks and historical multi-row invoice sums are distinct from ledger writes.
+Drive matching is bounded invoice/file metadata inside verified Finances
+ancestry, not guaranteed visual matching or a complete Drive OCR index.
+
+Confirmed Vista expense-item history supplies editable category/brand
+suggestions (normalized exact names, latest bounded sample, 80% agreement).
+Both authorized users' confirmed entries contribute; OCR/guesses do not.
+New funding explicitly prefers STALL_FUNDS. Buttons show category, brand,
+funding and payment values. This is scoped evidence-based inference, not
+model-weight training or owner-only arbitrary code-edit capability.
+
+Bank screenshots retain actual evidence and visible fields, with an explicitly
+custom transaction line. User purpose and outgoing direction are required;
+incoming/internal transfers are not automatically expenses. No fabricated
+supplier invoice or purchased goods. All postings still require native preview
+and explicit confirmation through the existing RMS accounting engine.
+
+Owner-only maintenance: vista_edit_expense reads/creates durable before/after
+previews; native real-actor Confirm edit invokes the captured existing RMS PUT
+handler inside an expense/receipt-locked transaction. No parallel accounting
+engine, and actual locked-period/reimbursement/line arithmetic rules remain.
+Edit replay/stale/actor/business guards apply. Receipt annotations are queued
+again for changed category/brand; changed allocation amounts/items block further
+automatic split posting pending review. Originals are never rewritten.
+
+vista_cleanup_receipt requires an explicitly reused duplicate, canonical
+evidence present, zero source expenses, no running worker and no shared file IDs.
+Native OWNER confirmation locks source/canonical, validates exact preview,
+trashes only source-tagged files under Finances, deletes duplicate ReceiptImage
+cache and retains an audited ReceiptDocument tombstone. Drive Trash is
+recoverable; canonical originals and all accounting remain unchanged. Tools
+offer preview only; cron transport cannot access either maintenance tool.
+No production receipt was deleted or expense edited by implementation tests.

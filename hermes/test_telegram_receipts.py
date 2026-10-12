@@ -31,7 +31,7 @@ class Bridge:
     def __init__(self, duplicate=False): self.calls=[]; self.duplicate=duplicate
     def _call(self, method, path, body=None, user=None):
         self.calls.append((method,path,body,user))
-        return {'duplicate':self.duplicate, 'duplicateReason':'identical image bytes', 'receipt':{'id':'11111111-1111-4111-8111-111111111111','ref':'R-111111','status':'UPLOADED','expenses':[]}}
+        return {'duplicate':self.duplicate, 'autoStash':getattr(self,'auto_stash',False), 'duplicateReason':'identical image bytes', 'receipt':{'id':'11111111-1111-4111-8111-111111111111','ref':'R-111111','status':'UPLOADED','expenses':[]}}
 class ReceiptTests(unittest.IsolatedAsyncioTestCase):
     async def test_sales_today_uses_live_business_date_with_explicit_single_day_range(self):
         spec=importlib.util.spec_from_file_location('clock_bridge',root/'vista_mcp.py')
@@ -84,6 +84,13 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
     async def test_other_bots_are_untouched(self):
         a=Adapter(); a._update_receipt_dir=Path('/other-profile')
         self.assertFalse(await m.photo(a,None,None,b'photo')); self.assertEqual(a.sent,[])
+    async def test_auto_stash_suppresses_categorisation_and_caption_turns(self):
+        a=Adapter();b=Bridge();b.auto_stash=True;m.bridge=lambda:b
+        msg=types.SimpleNamespace(chat=types.SimpleNamespace(id=123),from_user=types.SimpleNamespace(id=456),message_id=9,message_thread_id=None,caption='receipt')
+        self.assertTrue(await m.photo(a,msg,types.SimpleNamespace(),b'photo'))
+        self.assertEqual(a.events,[]);self.assertIn('processing',a.sent[0]['text'])
+        labels=[x['text'] for row in a.sent[0]['reply_markup'] for x in row]
+        self.assertEqual(labels,['Finish batch / Review inbox']);self.assertNotIn('Categorise',labels)
     async def test_image_document_menu_preserves_image_mime(self):
         a=Adapter(); b=Bridge(); m.bridge=lambda:b
         msg=types.SimpleNamespace(chat=types.SimpleNamespace(id=123),from_user=types.SimpleNamespace(id=456),message_id=10,message_thread_id=None,caption=None,document=types.SimpleNamespace(mime_type='image/png'))

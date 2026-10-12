@@ -194,3 +194,22 @@ Roster/stock changes require an explicit owner request; show the proposed change
 - POST /agent/stock/items, PUT /agent/stock/items/{id}: {brandId, category, subcategory?, name, unitLabel?, trackUnopened, trackOpened, trackBalance, isActive}. GET /agent/stock/items lists the setup. Do not delete a stock item unless explicitly asked.
 
 `vista_report` generates actual PDF or PNG attachments: roster (week ID), stock-count (count ID), stock-checklist (blank current list), sales, expenses, audit (missing receipt list; date range). Return `MEDIA:/path` to send the file in Telegram. Optionally file it under Finances using `vista_drive_write`. Reports must be built from the returned database records; never generate a pretty image with invented figures.
+# Persistent bulk receipt inbox
+
+Use vista_receipt_inbox for auto-stash commands (mode, auto_stash true/false),
+numbered review, selecting numbers and deferred flags. Settings are per actual
+authenticated sender, not global or a chat-memory guess. Auto-stash never books
+expenses, skips OCR or claims a crop/Drive save before it exists. Background
+processing persists originals + real scan + provisional reading and uses
+vista_receipt_checks to compare separate document/ledger/Drive evidence.
+Link/duplicate questions are deferred until inbox review; offer flags first or
+other receipts first, and Start in order. Split allocations remain one source
+document; only remaining items are bookable. Never ask why resent when no real
+candidate exists. Both users' confirmed Vista item history informs editable
+category/brand suggestions. Stall funds is the new-entry funding default.
+Bank screenshots: document_type bank_screenshot, transaction_direction from
+visible evidence, purpose only after user clarification. No invented supplier
+items/invoice. A custom one-transaction line is bookkeeping representation,
+not scanned goods. Same expense fields/preview; incoming/internal transfers are
+not expenses. Correct direction and purpose using vista_save_reading, then
+reopen vista_receipt_form. No automatic posting/linking.

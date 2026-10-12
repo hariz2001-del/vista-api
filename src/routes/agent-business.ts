@@ -4,6 +4,9 @@ import { requireAgent } from '../auth.ts'
 import { conflict, notFound } from '../errors.ts'
 import { sameVendor } from '../receipt-matching.ts'
 import { agentClock } from '../domain/agent-clock.ts'
+import { env } from '../env.ts'
+import { driveConfigured } from '../integrations/drive.ts'
+import { readingHash } from '../receipt-form.ts'
 
 const id = z.string().uuid()
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -37,7 +40,7 @@ export async function agentBusinessRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>('/agent/receipts/:id/telegram-context', write, async request => {
     const r = await request.db.receiptDocument.findUnique({ where: { id: id.parse(request.params.id) } })
     if (!r) throw notFound('agent:RECEIPT_NOT_FOUND')
-    return { chatId: r.telegramChatId?.toString() ?? null, messageId: r.telegramMessageId?.toString() ?? null, notified: Boolean((r.extracted as any)?.telegramReadingNotified), receiptId: r.id }
+    return { chatId: r.telegramChatId?.toString() ?? null, messageId: r.telegramMessageId?.toString() ?? null, notified: Boolean((r.extracted as any)?.telegramReadingNotified), suppressNotification: Boolean((r.extracted as any)?._inbox?.suppressNotification), receiptId: r.id }
   })
   app.post<{ Params: { id: string } }>('/agent/receipts/:id/notification', write, async request => {
     const r = await request.db.receiptDocument.findUnique({ where: { id: id.parse(request.params.id) } })
@@ -127,16 +130,26 @@ export async function agentBusinessRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/agent/queue/:id/finish', write, async request => {
     const body = z.object({ leaseToken: z.string().datetime(), error: z.string().max(1000).optional() }).parse(request.body)
     const jobId = id.parse(request.params.id)
+    // Deterministic final checks: a worker cannot accidentally finish an
+    // auto-stashed receipt without checking both ledgers and Drive evidence.
+    const candidate=await request.db.receiptJob.findUnique({where:{id:jobId}})
+    const boundDrive=driveConfigured() && env.DRIVE_BUSINESS_ID===request.businessId
+    if(!body.error && boundDrive && candidate?.status==='RUNNING' && candidate.leaseUntil?.toISOString()===body.leaseToken) {
+      const result=await app.inject({method:'POST',url:`/agent/receipts/${candidate.receiptId}/checks`,payload:{},headers:{authorization:request.headers.authorization!,'x-telegram-user':request.agentUser!.telegramUserId}})
+      if(result.statusCode>=400) body.error='Evidence cross-check incomplete; retry needed.'
+    }
     return request.db.$transaction(async tx => {
     const job = await tx.receiptJob.findUnique({ where: { id: jobId } })
     if (!job || job.status !== 'RUNNING' || job.leaseUntil?.toISOString() !== body.leaseToken || job.leaseUntil < new Date()) throw conflict('agent:LEASE_STALE')
     await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id = ${job.receiptId} AND business_id = ${request.businessId} FOR UPDATE`
     const receipt = await tx.receiptDocument.findUnique({ where: { id: job.receiptId } })
     const workflow = (receipt?.extracted as any)?._lineWorkflow
+    const extracted=receipt?.extracted as any, checks=extracted?._checks
+    const needsEvidence=boundDrive && receipt && (!receipt.driveFileId || receipt.mimeType!=='application/pdf' && !receipt.scanDriveFileId || !(extracted?.lines?.length || extracted?.document_type==='bank_screenshot') || !checks || checks.readingHash!==readingHash(receipt) || receipt.receiptNo && !checks.drive?.checked)
     const needsAnnotation = !body.error && workflow?.decisions.some((d: any) => d.state !== 'pending') && workflow.annotation?.version !== workflow.version
     // An allocation can arrive during a running OCR/annotation lease. Do not
     // lose that newer work by marking the old generation DONE.
-    const result = await tx.receiptJob.updateMany({ where: { id: jobId, status: 'RUNNING', leaseUntil: new Date(body.leaseToken) }, data: { status: body.error || needsAnnotation ? job.attempts >= 5 ? 'FAILED' : 'PENDING' : 'DONE', error: body.error ?? (needsAnnotation ? 'Newer allocation annotation pending.' : null), leaseUntil: null } })
+    const result = await tx.receiptJob.updateMany({ where: { id: jobId, status: 'RUNNING', leaseUntil: new Date(body.leaseToken) }, data: { status: body.error || needsAnnotation || needsEvidence ? job.attempts >= 5 ? 'FAILED' : 'PENDING' : 'DONE', error: body.error ?? (needsEvidence ? 'Reading/scan/Drive/checks incomplete.' : needsAnnotation ? 'Newer allocation annotation pending.' : null), leaseUntil: null } })
     if (!result.count) throw conflict('agent:LEASE_STALE')
     return { saved: true }
     })

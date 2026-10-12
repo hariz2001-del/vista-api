@@ -78,4 +78,23 @@ class FormTests(unittest.IsolatedAsyncioTestCase):
         await form.callback(adapter,q,f'vf:{RID}:save:{form.stamp(b.view)}',b)
         self.assertEqual(b.calls[-1][0],'POST');self.assertTrue(b.calls[-1][1].endswith('/preview'))
         self.assertEqual(b.calls[-1][2],{});self.assertFalse(any(c[1].endswith('/post') for c in b.calls))
+    async def test_repeated_save_verifies_exact_confirmation_before_claiming_success(self):
+        b=Bridge();q=Query();notices=[]
+        def call(method,path,body=None,user=None):
+            b.calls.append((method,path,body,user))
+            if path.endswith('/post'):raise ValueError('agent:RECEIPT_DONE')
+            if '/confirmations/' in path:return {'state':'posted','expenseIds':['expense1'],'next':fixture()}
+            return fixture()
+        b._call=call
+        async def send_message(**kw):notices.append(kw)
+        a=types.SimpleNamespace(_bot=types.SimpleNamespace(send_message=send_message))
+        old=form.markup;form.markup=lambda x:x
+        try:await form.callback(a,q,f'vf:{RID}:post:42',b)
+        finally:form.markup=old
+        self.assertIn('Verified',notices[-1]['text'])
+        self.assertEqual(sum(p.endswith('/post') for _,p,_,_ in b.calls),1)
+        self.assertTrue(b.calls[-1][1].endswith('/confirmations/42'))
+    def test_funding_and_method_display_current_assumptions(self):
+        v=fixture();labels=[b['text'] for row in form.keyboard(v) for b in row]
+        self.assertIn('Funding: Business till',labels);self.assertIn('Method: —',labels)
 if __name__=='__main__':unittest.main()

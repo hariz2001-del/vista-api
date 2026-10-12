@@ -292,6 +292,9 @@ TOOLS: list[dict] = [
                 "tax_rm": {"type": "number"},
                 "discount_rm": {"type": "number"},
                 "payment": {"type": "string", "description": "Payment details visible on the receipt"},
+                "document_type": {"type":"string","enum":["receipt","bank_screenshot"],"description":"Bank evidence is not a supplier receipt; don't invent invoice/items."},
+                "transaction_direction": {"type":"string","enum":["outgoing","incoming","unknown"]},
+                "purpose":{"type":"string","description":"User-confirmed bank transaction purpose; not fabricated purchased goods."},
                 "confidence": {"type": "object", "description": "Per field, 0–1"},
                 "review_flags": {"type": "array", "items": {"type": "string"}, "description": "Fields you are unsure of"},
                 "telegram_user_id": USER,
@@ -406,7 +409,11 @@ TOOLS += [
     _tool("vista_receipt_notify", "Send ONE reading/duplicate warning with real receipt buttons back to the stored originating Telegram photo. Background worker only after reading saved; no arbitrary destination/text and no expense posted. Token stays private. Skips an already-notified receipt.", {"receipt_id": {"type": "string"}}, ["receipt_id"]),
     _tool("vista_business_data", "Discover/read paginated business data: products/menu/addons, orders/items, sold addons, ledger, expenses, receipts. Owner only; no raw SQL/secrets. Staff/rosters/stock: vista_operations.", {"resource": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "id": {"type": "string"}}),
     _tool("vista_item_sales", "Actual addon names, quantities/revenue per sold item/date from historical snapshots. Base sales/addons/discounts separate; NOT ingredient costs or realised profit.", {"from": {"type": "string"}, "to": {"type": "string"}, "product_id": {"type": "string"}, "name": {"type": "string"}}, ["from", "to"]),
-    _tool("vista_receipt_duplicates", "Compare a newly read receipt to existing receipts even if a different photo. Explains merchant/invoice/date/total, linked entries and remaining amount. Ask WHY resent: split, historical attachment or different purchase; never assume duplicate spending.", {"receipt_id": {"type": "string"}}, ["receipt_id"]),
+    _tool("vista_receipt_duplicates", "Compare a newly read receipt to existing receipts even if a different photo. Explains merchant/invoice/date/total, linked entries and remaining amount. Ask WHY resent ONLY if candidates exist; split is not duplicate spending.", {"receipt_id": {"type": "string"}}, ["receipt_id"]),
+    _tool("vista_receipt_inbox", "Persistent receipt inbox. mode sets auto_stash until stopped for actual sender; review gives numbered list + flagged-first/other-first buttons; select opens number from latest list; defer marks revisit. Stashing never posts; background OCR/crop/Drive/checks continue.", {"action":{"type":"string","enum":["settings","mode","review","select","defer"]},"auto_stash":{"type":"boolean"},"order":{"type":"string","enum":["flags","others","oldest"]},"offset":{"type":"integer","minimum":0},"number":{"type":"integer","minimum":1,"maximum":20},"list_id":{"type":"string"},"receipt_id":{"type":"string"},"sequential":{"type":"boolean"},"show_buttons":{"type":"boolean"}},["action"]),
+    _tool("vista_receipt_checks", "Persist separate checks of receipt documents, split allocations, Vista ledger and bounded Finances Drive invoice metadata. Evidence only; no post/link. Stash silently then review flags later.",{"receipt_id":{"type":"string"}},["receipt_id"]),
+    _tool("vista_edit_expense", "OWNER only: read existing expense, or preview changes to actual Vista expense fields (integer sen). With changes: show exact before/after and native Confirm edit buttons. Never edits without actual sender confirmation; original receipt preserved. No new expense.",{"expense_id":{"type":"string"},"changes":{"type":"object"},"show_buttons":{"type":"boolean"}},["expense_id"]),
+    _tool("vista_cleanup_receipt", "OWNER only: preview removal of an explicitly canonicalised, unlinked duplicate receipt's photos from Vista cache and recoverable Drive Trash. Never removes canonical or booked evidence. First explicitly choose/reuse canonical source. Native confirmation required.",{"receipt_id":{"type":"string"},"show_buttons":{"type":"boolean"}},["receipt_id"]),
     _tool("vista_reuse_receipt", "Only after confirmation of SAME physical receipt: resolve a newly staged alternate photo as duplicate, return original UUID/Drive files to reuse for further allocations/linking. No expense created or evidence deleted.", {"receipt_id": {"type": "string"}, "canonical_id": {"type": "string"}, "reason": {"type": "string"}}, ["receipt_id", "canonical_id", "reason"]),
     _tool("vista_receipt_queue", "Durable OCR/scan queue. list reads; claim leases one job for 10min; finish requires exact lease_token. Failure error enables bounded retries. Worker NEVER posts/links financial records.", {"action": {"type": "string", "enum": ["list", "claim", "finish"]}, "job_id": {"type": "string"}, "lease_token": {"type": "string"}, "error": {"type": "string"}}),
     _tool("vista_reconciliation", "Persistent discrepancy cases. list/record/update; key deduplicates across sessions. Resolution changes issue state only, NOT ledger. Bank comparison is combined stall book, not a separate bank account ledger.", {"action": {"type": "string", "enum": ["list", "record", "update"]}, "status": {"type": "string", "enum": ["OPEN", "RESOLVED", "ALL"]}, "case_id": {"type": "string"}, "key": {"type": "string"}, "kind": {"type": "string", "enum": ["MISSING_RECEIPT", "POSSIBLE_DUPLICATE", "BANK_DIFFERENCE", "OTHER"]}, "detail": {"type": "object"}, "resolution": {"type": "string"}}),
@@ -440,10 +447,11 @@ TOOLS.append(_tool('vista_receipt_annotate', 'Maintain a SEPARATE annotated Driv
 def _receipt_card_send(rid, view, user):
     import receipt_form
     context=_call('GET',f'/agent/receipts/{rid}/telegram-context',telegram_user=user)
-    if not context['chatId']:raise VistaError('Receipt has no originating Telegram chat; do not invent a destination.')
+    destination=user or context['chatId']
+    if not destination:raise VistaError('Receipt has no authenticated destination; do not invent one.')
     token=_dotenv().get('TELEGRAM_BOT_TOKEN','')
     if not token:raise VistaError('Finance Telegram send credential missing')
-    body={'chat_id':context['chatId'],'text':receipt_form.text(view),'reply_markup':{'inline_keyboard':receipt_form.keyboard(view)}}
+    body={'chat_id':destination,'text':receipt_form.text(view),'reply_markup':{'inline_keyboard':receipt_form.keyboard(view)}}
     request=urllib.request.Request('https://api.telegram.org/bot'+token+'/sendMessage',data=json.dumps(body).encode(),headers={'Content-Type':'application/json'},method='POST')
     try:
         with urllib.request.urlopen(request,timeout=30) as response:result=json.load(response)
@@ -453,6 +461,47 @@ def _receipt_card_send(rid, view, user):
 
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name in ('vista_edit_expense','vista_cleanup_receipt'):
+        kind='e' if name=='vista_edit_expense' else 'd';id=args['expense_id' if kind=='e' else 'receipt_id']
+        if kind=='e' and 'changes' not in args:return _call('GET',f'/agent/expenses/{id}/edit',telegram_user=user)
+        path=f'/agent/expenses/{id}/edit/preview' if kind=='e' else f'/agent/receipts/{id}/cleanup/preview'
+        result=_call('POST',path,args.get('changes',{}),user)
+        if args.get('show_buttons',True):
+            import receipt_maintenance
+            body,rows=receipt_maintenance.preview_card(kind,id,result)
+            token=_dotenv().get('TELEGRAM_BOT_TOKEN','')
+            req=urllib.request.Request('https://api.telegram.org/bot'+token+'/sendMessage',data=json.dumps({'chat_id':user or _default_user(),'text':body,'reply_markup':{'inline_keyboard':rows}}).encode(),headers={'Content-Type':'application/json'},method='POST')
+            try:
+                with urllib.request.urlopen(req,timeout=30) as response:sent=json.load(response)
+                if not sent.get('ok'):raise VistaError('Telegram rejected maintenance preview')
+            except Exception:raise VistaError('Maintenance preview could not be sent; credentials not logged') from None
+            result['notification']={'sent':True,'message_id':sent['result']['message_id']}
+        return result
+    if name == 'vista_receipt_checks':
+        return _call('POST',f'/agent/receipts/{args["receipt_id"]}/checks',{},user)
+    if name == 'vista_receipt_inbox':
+        action=args['action']
+        if action=='settings':return _call('GET','/agent/inbox/settings',telegram_user=user)
+        if action=='mode':return _call('PATCH','/agent/inbox/settings',{'autoStash':args['auto_stash']},user)
+        if action=='defer':return _call('POST',f'/agent/receipts/{args["receipt_id"]}/defer',{},user)
+        if action=='select':
+            body={'number':args['number']}
+            if args.get('list_id'):body['listId']=args['list_id']
+            result=_call('POST','/agent/inbox/select',body,user)
+            if args.get('show_buttons',True):result['notification']=_receipt_card_send(result['receiptId'],result['form'],user)
+            return result
+        result=_call('POST','/agent/inbox/review',{'order':args.get('order','oldest'),'offset':args.get('offset',0),'sequential':args.get('sequential',False)},user)
+        if args.get('show_buttons',True):
+            import receipt_inbox
+            body,rows=receipt_inbox.card(result)
+            token=_dotenv().get('TELEGRAM_BOT_TOKEN','')
+            req=urllib.request.Request('https://api.telegram.org/bot'+token+'/sendMessage',data=json.dumps({'chat_id':user or _default_user(),'text':body,'reply_markup':{'inline_keyboard':rows}}).encode(),headers={'Content-Type':'application/json'},method='POST')
+            try:
+                with urllib.request.urlopen(req,timeout=30) as response:sent=json.load(response)
+                if not sent.get('ok'):raise VistaError('Telegram rejected inbox card')
+            except Exception:raise VistaError('Inbox message failed; credentials not logged') from None
+            result['notification']={'sent':True,'message_id':sent['result']['message_id']}
+        return result
     if name == 'vista_receipt_annotate':
         rid=args['receipt_id']
         body={'readingHash':args.get('reading_hash'),'regions':args['regions']} if 'regions' in args else {}
@@ -477,10 +526,11 @@ def _run(name: str, args: dict) -> object:
     if name == 'vista_receipt_notify':
         rid = args['receipt_id']
         context = _call('GET', f'/agent/receipts/{rid}/telegram-context', telegram_user=user)
+        if context.get('suppressNotification'):return {'sent':False,'reason':'auto-stash: silent processing; checks are in inbox'}
         if context['notified'] or not context['chatId']: return {'sent': False, 'reason': 'already notified or no Telegram origin'}
         import receipt_form
         view=_call('GET',f'/agent/receipts/{rid}/form',telegram_user=user)
-        text = receipt_form.text(view)+'\n\nTap Categorise to set each line’s category and brand. Nothing has been posted.'
+        text = receipt_form.text(view)+'\n\nTap Categorise to review suggested fields. Nothing has been posted.'
         keyboard = [[{'text': label, 'callback_data': f'vr:{rid}:{action}'} for label, action in row] for row in [[('Categorise', 'key'), ('Stash for later', 'stash')], [('Edit receipt', 'edit'), ('View scan', 'scan')]]]
         keyboard.append([{'text':'Split receipt','callback_data':f'vr:{rid}:split'}])
         if view.get('duplicates'):
@@ -622,7 +672,7 @@ def _run(name: str, args: dict) -> object:
             body["receiptNo"] = args["receipt_no"]
         if args.get("total_rm") is not None:
             body["totalSen"] = _sen(args["total_rm"])
-        extracted = {key: args[key] for key in ("lines", "tax_rm", "discount_rm", "payment", "confidence") if args.get(key) is not None}
+        extracted = {key: args[key] for key in ("lines", "tax_rm", "discount_rm", "payment", "confidence", "document_type", "transaction_direction", "purpose") if args.get(key) is not None}
         if extracted:
             body["extracted"] = extracted
         if "review_flags" in args:

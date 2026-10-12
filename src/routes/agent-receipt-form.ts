@@ -7,6 +7,7 @@ import { formEntries, initialForm, lineWorkflow, readingHash, selectedIndices, t
 import type { Tx } from '../db.ts'
 import { createExpense, expenseBody } from './rms.ts'
 import { annotateReceipt } from '../integrations/receipt-annotation.ts'
+import { suggestReceiptLines } from '../receipt-learning.ts'
 
 const ID = z.string().uuid()
 const guard = { preHandler: requireAgent('BOOKKEEPER') }
@@ -31,18 +32,22 @@ export async function agentReceiptFormRoutes(app: FastifyInstance) {
     if (!receipt) throw notFound('agent:RECEIPT_NOT_FOUND')
     const stored = (receipt.extracted as any)?._entryForms?.[request.agentUser!.id] as ReceiptForm | undefined
     const initial = initialForm(receipt, choices), ledger = lineWorkflow(receipt, initial.lines.length)
+    const suggestions = stored ? [] : await suggestReceiptLines(db, initial, choices)
+    ledger.decisions.forEach((d,i) => { if(d.state === 'posted' && initial.lines[i]) { initial.lines[i]!.brand=d.brand??null;initial.lines[i]!.category=d.category??null } })
     const form = stored?.readingHash === readingHash(receipt) && (stored.ledgerVersion ?? 0) === ledger.version ? { ...initial, ...stored, ledgerVersion: ledger.version, selectedIndices: stored.selectedIndices ?? initial.selectedIndices, stage: stored.stage ?? initial.stage } : initial
     if (stored && stored.ledgerVersion === undefined) form.lines = form.lines.map((l, i) => ({ ...l, category: l.category ?? initial.lines[i]?.category ?? null, brand: l.brand ?? initial.lines[i]?.brand ?? null }))
     const legacy = receipt.expenses.length > 0 && !(receipt.extracted as any)?._lineWorkflow
     const readOnly = ['LINKED', 'REJECTED'].includes(receipt.status) || legacy || !ledger.decisions.some(d => d.state === 'pending')
-    return { receipt, form, ledger, readOnly, reset: Boolean(stored && stored.readingHash !== form.readingHash) }
+    return { receipt, form, ledger, readOnly, suggestions, reset: Boolean(stored && stored.readingHash !== form.readingHash) }
   }
   async function view(request: FastifyRequest, id: string) {
     const choices = await options(request)
-    const { receipt, form, ledger, readOnly, reset } = await load(request.db, request, id, choices)
-    const matches = (await invoke(request, 'GET', `/agent/receipts/${id}/matches`)).matches
+    const { receipt, form, ledger, readOnly, reset, suggestions } = await load(request.db, request, id, choices)
+    const matches = (await invoke(request, 'GET', `/agent/receipts/${id}/matches`)).matches.filter((m: any) => !receipt.expenses.some(e => e.id === m.expenseId))
     const duplicates = (await invoke(request, 'GET', `/agent/receipts/${id}/duplicates`)).candidates
     const pendingIndices = ledger.decisions.flatMap((d, i) => d.state === 'pending' ? [i] : [])
+    // Visible provenance without changing the scanned reading.
+    Object.assign(form, { suggestions, checks: (receipt.extracted as any)?._checks, documentType: (receipt.extracted as any)?.document_type ?? 'receipt', transactionDirection: (receipt.extracted as any)?.transaction_direction ?? null })
     return { receipt: { id, ref: `R-${id.slice(0, 6).toUpperCase()}`, vendor: receipt.vendor, date: receipt.receiptDate?.toISOString().slice(0, 10) ?? null, receiptNo: receipt.receiptNo, totalSen: receipt.totalSen, status: receipt.status, hasScan: Boolean(receipt.scanDriveFileId || (receipt.extracted as any)?.scan), photoAttached: Boolean(receipt.driveFileId || receipt.image), reviewFlags: receipt.reviewFlags, expenses: receipt.expenses }, form, options: choices, readingChanged: reset, readOnly, matches, duplicates, fieldMap, workflow: { ...ledger, pendingIndices, pendingSen: pendingIndices.reduce((s, i) => s + (form.lines[i]?.amountSen ?? 0), 0), postedSen: receipt.expenses.reduce((s, e) => s + e.amountSen, 0), scrappedSen: ledger.decisions.reduce((s, d, i) => s + (d.state === 'scrapped' ? form.lines[i]?.amountSen ?? 0 : 0), 0) } }
   }
   app.get<{ Params: { id: string } }>('/agent/receipts/:id/form', guard, request => view(request, ID.parse(request.params.id)))
@@ -98,7 +103,7 @@ export async function agentReceiptFormRoutes(app: FastifyInstance) {
     const entries = formEntries(form, receipt, choices), append = receipt.expenses.length > 0
     const preview = await invoke(request, 'POST', `/agent/receipts/${id}/preview`, { entries, append })
     const confirmation = await request.db.agentAction.create({ data: { businessId: request.businessId, agentUserId: request.agentUser!.id, action: 'receipt.form.previewed', entityType: 'receipt', entityId: id, detail: json({ entries, append, previewToken: preview.previewToken, version: form.version, readingHash: form.readingHash, ledgerVersion: ledger.version, indices: selectedIndices(form), choices, expenseSnapshot: expenseSnapshot(receipt.expenses) }) } })
-    return { ...preview, selectedIndices: selectedIndices(form), remainingIndices: ledger.decisions.flatMap((d, i) => d.state === 'pending' && !selectedIndices(form).includes(i) ? [i] : []), confirmationId: confirmation.id.toString(), fieldMap, matches: (await invoke(request, 'GET', `/agent/receipts/${id}/matches`)).matches }
+    return { ...preview, selectedIndices: selectedIndices(form), remainingIndices: ledger.decisions.flatMap((d, i) => d.state === 'pending' && !selectedIndices(form).includes(i) ? [i] : []), confirmationId: confirmation.id.toString(), fieldMap, matches: (await invoke(request, 'GET', `/agent/receipts/${id}/matches`)).matches.filter((m: any) => !receipt.expenses.some(e => e.id === m.expenseId)) }
   })
   app.post<{ Params: { id: string } }>('/agent/receipts/:id/form/post', guard, async request => {
     const id = ID.parse(request.params.id), body = z.object({ confirmationId: z.string().regex(/^\d{1,19}$/).refine(v => BigInt(v) <= 9223372036854775807n) }).parse(request.body)
@@ -129,8 +134,9 @@ export async function agentReceiptFormRoutes(app: FastifyInstance) {
       await tx.agentAction.create({ data: { businessId: request.businessId, agentUserId: request.agentUser!.id, action: 'receipt.posted', entityType: 'receipt', entityId: id, detail: json({ expenseIds: ids, entries, indices: saved.indices, confirmationId: body.confirmationId }) } })
       return { expenseIds: ids }
     })
-    const annotation = await annotateReceipt(request.db, id, request.businessId).catch(() => ({ pending: true }))
-    return { ...result, annotation, next: await view(request, id) }
+    // Drive work is already durably queued. Never hold a committed financial
+    // response hostage to a slow Google upload (the bridge times out at 60s).
+    return { ...result, annotation: { pending: true }, next: await view(request, id) }
   })
   app.post<{ Params: { id: string } }>('/agent/receipts/:id/form/scrap-preview', guard, async request => {
     const id = ID.parse(request.params.id), choices = await options(request), { form, ledger, readOnly } = await load(request.db, request, id, choices)
@@ -155,8 +161,14 @@ export async function agentReceiptFormRoutes(app: FastifyInstance) {
       await queueAnnotation(tx, id, request.businessId)
       await tx.agentAction.create({ data: { businessId: request.businessId, agentUserId: request.agentUser!.id, action: 'receipt.items.scrapped', entityType: 'receipt', entityId: id, detail: json({ indices: saved.indices, confirmationId: body.confirmationId }) } })
     })
-    const annotation = await annotateReceipt(request.db, id, request.businessId).catch(() => ({ pending: true }))
-    return { annotation, next: await view(request, id) }
+    return { annotation: { pending: true }, next: await view(request, id) }
+  })
+  app.get<{ Params: { id: string; confirmationId: string } }>('/agent/receipts/:id/form/confirmations/:confirmationId', guard, async request => {
+    const id = ID.parse(request.params.id), confirmationId = z.string().regex(/^\d{1,19}$/).parse(request.params.confirmationId)
+    const preview = await request.db.agentAction.findFirst({ where: { id: BigInt(confirmationId), agentUserId: request.agentUser!.id, entityId: id, action: { in: ['receipt.form.previewed', 'receipt.scrap.previewed'] } } })
+    if (!preview) throw notFound('agent:PREVIEW_NOT_FOUND')
+    const result = await request.db.agentAction.findFirst({ where: { agentUserId: request.agentUser!.id, entityId: id, action: { in: ['receipt.posted', 'receipt.items.scrapped'] }, detail: { path: ['confirmationId'], equals: confirmationId } } })
+    return { state: !result ? 'unconfirmed' : result.action === 'receipt.posted' ? 'posted' : 'scrapped', expenseIds: (result?.detail as any)?.expenseIds ?? [], next: await view(request, id) }
   })
   app.post<{ Params: { id: string } }>('/agent/receipts/:id/form/regions', guard, async request => {
     const id = ID.parse(request.params.id), choices = await options(request)

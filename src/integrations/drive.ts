@@ -58,6 +58,18 @@ async function drive<T>(url: string, init: RequestInit = {}): Promise<T> {
 
 const folders = new Map<string, string>()
 
+/** Bounded metadata search; ancestor checks keep other Drive folders private. */
+export async function findDriveReceiptEvidence(invoice: string, exclude: string[], receiptId?: string) {
+  const safe = invoice.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+  const found = await drive<{ files: Array<{ id: string; name: string; webViewLink?: string; appProperties?: Record<string,string> }> }>(`${API}/files?q=${encodeURIComponent(`trashed = false and mimeType != '${FOLDER}' and (name contains '${safe}' or fullText contains '${safe}')`)}&fields=files(id,name,webViewLink,appProperties)&pageSize=50`)
+  const result = []
+  for (const file of found.files) {
+    if (exclude.includes(file.id) || receiptId && file.appProperties?.vistaReceiptId === receiptId) continue
+    try { await withinFinances(file.id); result.push(file) } catch { /* outside Finances */ }
+  }
+  return result
+}
+
 /** A folder by name inside a parent, made if missing. */
 async function folder(parent: string, name: string): Promise<string> {
   const cacheKey = `${parent}/${name}`
@@ -171,6 +183,15 @@ const FIELDS = 'id,name,mimeType,parents,webViewLink,size,capabilities(canAddChi
 
 export async function driveFile(id: string): Promise<DriveFile> {
   return drive(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`)
+}
+
+/** Recoverable deletion of a precisely verified duplicate, never a folder. */
+export async function trashDuplicateReceiptFile(id: string, receiptId: string) {
+  const existing=await driveFile(id)
+  if(existing.trashed) return existing
+  const file=await withinFinances(id)
+  if(file.mimeType===FOLDER || file.appProperties?.vistaReceiptId!==receiptId) throw new Error('Only this duplicate receipt’s tagged evidence files can be trashed.')
+  return drive<DriveFile>(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({trashed:true})})
 }
 
 /** No arbitrary Google Drive access: both source and destination must descend from Finances. */

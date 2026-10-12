@@ -75,6 +75,10 @@ async def photo(adapter, message, event, data):
             'deferProcessing': True,
         }, str(message.from_user.id))
         receipt = result['receipt']; rid = receipt['id']
+        if result.get('autoStash'):
+            warning=' Same photo already saved; flagged in the inbox for reviewing prior allocations.' if result.get('duplicate') else ''
+            await adapter._bot.send_message(chat_id=message.chat.id,text=f"📥 {receipt['ref']} saved safely.{warning} Reading, cropped scan, Drive storage and cross-check processing continue in the background; no new expense posted.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Finish batch / Review inbox',callback_data='vi:mode:off')]]))
+            return True
         warning = ''
         if result.get('duplicate'):
             amount = sum(row['amountSen'] for row in receipt.get('expenses', [])) / 100
@@ -106,6 +110,14 @@ async def photo(adapter, message, event, data):
 
 async def callback(adapter, query, data):
     if not enabled(adapter): return False
+    if data.startswith('vm:'):
+        form_module()
+        import receipt_maintenance
+        return await receipt_maintenance.callback(adapter,query,data,bridge())
+    if data.startswith('vi:'):
+        form_module()
+        import receipt_inbox
+        return await receipt_inbox.callback(adapter,query,data,bridge())
     if data.startswith('vf:'):
         return await form_module().callback(adapter, query, data, bridge())
     match = re.fullmatch(r'vr:([a-f0-9-]{36}):(key|stash|edit|scan|split)', data)
@@ -147,3 +159,9 @@ async def callback(adapter, query, data):
     except Exception:
         await query.answer('Could not complete this action. Nothing was posted; please retry or ask Hermes.', show_alert=True)
         return True
+
+async def text_command(adapter,event):
+    if not enabled(adapter):return False
+    form_module()
+    import receipt_inbox
+    return await receipt_inbox.command(adapter,event,bridge())

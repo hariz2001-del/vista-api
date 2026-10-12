@@ -3,14 +3,16 @@ import { lineTotalSen } from './domain/expense-items.ts'
 import { DomainError, conflict } from './errors.ts'
 import { expenseBody, type ExpenseBody } from './routes/rms.ts'
 
-export type FormLine = { name: string; quantityMilli: number | null; unitPriceSen: number | null; amountSen: number | null; unit: string | null; category: string | null; brand: string | null; adjustment: boolean }
+export type FormLine = { name: string; quantityMilli: number | null; unitPriceSen: number | null; amountSen: number | null; unit: string | null; category: string | null; brand: string | null; adjustment: boolean; custom?: boolean }
 export type ReceiptForm = { version: number; readingHash: string; paidBy: string | null; paymentMethod: string | null; splitPct: number | null; lines: FormLine[]; selectedIndices?: number[]; ledgerVersion?: number; stage?: 'configure' | 'select' | 'remaining' }
 export type LineDecision = { state: 'pending' | 'posted' | 'scrapped'; brand?: string | null; category?: string | null; expenseId?: string; actorId?: string }
 export type LineWorkflow = { version: number; readingHash: string; decisions: LineDecision[]; annotation?: { id: string; url: string; version: number; positioned?: number }; regions?: Array<{ index: number; x: number; y: number; width: number; height: number }>; annotationLease?: { token: string; until: number }; annotationError?: string }
 export type FormOptions = { categories: Array<{ value: string; label: string }>; brands: Array<{ id: string; name: string }>; paidBy: Array<{ value: string; label: string }>; paymentMethods: Array<{ value: string; label: string }>; split: { overheadFirstPct: number; equipmentFirstPct: number; firstBrand: string; secondBrand: string } | null }
 export type FormReceipt = { id: string; vendor: string | null; receiptNo: string | null; receiptDate: Date | null; totalSen: number | null; extracted: any }
 export function readingHash(r: FormReceipt) {
-  return createHash('sha256').update(JSON.stringify([r.vendor, r.receiptNo, r.receiptDate, r.totalSen, r.extracted?.lines, r.extracted?.tax_rm, r.extracted?.discount_rm])).digest('hex')
+  const fields = [r.vendor, r.receiptNo, r.receiptDate, r.totalSen, r.extracted?.lines, r.extracted?.tax_rm, r.extracted?.discount_rm]
+  if (r.extracted?.document_type === 'bank_screenshot') fields.push(r.extracted.document_type,r.extracted.transaction_direction,r.extracted.purpose)
+  return createHash('sha256').update(JSON.stringify(fields)).digest('hex')
 }
 const money = (v: unknown) => typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) : null
 export function lineWorkflow(r: FormReceipt, count: number): LineWorkflow {
@@ -27,6 +29,7 @@ export function initialForm(r: FormReceipt, options: FormOptions): ReceiptForm {
     const unitPriceSen = money(raw.unit_price_rm), amountSen = money(raw.amount_rm)
     return { name: String(raw.name ?? '').slice(0, 120), quantityMilli, unitPriceSen, amountSen: amountSen ?? (quantityMilli !== null && unitPriceSen !== null ? lineTotalSen(quantityMilli, unitPriceSen) : null), unit: typeof raw.unit === 'string' ? raw.unit.slice(0, 20) : null, category: categories.has(raw.suggested_category) ? raw.suggested_category : categories.has('RAW_MATERIALS') ? 'RAW_MATERIALS' : null, brand: options.brands[0]?.id ?? null, adjustment: false }
   })
+  if (!lines.length && r.extracted?.document_type === 'bank_screenshot' && r.totalSen !== null) lines.push({ name: String(r.extracted?.purpose ?? 'Bank transaction — edit purpose before saving').slice(0,120), quantityMilli:1000, unitPriceSen:r.totalSen,amountSen:r.totalSen,unit:null,category:categories.has('RAW_MATERIALS')?'RAW_MATERIALS':null,brand:options.brands[0]?.id??null,adjustment:false,custom:true })
   if (lines.length && r.totalSen !== null && lines.every(l => l.amountSen !== null)) {
     const difference = r.totalSen - lines.reduce((sum, l) => sum + l.amountSen!, 0)
     if (difference) lines.push({ name: 'Difference to printed total (tax / discount / rounding)', quantityMilli: 1000, unitPriceSen: difference, amountSen: difference, unit: null, category: categories.has('RAW_MATERIALS') ? 'RAW_MATERIALS' : null, brand: options.brands[0]?.id ?? null, adjustment: true })
@@ -35,11 +38,15 @@ export function initialForm(r: FormReceipt, options: FormOptions): ReceiptForm {
   const paymentMethod = /\bcash\b/.test(payment) && !/\b(card|visa|master|qr)\b/.test(payment) && options.paymentMethods.some(m => m.value === 'CASH') ? 'CASH' : null
   const ledger = lineWorkflow(r, lines.length), pending = ledger.decisions.flatMap((d, i) => d.state === 'pending' ? [i] : [])
   const previous = r.extracted?._entryDefaults
-  return { version: 0, readingHash: readingHash(r), paidBy: options.paidBy.some(p => p.value === previous?.paidBy) ? previous.paidBy : options.paidBy[0]?.value ?? null, paymentMethod: previous && (previous.paymentMethod === null || options.paymentMethods.some(m => m.value === previous.paymentMethod)) ? previous.paymentMethod : paymentMethod, splitPct: null, lines, selectedIndices: pending, ledgerVersion: ledger.version, stage: ledger.decisions.some(d => d.state !== 'pending') ? 'remaining' : 'configure' }
+  const fundingDefault = options.paidBy.find(p => p.value === 'STALL_FUNDS')?.value ?? options.paidBy[0]?.value ?? null
+  return { version: 0, readingHash: readingHash(r), paidBy: options.paidBy.some(p => p.value === previous?.paidBy) ? previous.paidBy : fundingDefault, paymentMethod: previous && (previous.paymentMethod === null || options.paymentMethods.some(m => m.value === previous.paymentMethod)) ? previous.paymentMethod : paymentMethod, splitPct: null, lines, selectedIndices: pending, ledgerVersion: ledger.version, stage: ledger.decisions.some(d => d.state !== 'pending') ? 'remaining' : 'configure' }
 }
 export function formEntries(form: ReceiptForm, r: FormReceipt, options: FormOptions): ExpenseBody[] {
   // These are reviewed user-facing validation messages, safe in production.
   const fail = (message: string): never => { throw new DomainError('agent:FORM_INCOMPLETE', 400, message) }
+  if(r.extracted?._allocationCorrection)fail('A booked allocation was corrected. Review existing entries in Vista before booking more items from this original receipt.')
+  if (r.extracted?.document_type === 'bank_screenshot' && r.extracted?.transaction_direction !== 'outgoing') fail('Confirm whether this bank transfer is an outgoing expense. Incoming money/internal transfers must use the appropriate Vista cashflow, not a new expense.')
+  if (form.lines.some(l => l.custom && !r.extracted?.purpose)) fail('Edit the bank transaction purpose before saving. No purchased goods are inferred from a screenshot.')
   if (!r.receiptDate || r.totalSen === null) fail('Review the receipt date and total before saving.')
   if (!form.lines.length) fail('Receipt parsing is not complete. Review the reading before categorising.')
   const selected = selectedIndices(form)
