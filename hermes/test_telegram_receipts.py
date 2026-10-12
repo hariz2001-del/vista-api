@@ -33,6 +33,21 @@ class Bridge:
         self.calls.append((method,path,body,user))
         return {'duplicate':self.duplicate, 'duplicateReason':'identical image bytes', 'receipt':{'id':'11111111-1111-4111-8111-111111111111','ref':'R-111111','status':'UPLOADED','expenses':[]}}
 class ReceiptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sales_today_uses_live_business_date_with_explicit_single_day_range(self):
+        spec=importlib.util.spec_from_file_location('clock_bridge',root/'vista_mcp.py')
+        bridge=importlib.util.module_from_spec(spec);spec.loader.exec_module(bridge)
+        calls=[]
+        def call(method,path,body=None,telegram_user=None):
+            calls.append(path)
+            if path=='/agent/time': return {'calendarDate':'2026-10-12','businessDate':'2026-10-11','localNow':'2026-10-12T01:00:00+08:00'}
+            return {'from':'2026-10-11','to':'2026-10-11','totals':{'netSen':4600}}
+        bridge._call=call
+        result=bridge._run('vista_sales_today',{'telegram_user_id':'456'})
+        self.assertEqual(result['clock']['calendarDate'],'2026-10-12')
+        self.assertEqual(result['reportDate'],'2026-10-11')
+        self.assertEqual(calls,['/agent/time','/agent/sales?from=2026-10-11&to=2026-10-11'])
+        bridge._call=lambda *a,**kw: {'calendarDate':'2026-10-12','businessDate':'2026-10-12'} if a[1]=='/agent/time' else {'from':'2026-10-11','to':'2026-10-11'}
+        with self.assertRaises(bridge.VistaError): bridge._run('vista_sales_today',{'telegram_user_id':'456'})
     async def test_discovery_metadata_does_not_masquerade_as_enabled_skills(self):
         spec=importlib.util.spec_from_file_location('enable_ops',root/'enable-operations.py')
         ops=importlib.util.module_from_spec(spec);spec.loader.exec_module(ops)
@@ -47,6 +62,9 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('vista_operations',result.channel_prompt)
         self.assertIn('/agent/team/staff',result.channel_prompt)
         self.assertIn('not finance-only',result.channel_prompt)
+        self.assertIn('LIVE CLOCK AT MESSAGE HANDLING',result.channel_prompt)
+        self.assertIn('vista_sales_today',result.channel_prompt)
+        self.assertIn('UTC+08:00',result.channel_prompt)
         a._update_receipt_dir=Path('/other-profile'); event=types.SimpleNamespace(channel_prompt='Other bot')
         self.assertEqual(m.business_context(a,event).channel_prompt,'Other bot')
     async def test_photo_menu_is_immediate_and_durable_without_model_turn(self):

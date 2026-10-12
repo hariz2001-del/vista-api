@@ -401,6 +401,8 @@ def _tool(name: str, description: str, properties: dict, required: list[str] | N
     return {"name": name, "description": description, "inputSchema": {"type": "object", "properties": {**properties, "telegram_user_id": USER}, "required": required or []}}
 
 TOOLS += [
+    _tool('vista_current_time', 'Read authoritative live Malaysia day/date/time and this business configured trading-date cutoff. Use for now/today/tomorrow, never dates from memory. Calendar today may differ from the overnight businessDate.', {}),
+    _tool('vista_sales_today', 'Sales so far TODAY, explicitly resolved from the live Malaysia clock and RMS trading-day cutoff, not the generic seven-day report. Returns calendar time, exact report date and totals; explain overnight cutoff if calendarDate differs. basis=calendar only when user explicitly requests that dated RMS report.', {'basis': {'type': 'string', 'enum': ['business', 'calendar']}}),
     _tool("vista_receipt_notify", "Send ONE reading/duplicate warning with real receipt buttons back to the stored originating Telegram photo. Background worker only after reading saved; no arbitrary destination/text and no expense posted. Token stays private. Skips an already-notified receipt.", {"receipt_id": {"type": "string"}}, ["receipt_id"]),
     _tool("vista_business_data", "Discover/read paginated business data: products/menu/addons, orders/items, sold addons, ledger, expenses, receipts. Owner only; no raw SQL/secrets. Staff/rosters/stock: vista_operations.", {"resource": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "id": {"type": "string"}}),
     _tool("vista_item_sales", "Actual addon names, quantities/revenue per sold item/date from historical snapshots. Base sales/addons/discounts separate; NOT ingredient costs or realised profit.", {"from": {"type": "string"}, "to": {"type": "string"}, "product_id": {"type": "string"}, "name": {"type": "string"}}, ["from", "to"]),
@@ -433,6 +435,17 @@ for _definition in TOOLS:
 
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name == 'vista_current_time':
+        return _call('GET', '/agent/time', telegram_user=user)
+    if name == 'vista_sales_today':
+        clock = _call('GET', '/agent/time', telegram_user=user)
+        basis = args.get('basis', 'business')
+        report_date = clock['calendarDate'] if basis == 'calendar' else clock['businessDate']
+        query = urllib.parse.urlencode({'from': report_date, 'to': report_date})
+        sales = _call('GET', '/agent/sales?' + query, telegram_user=user)
+        if sales.get('from') != report_date or sales.get('to') != report_date:
+            raise VistaError('Sales response date differs from the requested current day; do not present it as today.')
+        return _with_rm({'clock': clock, 'basis': basis, 'reportDate': report_date, 'sales': sales})
     if name == 'vista_receipt_notify':
         rid = args['receipt_id']
         context = _call('GET', f'/agent/receipts/{rid}/telegram-context', telegram_user=user)

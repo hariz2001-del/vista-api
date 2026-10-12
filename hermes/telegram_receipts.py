@@ -16,9 +16,16 @@ def business_context(adapter, event):
     """Refresh capabilities on actual Telegram turns, preserving old chat history."""
     if not enabled(adapter): return event
     from datetime import datetime, timezone, timedelta
-    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    now = datetime.now(timezone(timedelta(hours=8)))
     context = (
-        f'CURRENT BUSINESS CAPABILITIES (Malaysia date {today}): '
+        f'LIVE CLOCK AT MESSAGE HANDLING: {now.isoformat(timespec="seconds")} '
+        f'({now.strftime("%A")}, Asia/Kuala_Lumpur, UTC+08:00). '
+        'This timestamp is a snapshot, not a continuously updating clock. For current time, '
+        'today/yesterday sales, or who works right now, call vista_current_time or vista_sales_today. '
+        'Never take the current date from old messages. For sales today use vista_sales_today '
+        'rather than vista_sales with omitted dates (which is a seven-day report). Show the '
+        'actual sales date and as-of time; explain any overnight trading-day cutoff. '
+        'CURRENT BUSINESS CAPABILITIES: '
         'You are the Sarang business operations assistant, not finance-only. '
         'Earlier assistant statements denying staff, roster, stock or addon access are obsolete. '
         'For staff names, call vista_operations(method=GET,path=/agent/team/staff). '

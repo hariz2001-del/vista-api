@@ -76,6 +76,10 @@ it('leases durable jobs exclusively, retries failed work and keeps reconciliatio
 })
 it('exposes scoped business records and computes only recorded, sourced recipe costs', async () => {
   const s = await setup()
+  const time = await app.inject({ method: 'GET', url: '/agent/time', headers: s.headers('222') })
+  expect(time.statusCode, time.body).toBe(200)
+  expect(time.json()).toMatchObject({ timezone: 'Asia/Kuala_Lumpur', utcOffset: '+08:00', dayRolloverHour: 5 })
+  expect(time.json().localNow).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$/)
   const category = await prisma.category.create({ data: { businessId: s.b.businessId, brandId: s.brands[0]!.id, name: 'Recipes' } })
   const product = await prisma.product.create({ data: { businessId: s.b.businessId, brandId: s.brands[0]!.id, categoryId: category.id, name: 'Tea', basePriceSen: 500 } })
   expect((await s.call('GET', `/agent/products/${product.id}/cost`)).costAvailable).toBe(false)

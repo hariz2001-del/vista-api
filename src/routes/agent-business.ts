@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { requireAgent } from '../auth.ts'
 import { conflict, notFound } from '../errors.ts'
 import { sameVendor } from '../receipt-matching.ts'
+import { agentClock } from '../domain/agent-clock.ts'
 
 const id = z.string().uuid()
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -29,6 +30,10 @@ const resources = {
 } as const
 
 export async function agentBusinessRoutes(app: FastifyInstance) {
+  app.get('/agent/time', read, async request => {
+    const settings = await request.db.accountSettings.findUnique({ where: { businessId: request.businessId } })
+    return agentClock(new Date(), settings?.dayRolloverHour ?? 5)
+  })
   app.get<{ Params: { id: string } }>('/agent/receipts/:id/telegram-context', write, async request => {
     const r = await request.db.receiptDocument.findUnique({ where: { id: id.parse(request.params.id) } })
     if (!r) throw notFound('agent:RECEIPT_NOT_FOUND')
