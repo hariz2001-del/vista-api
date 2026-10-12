@@ -166,5 +166,11 @@ class DirectDriveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'cancelled'):self.client.confirm(ident)
         self.assertLessEqual(len('dg:y:'+ident),64)
 
+    def test_two_confirmations_cannot_overwrite_same_file_concurrently(self):
+        first=self.preview();second=self.preview()
+        with self.client.db() as db:db.execute("UPDATE operations SET state='running' WHERE id=?",(first,))
+        with self.assertRaisesRegex(ValueError,'Another operation'):self.client.confirm(second)
+        self.assertEqual(self.client.writes,[])
+
 
 if __name__=='__main__':unittest.main()

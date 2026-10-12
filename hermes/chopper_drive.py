@@ -179,16 +179,24 @@ class Drive:
                 raise ValueError('Operation is cancelled, already running, or needs reconciliation. Do not blindly retry.')
             if time.time() - made > 900:
                 raise ValueError('Confirmation expired. Ask for a fresh preview.')
+            target_id = json.loads(encoded)['file']['id']
+            busy = db.execute("SELECT payload FROM operations WHERE state='running' AND id<>?", (ident,)).fetchall()
+            if any(json.loads(entry[0])['file']['id'] == target_id for entry in busy):
+                raise ValueError('Another operation on this file is running or uncertain. Inspect it before starting another change.')
             db.execute('UPDATE operations SET state=? WHERE id=?', ('running', ident))
         payload = json.loads(encoded)
         file = self.scoped(payload['file']['id'], allow_trash=payload['operation'] == 'restore')
         if self.fingerprint(file) != payload['fingerprint']:
+            with self.db() as db:
+                db.execute("UPDATE operations SET state='cancelled' WHERE id=?", (ident,))
             raise ValueError('File changed since preview. Ask for a new preview.')
         operation, backup, digest = payload['operation'], None, None
         if operation == 'replace':
             data = self.cached_bytes(payload['local_path'])
             digest = hashlib.sha256(data).hexdigest()
             if digest != payload['sha256']:
+                with self.db() as db:
+                    db.execute("UPDATE operations SET state='cancelled' WHERE id=?", (ident,))
                 raise ValueError('Replacement bytes changed since preview.')
             backup = self.request('/files/' + file['id'] + '/copy?' + urllib.parse.urlencode({'fields': FIELDS}), 'POST', {'name': file['name'] + ' — archived before replacement ' + ident[:8], 'parents': file['parents'], 'appProperties': {'vistaReceiptId': None, 'vistaVariant': 'archive', 'chopperBackupFor': file['id'], 'chopperOperationId': ident}})
             self.scoped(backup['id'])

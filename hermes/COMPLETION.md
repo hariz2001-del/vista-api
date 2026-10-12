@@ -258,6 +258,18 @@ a Drive push-notification/reconciliation watcher.
 
 Receipt R-references resolve uniquely within the authenticated business before
 tool calls; ambiguous references fail instead of selecting a guessed UUID.
-250 backend tests, 43 Python tests and build pass; focused image/maintenance
+250 backend tests, 44 Python tests and build pass; focused image/maintenance
 tests pass after final image-serving guards. Production destructive tests use
 fixtures only; live checks are read-only. User confirmation acceptance remains.
+
+Live production API release c3067be is READY at
+https://vista-llyzwnn80-aztechdigital.vercel.app (api.vistahub.my); real
+R-148681 resolution and private image retrieval passed. Installed Hermes direct
+status/list passed in actual session 20261013_030503_6ceda6; root is Finances,
+Google confirms add/edit/Trash permissions, and its child Receipts was read
+without a Vista proxy. Actor transport and bulk/menu/shared-preference checks
+passed. Native direct confirmation callbacks are installed, gateway active.
+Follow-up bot-only guard serializes uncertain/running mutations on the same file;
+known pre-write stale inputs are cancelled safely. No live photo mutations or
+financial writes were performed for acceptance. Replacing/removing receipt
+images is owner-only; no partner/dev/shell privileges were broadened.
