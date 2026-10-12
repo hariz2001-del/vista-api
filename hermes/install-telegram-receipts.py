@@ -35,4 +35,11 @@ if 'VISTA_NAMED_CHOICES_V1' not in text:
     text = text.replace(choice_anchor, named)
     compile(text, str(target), 'exec')
     target.write_text(text)
-print('Receipt photo/callback hooks installed; non-Sarang bots are unchanged.')
+if 'VISTA_BUSINESS_CONTEXT_V1' not in text:
+    context_anchor = '    async def handle_message(self, event: MessageEvent) -> None:\n        self._accept_update()\n        await super().handle_message(event)'
+    if context_anchor not in text: raise SystemExit('Message context anchor changed; inspect first.')
+    hook = '    async def handle_message(self, event: MessageEvent) -> None:\n        self._accept_update()\n        # VISTA_BUSINESS_CONTEXT_V1\n        ' + loader + '\n        event = _vista_receipts.business_context(self, event)\n        await super().handle_message(event)'
+    text = text.replace(context_anchor, hook)
+    compile(text, str(target), 'exec')
+    target.write_text(text)
+print('Receipt hooks and business capability context installed; non-Sarang bots unchanged.')

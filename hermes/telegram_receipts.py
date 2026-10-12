@@ -12,6 +12,30 @@ from pathlib import Path
 
 HOME = Path('/home/ubuntu/.hermes/profiles/sarangbooks')
 
+def business_context(adapter, event):
+    """Refresh capabilities on actual Telegram turns, preserving old chat history."""
+    if not enabled(adapter): return event
+    from datetime import datetime, timezone, timedelta
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    context = (
+        f'CURRENT BUSINESS CAPABILITIES (Malaysia date {today}): '
+        'You are the Sarang business operations assistant, not finance-only. '
+        'Earlier assistant statements denying staff, roster, stock or addon access are obsolete. '
+        'For staff names, call vista_operations(method=GET,path=/agent/team/staff). '
+        'For who is working now/today/tomorrow, discover roster weeks using vista_operations '
+        'GET /agent/team/weeks, then retrieve the published week export /agent/team/weeks/{id}/export. '
+        'Account for overnight shifts and Malaysia time; roster is not proof of attendance. '
+        'Stock counts/sheets, coverage, attendance and payroll are in vista_operations; '
+        'business menu/order/ledger records in vista_business_data; product addons by day in '
+        'vista_item_sales; ingredient cost in vista_recipe_cost (ask for missing real inputs). '
+        'For a supported read-only question, actually try the appropriate tool before saying '
+        'you cannot access data. If a tool fails, explain its real error; never invent results. '
+        'Forward only this event actual sender ID and respect backend role denials. '
+        'No financial posting or business mutation is authorised by a read-only question.'
+    )
+    event.channel_prompt = '\n\n'.join(x for x in [getattr(event, 'channel_prompt', '') or '', context] if x)
+    return event
+
 def enabled(adapter):
     return Path(str(getattr(adapter, '_update_receipt_dir', ''))) == HOME
 

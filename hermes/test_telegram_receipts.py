@@ -33,6 +33,15 @@ class Bridge:
         self.calls.append((method,path,body,user))
         return {'duplicate':self.duplicate, 'duplicateReason':'identical image bytes', 'receipt':{'id':'11111111-1111-4111-8111-111111111111','ref':'R-111111','status':'UPLOADED','expenses':[]}}
 class ReceiptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_business_questions_get_current_capabilities_without_erasing_context(self):
+        a=Adapter(); event=types.SimpleNamespace(channel_prompt='Existing context')
+        result=m.business_context(a,event)
+        self.assertIn('Existing context',result.channel_prompt)
+        self.assertIn('vista_operations',result.channel_prompt)
+        self.assertIn('/agent/team/staff',result.channel_prompt)
+        self.assertIn('not finance-only',result.channel_prompt)
+        a._update_receipt_dir=Path('/other-profile'); event=types.SimpleNamespace(channel_prompt='Other bot')
+        self.assertEqual(m.business_context(a,event).channel_prompt,'Other bot')
     async def test_photo_menu_is_immediate_and_durable_without_model_turn(self):
         a=Adapter(); b=Bridge(); m.bridge=lambda:b
         msg=types.SimpleNamespace(chat=types.SimpleNamespace(id=123),from_user=types.SimpleNamespace(id=456),message_id=9,message_thread_id=None,caption=None)
