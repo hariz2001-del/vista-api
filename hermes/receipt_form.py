@@ -92,7 +92,10 @@ async def callback(adapter,query,data,m):
     match=re.fullmatch(r'vf:([a-f0-9-]{36}):(.+)',data)
     if not match:return False
     rid,action=match.groups();user=str(query.from_user.id);path=f'/agent/receipts/{rid}/form'
-    async def call(method,suffix='',body=None):return await asyncio.to_thread(m._call,method,path+suffix,body,user)
+    async def call(method,suffix='',body=None):
+        # The bridge sends application/json; Fastify rejects an empty POST body.
+        if method=='POST' and body is None:body={}
+        return await asyncio.to_thread(m._call,method,path+suffix,body,user)
     try:
         view=await call('GET') # backend permission, actual actor, current settings
         await query.answer()
@@ -135,5 +138,7 @@ async def callback(adapter,query,data,m):
         message='The form changed or an option is unavailable. Reopen Categorise; nothing new was posted.'
         if action.startswith('post:'):message='Could not confirm the save result. Reopen Categorise to check its current status before retrying.'
         if isinstance(error,m.VistaError) and 'FORM_INCOMPLETE' in str(error):message=str(error)[:180]
+        if isinstance(error,m.VistaError) and 'FORM_INCOMPLETE' in str(error) and 'Something went wrong' in message:
+            message='Choose a category and brand for every line, and review missing receipt fields, then Save again. Nothing was posted.'
         await adapter._bot.send_message(chat_id=query.message.chat.id,text=message)
         return True

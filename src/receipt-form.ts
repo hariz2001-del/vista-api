@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { lineTotalSen } from './domain/expense-items.ts'
-import { badRequest } from './errors.ts'
+import { DomainError } from './errors.ts'
 import { expenseBody, type ExpenseBody } from './routes/rms.ts'
 
 export type FormLine = { name: string; quantityMilli: number | null; unitPriceSen: number | null; amountSen: number | null; unit: string | null; category: string | null; brand: string | null; adjustment: boolean }
@@ -27,7 +27,8 @@ export function initialForm(r: FormReceipt, options: FormOptions): ReceiptForm {
   return { version: 0, readingHash: readingHash(r), paidBy: options.paidBy[0]?.value ?? null, paymentMethod, splitPct: null, lines }
 }
 export function formEntries(form: ReceiptForm, r: FormReceipt, options: FormOptions): ExpenseBody[] {
-  const fail = (message: string): never => { throw badRequest('agent:FORM_INCOMPLETE', message) }
+  // These are reviewed user-facing validation messages, safe in production.
+  const fail = (message: string): never => { throw new DomainError('agent:FORM_INCOMPLETE', 400, message) }
   if (!r.receiptDate || r.totalSen === null) fail('Review the receipt date and total before saving.')
   if (!form.lines.length) fail('Receipt parsing is not complete. Review the reading before categorising.')
   if (!options.paidBy.some(p => p.value === form.paidBy)) fail('Choose a current Vista funding option.')

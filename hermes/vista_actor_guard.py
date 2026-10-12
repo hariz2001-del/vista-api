@@ -11,6 +11,8 @@ def bind(config,tool_name,args,session=None):
     if session('HERMES_SESSION_PLATFORM')=='telegram':
         actor=session('HERMES_SESSION_USER_ID')
         if not actor:raise PermissionError('Vista call has no authenticated Telegram actor.')
+        if args.get('telegram_user_id') and str(args['telegram_user_id'])!=str(actor):
+            raise PermissionError('Identity substitution blocked. Use only the authenticated sender; never retry another user ID.')
         result['telegram_user_id']=str(actor)
     elif session('HERMES_CRON_SESSION')=='1':
         if tool_name not in WORKER_TOOLS:raise PermissionError('Receipt worker cannot perform this business action.')

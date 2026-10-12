@@ -24,7 +24,8 @@ class FormTests(unittest.IsolatedAsyncioTestCase):
     def test_model_cannot_impersonate_actor_and_worker_cannot_post(self):
         config={'args':[guard.BRIDGE]};original={'telegram_user_id':'owner'}
         session=lambda k:{'HERMES_SESSION_PLATFORM':'telegram','HERMES_SESSION_USER_ID':'viewer'}.get(k,'')
-        self.assertEqual(guard.bind(config,'vista_operations',original,session)['telegram_user_id'],'viewer')
+        with self.assertRaises(PermissionError):guard.bind(config,'vista_operations',original,session)
+        self.assertEqual(guard.bind(config,'vista_operations',{},session)['telegram_user_id'],'viewer')
         self.assertEqual(original['telegram_user_id'],'owner')
         self.assertIs(guard.bind({'args':['other-bot']},'vista_post',original,session),original)
         cron=lambda k:'1' if k=='HERMES_CRON_SESSION' else ''
@@ -60,4 +61,11 @@ class FormTests(unittest.IsolatedAsyncioTestCase):
         try:await form.callback(types.SimpleNamespace(),q,f'vf:{RID}:cancel',b)
         finally:form.markup=old
         self.assertEqual([x[0] for x in b.calls],['GET']);self.assertIn('Receipt kept',q.edits[0]['text'])
+    async def test_preview_sends_json_object_and_never_posts(self):
+        b=Bridge();q=Query();notices=[]
+        async def send_message(**kw):notices.append(kw)
+        adapter=types.SimpleNamespace(_bot=types.SimpleNamespace(send_message=send_message))
+        await form.callback(adapter,q,f'vf:{RID}:save:{form.stamp(b.view)}',b)
+        self.assertEqual(b.calls[-1][0],'POST');self.assertTrue(b.calls[-1][1].endswith('/preview'))
+        self.assertEqual(b.calls[-1][2],{});self.assertFalse(any(c[1].endswith('/post') for c in b.calls))
 if __name__=='__main__':unittest.main()

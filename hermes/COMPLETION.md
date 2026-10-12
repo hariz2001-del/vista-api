@@ -105,3 +105,17 @@ does not describe the owner's actual bill. `model-eval.py` runs bounded live
 read-only cases and checks effective model, expected tools, actual sender ID
 and forbidden mutations. Do not interpret passing tool assertions as exhaustive
 accuracy proof; inspect the returned answers and verify native owner clicks.
+
+Adversarial testing caught attempted identity substitution from untrusted user
+text. `vista_actor_guard.py` now binds calls to Hermes' trusted task-local
+Telegram session; an explicit mismatching ID is rejected BEFORE the MCP RPC.
+`install-vista-actor-guard.py` installs the exact finance-bridge-only hook in
+tools/mcp_tool_handlers.py, with .py.before-vista-actor rollback backup. Other
+connections are unchanged. Cron is restricted to receipt evidence tools and
+the explicitly authorised owner service actor; posting, linking and Drive
+reorganisation are blocked in that background channel. The normal owner's
+interactive requests still support the existing approved Vista/Drive workflows.
+`verify-actor-transport.py` tested the installed transport with concurrent
+distinct actors, substitution attempts and worker posting; all passed.
+Three repeated actual Luna denied-access cases after guard/instruction fixes
+refused alternate identities and returned no protected staff/payroll data.
