@@ -54,8 +54,18 @@ class FormTests(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertTrue(await form.callback(adapter,q,f'vf:{RID}:set:c:1:1:{form.stamp(b.view)}',b))
         finally:form.markup=old
-        self.assertEqual(b.calls[-1][2],{'version':0,'field':'category','value':'PACKAGING','lineIndex':1})
+        self.assertEqual(b.calls[-1][2],{'version':0,'ledgerVersion':0,'field':'category','value':'PACKAGING','lineIndex':1})
         self.assertTrue(all(x[3]=='456' for x in b.calls));self.assertEqual(len(q.edits),1)
+    def test_group_brand_and_selection_stage_are_simple(self):
+        v=fixture();labels=[b['text'] for row in form.keyboard(v) for b in row]
+        self.assertEqual(sum(x.startswith('Brand:') for x in labels),1)
+        self.assertFalse(any(x=='Choose brand' for x in labels))
+        v['workflow']={'version':0,'pendingIndices':[0,1]};v['form'].update(stage='select',selectedIndices=[0])
+        labels=[b['text'] for row in form.keyboard(v) for b in row]
+        self.assertTrue(any(x.startswith('☑ 1.') for x in labels));self.assertTrue(any(x.startswith('☐ 2.') for x in labels))
+        self.assertIn('Continue → Categorise',labels);self.assertFalse(any(x.startswith('Brand:') for x in labels))
+        v['form']['stage']='remaining';labels=[b['text'] for row in form.keyboard(v) for b in row]
+        self.assertIn('Categorise remaining',labels);self.assertIn('Scrap remaining',labels)
     async def test_cancel_only_keeps_evidence_no_mutation(self):
         b=Bridge();q=Query();old=form.markup;form.markup=lambda x:x
         try:await form.callback(types.SimpleNamespace(),q,f'vf:{RID}:cancel',b)

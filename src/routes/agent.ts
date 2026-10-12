@@ -125,7 +125,7 @@ function assertOpen(receipt: { status: string }, append = false): void {
 }
 
 /** A fingerprint of exactly what a preview showed, so a post can prove it is the same. */
-function previewToken(receipt: { id: string; updatedAt: Date }, entries: unknown): string {
+export function previewToken(receipt: { id: string; updatedAt: Date }, entries: unknown): string {
   return createHash('sha256').update(JSON.stringify([receipt.id, receipt.updatedAt.toISOString(), entries])).digest('hex').slice(0, 32)
 }
 
@@ -440,6 +440,9 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id = ${id} AND business_id = ${request.businessId} FOR UPDATE`
         const receipt = await requireReceipt(tx, id)
         assertOpen(receipt)
+        const workflow = (receipt.extracted as any)?._lineWorkflow
+        if (workflow?.decisions.some((d: any) => d.state !== 'pending') && !body.onlyMissing) throw conflict('agent:READING_ALLOCATED', 'Allocated/excluded receipt items cannot be rewritten. Edit the accounting entries through Vista corrections instead.')
+        if (body.extracted && ['_lineWorkflow', '_entryForms'].some(k => k in body.extracted!)) throw badRequest('validation:INVALID_REQUEST')
         if (body.onlyMissing) {
           if (receipt.vendor !== null) delete body.vendor
           if (receipt.receiptDate !== null) delete body.receiptDate
@@ -611,6 +614,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id = ${id} AND business_id = ${businessId} FOR UPDATE`
       const receipt = await requireReceipt(tx, id)
       assertOpen(receipt, body.append)
+      if ((receipt.extracted as any)?._lineWorkflow?.decisions.some((d: any) => d.state !== 'pending')) throw conflict('agent:USE_SPLIT_FORM', 'This receipt has tracked allocations. Use the remaining-item form to avoid booking an item twice.')
       if (previewToken(receipt, { entries: body.entries, append: body.append }) !== body.previewToken) throw conflict('agent:PREVIEW_STALE')
       const sum = body.entries.reduce((total, entry) => total + entry.amountSen, 0) + receipt.expenses.reduce((total, entry) => total + entry.amountSen, 0)
       if (receipt.totalSen !== null && sum !== receipt.totalSen && !body.allowTotalMismatch) throw conflict('agent:TOTAL_MISMATCH')

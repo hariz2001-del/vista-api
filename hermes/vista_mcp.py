@@ -435,6 +435,8 @@ for _definition in TOOLS:
 
 TOOLS.append(_tool('vista_receipt_form', 'Read live Vista receipt categorisation card and show its real line category/brand, funding, method, Save/Cancel buttons in the original receipt chat. Use after editing a reading or when the owner asks to categorise. No posting; native Confirm Save is required.', {'receipt_id': {'type':'string'}, 'show_buttons': {'type':'boolean'}}, ['receipt_id']))
 
+TOOLS.append(_tool('vista_receipt_annotate', 'Maintain a SEPARATE annotated Drive scan showing posted items by brand and crossed-out scrapped items. Never changes receipt text, amounts, originals or accounting. Inspect the actual cropped scan with vision before supplying normalized scan regions per ZERO-BASED line index. Use reading_hash from vista_receipt_form. Omit regions to retry upload only. Unknown positions stay unmarked, not guessed.', {'receipt_id':{'type':'string'},'reading_hash':{'type':'string'},'regions':{'type':'array','items':{'type':'object','properties':{k:{'type':'integer' if k=='index' else 'number'} for k in ('index','x','y','width','height')},'required':['index','x','y','width','height']}}}, ['receipt_id']))
+
 def _receipt_card_send(rid, view, user):
     import receipt_form
     context=_call('GET',f'/agent/receipts/{rid}/telegram-context',telegram_user=user)
@@ -451,6 +453,10 @@ def _receipt_card_send(rid, view, user):
 
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name == 'vista_receipt_annotate':
+        rid=args['receipt_id']
+        body={'readingHash':args.get('reading_hash'),'regions':args['regions']} if 'regions' in args else {}
+        return _call('POST',f'/agent/receipts/{rid}/form/'+('regions' if 'regions' in args else 'annotate'),body,user)
     if name == 'vista_receipt_form':
         rid=args['receipt_id']
         view=_call('GET',f'/agent/receipts/{rid}/form',telegram_user=user)
@@ -476,6 +482,7 @@ def _run(name: str, args: dict) -> object:
         view=_call('GET',f'/agent/receipts/{rid}/form',telegram_user=user)
         text = receipt_form.text(view)+'\n\nTap Categorise to set each line’s category and brand. Nothing has been posted.'
         keyboard = [[{'text': label, 'callback_data': f'vr:{rid}:{action}'} for label, action in row] for row in [[('Categorise', 'key'), ('Stash for later', 'stash')], [('Edit reading', 'edit'), ('View scan', 'scan')]]]
+        keyboard.append([{'text':'Split receipt','callback_data':f'vr:{rid}:split'}])
         if view.get('duplicates'):
             text += '\nWhy was the same receipt sent again? Choose below; no accounting decision has been made.'
             keyboard=receipt_form.duplicate_keyboard(rid)+keyboard

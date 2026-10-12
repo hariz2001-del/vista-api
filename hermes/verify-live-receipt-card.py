@@ -34,13 +34,16 @@ async def main():
         labels.append([b.text for row in q.edits[-1]['reply_markup'].inline_keyboard for b in row])
     assert all(x['label'] in labels[0] for x in view['options']['categories'])
     assert all(x['name'] in labels[1] for x in view['options']['brands'])
-    # Backend refuses incomplete categorisation; no post RPC is issued.
+    # Vista defaults are shown once; Save previews but never posts.
+    view=m._call('GET',f'/agent/receipts/{RID}/form',telegram_user='304348232')
     await form.callback(a,q,f'vf:{RID}:save:{form.stamp(view)}',m)
-    assert a.notices and 'category' in a.notices[-1]['text'].lower(), a.notices
+    assert q.edits and 'NOT saved yet' in q.edits[-1]['text'], a.notices
+    labels=[b.text for row in form.keyboard(view) for b in row if 'text' in b]
+    assert sum(x.startswith('Brand:') for x in labels)==1
     denied=Query('999999999999');await transport.callback(a,denied,f'vr:{RID}:key')
     assert not denied.edits
     after=m._call('GET',f'/agent/receipts/{RID}',telegram_user='304348232')['receipt']
     assert before['status']==after['status']=='PENDING_REVIEW' and before['expenses']==after['expenses']==[]
     assert after['driveUrl'] and after['scanDriveUrl']
-    print({'receipt':after['ref'],'lineCount':len(view['form']['lines']),'choices':labels,'nativeCard':'PASS','missingCategoryBlocked':'PASS','unregisteredActorBlocked':'PASS','realExpenseWrites':0,'originalAndScanDriveIdsPresent':True})
+    print({'receipt':after['ref'],'lineCount':len(view['form']['lines']),'nativeCard':'PASS','oneGroupBrand':'PASS','saveIsPreviewOnly':'PASS','unregisteredActorBlocked':'PASS','realExpenseWrites':0,'originalAndScanDriveIdsPresent':True})
 asyncio.run(main())

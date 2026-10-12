@@ -33,7 +33,8 @@ def business_context(adapter, event):
         'rather than vista_sales with omitted dates (which is a seven-day report). Show the '
         'actual sales date and as-of time; explain any overnight trading-day cutoff. '
         'CURRENT BUSINESS CAPABILITIES: '
-        'You are the Sarang business operations assistant, not finance-only. '
+        'Your name is Chopper, the Sarang business operations assistant, not finance-only. '
+        'Never call yourself Sarang Books or Sarang Bookkeeper. '
         'Earlier assistant statements denying staff, roster, stock or addon access are obsolete. '
         'For staff names, call vista_operations(method=GET,path=/agent/team/staff). '
         'For who is working now/today/tomorrow, discover roster weeks using vista_operations '
@@ -81,6 +82,7 @@ async def photo(adapter, message, event, data):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton('Categorise', callback_data=f'vr:{rid}:key'), InlineKeyboardButton('Stash for later', callback_data=f'vr:{rid}:stash')],
             [InlineKeyboardButton('Edit reading', callback_data=f'vr:{rid}:edit'), InlineKeyboardButton('View scan', callback_data=f'vr:{rid}:scan')],
+            [InlineKeyboardButton('Split receipt', callback_data=f'vr:{rid}:split')],
         ])
         if result.get('duplicate'):
             keyboard = InlineKeyboardMarkup([
@@ -106,7 +108,7 @@ async def callback(adapter, query, data):
     if not enabled(adapter): return False
     if data.startswith('vf:'):
         return await form_module().callback(adapter, query, data, bridge())
-    match = re.fullmatch(r'vr:([a-f0-9-]{36}):(key|stash|edit|scan)', data)
+    match = re.fullmatch(r'vr:([a-f0-9-]{36}):(key|stash|edit|scan|split)', data)
     if not match: return False
     rid, action = match.groups(); user = str(query.from_user.id)
     m = bridge()
@@ -122,8 +124,10 @@ async def callback(adapter, query, data):
             await query.answer('Stashed; no expense posted.')
             return True
         await query.answer()
-        if action == 'key':
+        if action in ('key', 'split'):
             form = await asyncio.to_thread(m._call, 'GET', f'/agent/receipts/{rid}/form', None, user)
+            if action == 'split':
+                form = await asyncio.to_thread(m._call, 'PATCH', f'/agent/receipts/{rid}/form', {'version':form['form']['version'],'ledgerVersion':form['workflow']['version'],'field':'selection','value':[]}, user)
             await form_module().show(query, form)
             return True
         if action == 'scan':

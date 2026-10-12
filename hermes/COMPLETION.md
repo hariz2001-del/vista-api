@@ -119,3 +119,30 @@ interactive requests still support the existing approved Vista/Drive workflows.
 distinct actors, substitution attempts and worker posting; all passed.
 Three repeated actual Luna denied-access cases after guard/instruction fixes
 refused alternate identities and returned no protected staff/payroll data.
+
+## Owner-requested simpler sequential split flow
+
+Public persona and Telegram display name are Chopper (`@chopper67bot` unchanged).
+The internal sarangbooks profile and sarang-bookkeeping skill IDs are retained.
+Normal categorisation preserves scanned line values and follows RMS defaults:
+RAW_MATERIALS and the first brand, with ONE optional group Brand control. No
+per-item brand prompts. Split receipt shows checkboxes FIRST; Continue opens
+categories for only the selected group. Confirm Save creates RMS expenses AND
+marks consumed indices atomically through the shared createExpense engine.
+The response prompts remaining items automatically; funding/method carry over.
+Scrap has a separate actor/version-bound confirmation, preserves evidence and
+records excluded indices without expense/ledger mutations. Partial receipts
+remain PENDING_REVIEW for recovery. Source reading changes after allocation are
+refused to prevent reordering booked indices. Existing untracked legacy receipts
+are not automatically migrated or re-booked.
+
+`receipt-annotation.ts` overlays translucent brand regions / straight scrap
+lines on a separate copy of the actual scan plus an explicit per-item legend.
+Original and clean scan stay unchanged. Positions come from inspection of the
+cropped scan through vista_receipt_annotate; uncertain/missing positions are not
+invented. Idempotent tagged-file recovery and a bounded lease keep uploads
+separate from financial confirmation. Upload failure cannot repeat spending;
+durable receipt jobs retry the annotation-only path. The cron transport guard
+permits form READS with notifications forcibly disabled and annotation writes,
+but still blocks expense posting/linking/scrapping and arbitrary Drive changes.
+No separate financial engine or new destructive migration is introduced.

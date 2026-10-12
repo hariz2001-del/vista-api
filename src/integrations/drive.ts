@@ -233,7 +233,7 @@ export async function editDriveFile(id: string, changes: { name?: string; parent
 export async function writeDriveFile(input: { parentId?: string; fileId?: string; name: string; mimeType: string; bytes: Buffer; appProperties?: Record<string, string> }) {
   if (input.fileId) {
     const existing = await withinFinances(input.fileId)
-    if (existing.appProperties?.vistaReceiptId && existing.appProperties.vistaVariant !== 'scan') throw new Error('Receipt originals are preserved. Create a separate file or update the scan instead.')
+    if (existing.appProperties?.vistaReceiptId && !['scan', 'allocation'].includes(existing.appProperties.vistaVariant ?? '')) throw new Error('Receipt originals are preserved. Create a separate file or update an existing derived scan/annotation instead.')
     if (existing.mimeType.startsWith('application/vnd.google-apps.')) throw new Error('Use a regular file for content replacement; native Google documents are not supported here.')
     await drive(`${UPLOAD}/files/${encodeURIComponent(input.fileId)}?uploadType=media&fields=id`, { method: 'PATCH', headers: { 'Content-Type': input.mimeType }, body: input.bytes })
     return editDriveFile(input.fileId, { name: input.name })
@@ -246,6 +246,14 @@ export async function writeDriveFile(input: { parentId?: string; fileId?: string
     input.bytes, Buffer.from(`\r\n--${boundary}--`),
   ])
   return drive<DriveFile>(`${UPLOAD}/files?uploadType=multipart&fields=${FIELDS}`, { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body })
+}
+
+/** Recovery after an upload succeeded but its response/DB write was lost. */
+export async function findReceiptAnnotation(parent: string, receiptId: string): Promise<DriveFile | undefined> {
+  await withinFinances(parent)
+  const q = `'${parent}' in parents and trashed = false and appProperties has { key='vistaReceiptId' and value='${receiptId}' } and appProperties has { key='vistaVariant' and value='allocation' }`
+  const result = await drive<{ files: DriveFile[] }>(`${API}/files?${new URLSearchParams({ q, fields: `files(${FIELDS})`, pageSize: '10' })}`)
+  return result.files[0]
 }
 
 export async function storeReceiptScan(db: Tx, receiptId: string): Promise<boolean> {

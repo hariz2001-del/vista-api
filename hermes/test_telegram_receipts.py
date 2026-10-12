@@ -72,7 +72,7 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
         msg=types.SimpleNamespace(chat=types.SimpleNamespace(id=123),from_user=types.SimpleNamespace(id=456),message_id=9,message_thread_id=None,caption=None)
         self.assertTrue(await m.photo(a,msg,types.SimpleNamespace(),b'photo'))
         self.assertEqual(len(a.sent),1); self.assertEqual(a.events,[])
-        self.assertEqual([x['text'] for row in a.sent[0]['reply_markup'] for x in row],['Categorise','Stash for later','Edit reading','View scan'])
+        self.assertEqual([x['text'] for row in a.sent[0]['reply_markup'] for x in row],['Categorise','Stash for later','Edit reading','View scan','Split receipt'])
         self.assertTrue(b.calls[0][2]['deferProcessing']); self.assertEqual(b.calls[0][3],'456')
     async def test_duplicate_still_gets_menu_and_reason(self):
         a=Adapter(); b=Bridge(True); m.bridge=lambda:b

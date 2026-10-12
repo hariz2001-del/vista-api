@@ -2,6 +2,8 @@ import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, expect, it } from 'vitest'
 import { prisma } from '../src/db.ts'
 import { authed, makeApp, makeBusiness } from './helpers.ts'
+import sharp from 'sharp'
+import { renderReceiptAnnotation } from '../src/integrations/receipt-annotation.ts'
 let app: FastifyInstance
 beforeAll(async () => { app = await makeApp() })
 afterAll(async () => { await app.close(); await prisma.$disconnect() })
@@ -18,15 +20,14 @@ async function setup() {
   const path = `/agent/receipts/${rid}/form`
   await ok('PATCH', `/agent/receipts/${rid}/extraction`, { vendor: 'Test supplier', receiptDate: '2026-10-12', receiptNo: 'INV-42', totalSen: 2500, extracted: { lines: [{ name: 'Ingredient', qty: 2, unit_price_rm: 10, amount_rm: 20 }, { name: 'Cup', qty: 1, unit_price_rm: 5, amount_rm: 5 }] } })
   let view = await ok('GET', path)
-  const set = async (field: string, value: string | number | null, lineIndex?: number) => { view = await ok('PATCH', path, { version: view.form.version, field, value, ...(lineIndex === undefined ? {} : { lineIndex }) }); return view }
+  const set = async (field: string, value: string | number | number[] | null, lineIndex?: number) => { view = await ok('PATCH', path, { version: view.form.version, field, value, ...(lineIndex === undefined ? {} : { lineIndex }) }); return view }
   return { b, rid, path, brands, call, ok, set, get view() { return view } }
 }
 it('uses live options, groups line settings, previews exact RMS fields and posts once', async () => {
   const s = await setup()
-  expect(s.view.form.lines[0]).toMatchObject({ quantityMilli: 2000, unitPriceSen: 1000, category: null, brand: null })
+  expect(s.view.form.lines[0]).toMatchObject({ quantityMilli: 2000, unitPriceSen: 1000, category: 'RAW_MATERIALS', brand: s.brands[0]!.id })
   expect(s.view.fieldMap).toMatchObject({ category: 'Expense.category', funding: 'Expense.paidBy' })
-  const incomplete = await s.call('POST', s.path + '/preview')
-  expect(incomplete.statusCode).toBe(400); expect(incomplete.json().message).toContain('Choose a category for line 1')
+  expect((await s.ok('POST', s.path + '/preview')).entriesTotalSen).toBe(2500)
   await s.set('category', 'RAW_MATERIALS', 0); await s.set('category', 'PACKAGING', 1)
   await s.set('brand', s.brands[0]!.id, 0); await s.set('brand', s.brands[1]!.id, 1)
   await s.set('method', 'DUITNOW_QR')
@@ -48,7 +49,7 @@ it('isolates actors/businesses and rejects stale drafts, settings and readings',
   expect((await s.call('GET', s.path, undefined, '333')).statusCode).toBe(403)
   await s.set('category', 'RAW_MATERIALS'); await s.set('brand', s.brands[0]!.id)
   const second = (await s.call('GET', s.path, undefined, '222')).json()
-  expect(second.form.version).toBe(0); expect(second.form.lines[0].category).toBeNull()
+  expect(second.form.version).toBe(0); expect(second.form.lines[0].category).toBe('RAW_MATERIALS')
   expect((await s.call('PATCH', s.path, { version: 0, field: 'category', value: 'PACKAGING' })).statusCode).toBe(409)
   expect((await s.call('PATCH', s.path, { version: s.view.form.version, field: 'brand', value: other.brands[0]!.id })).statusCode).toBe(409)
   const preview = await s.ok('POST', s.path + '/preview')
@@ -61,7 +62,7 @@ it('isolates actors/businesses and rejects stale drafts, settings and readings',
   await s.ok('PATCH', `/agent/receipts/${s.rid}/extraction`, { totalSen: 2600 })
   const reset = await s.ok('GET', s.path)
   expect(reset.readingChanged).toBe(true); expect(reset.form.lines).toHaveLength(3)
-  expect(reset.form.lines[2]).toMatchObject({ adjustment: true, amountSen: 100, category: null })
+  expect(reset.form.lines[2]).toMatchObject({ adjustment: true, amountSen: 100, category: 'RAW_MATERIALS' })
   expect(await prisma.expense.count({ where: { businessId: s.b.businessId } })).toBe(0)
 })
 it('keeps explicit adjustments and refuses unknown quantities or inconsistent arithmetic', async () => {
@@ -98,4 +99,61 @@ it('uses shared Vista split defaults per category and supports an explicit overr
   expect(overridden.entries.every((e: any) => e.brandId === null)).toBe(true)
   expect((await s.call('POST', s.path + '/post', { confirmationId: defaults.confirmationId })).statusCode).toBe(409)
   expect(await prisma.expense.count({ where: { businessId: s.b.businessId } })).toBe(0)
+})
+it('books selected groups sequentially, prompts remaining lines and scraps without extra spending', async () => {
+  const s = await setup()
+  await s.ok('PATCH', `/agent/receipts/${s.rid}/extraction`, { totalSen: 2800, extracted: { lines: [{ name: 'Ingredient', qty: 2, unit_price_rm: 10, amount_rm: 20 }, { name: 'Cups', qty: 1, unit_price_rm: 5, amount_rm: 5 }, { name: 'Personal item', qty: 1, unit_price_rm: 3, amount_rm: 3 }] } })
+  let view = await s.ok('GET', s.path)
+  const set = async (field: string, value: any) => { view = await s.ok('PATCH', s.path, { version: view.form.version, ledgerVersion: view.workflow.version, field, value }) }
+  await set('selection', [0]); await set('stage', 'configure'); await set('brand', s.brands[0]!.id)
+  const first = await s.ok('POST', s.path + '/preview')
+  expect(first.entriesTotalSen).toBe(2000); expect(first.remainingIndices).toEqual([1, 2])
+  const posted = await s.ok('POST', s.path + '/post', { confirmationId: first.confirmationId })
+  expect(posted.next.workflow.pendingIndices).toEqual([1, 2]); expect(posted.next.form.stage).toBe('remaining')
+  expect(posted.next.receipt.status).toBe('PENDING_REVIEW')
+  expect((await s.call('POST', s.path + '/post', { confirmationId: first.confirmationId })).statusCode).toBe(409)
+  view = posted.next
+  expect((await s.call('PATCH', s.path, { version: view.form.version, field: 'selection', value: [0] })).statusCode).toBe(409)
+  await set('selection', [1]); await set('stage', 'configure'); await set('brand', s.brands[1]!.id); await set('category', 'PACKAGING')
+  const second = await s.ok('POST', s.path + '/preview')
+  expect(second.append).toBe(true); expect(second.entriesTotalSen).toBe(500)
+  view = (await s.ok('POST', s.path + '/post', { confirmationId: second.confirmationId })).next
+  expect(view.workflow.pendingIndices).toEqual([2])
+  const scrap = await s.ok('POST', s.path + '/scrap-preview')
+  expect(scrap.indices).toEqual([2]); expect(await prisma.expense.count({ where: { businessId: s.b.businessId } })).toBe(2)
+  const done = await s.ok('POST', s.path + '/scrap', { confirmationId: scrap.confirmationId })
+  expect(done.next.readOnly).toBe(true); expect(done.next.workflow.scrappedSen).toBe(300)
+  expect(done.next.workflow.decisions.map((d: any) => d.state)).toEqual(['posted', 'posted', 'scrapped'])
+  expect((await s.call('POST', s.path + '/scrap', { confirmationId: scrap.confirmationId })).statusCode).toBe(409)
+  const expenses = await prisma.expense.findMany({ where: { businessId: s.b.businessId }, include: { items: true } })
+  expect(expenses.reduce((sum, e) => sum + e.amountSen, 0)).toBe(2500)
+  expect(expenses.every(e => e.receiptDocumentId === s.rid)).toBe(true)
+  expect(expenses.flatMap(e => e.items).map(i => i.name).sort()).toEqual(['Cups', 'Ingredient'])
+})
+it('isolates concurrent actors and binds exclusion confirmation to its original actor', async () => {
+  const s = await setup()
+  await s.set('selection', [0])
+  const first = await s.ok('POST', s.path + '/preview')
+  const other = (await s.call('GET', s.path, undefined, '222')).json()
+  expect((await s.call('PATCH', s.path, { version: other.form.version, ledgerVersion: other.workflow.version, field: 'selection', value: [0] }, '222')).statusCode).toBe(200)
+  const second = (await s.call('POST', s.path + '/preview', {}, '222')).json()
+  // Other actor's draft changed receipt.updatedAt: the first token is stale.
+  expect((await s.call('POST', s.path + '/post', { confirmationId: first.confirmationId })).statusCode).toBe(409)
+  expect((await s.call('POST', s.path + '/post', { confirmationId: second.confirmationId }, '222')).statusCode).toBe(200)
+  expect((await s.call('POST', s.path + '/post', { confirmationId: first.confirmationId })).statusCode).toBe(409)
+  const scrap = await s.ok('POST', s.path + '/scrap-preview')
+  expect((await s.call('POST', s.path + '/scrap', { confirmationId: scrap.confirmationId }, '222')).statusCode).toBe(404)
+  expect(await prisma.expense.count({ where: { businessId: s.b.businessId } })).toBe(1)
+  expect((await s.call('PATCH', `/agent/receipts/${s.rid}/extraction`, { extracted: { lines: [] } })).statusCode).toBe(409)
+})
+it('renders highlights and straight exclusions on a separate scan with a brand legend', async () => {
+  const scan = await sharp({ create: { width: 200, height: 200, channels: 3, background: '#ffffff' } }).png().toBuffer()
+  const ledger = { version: 2, readingHash: 'hash', decisions: [{ state: 'posted' as const, brand: 'a' }, { state: 'scrapped' as const }], regions: [{ index: 0, x: 0.1, y: 0.1, width: 0.8, height: 0.2 }, { index: 1, x: 0.1, y: 0.6, width: 0.8, height: 0.2 }] }
+  const annotated = await renderReceiptAnnotation(scan, [{ name: 'Eggs <source>' }, { name: 'Personal' }], ledger, [{ id: 'a', name: 'Bites', colour: '#00ff00' }])
+  expect(annotated.positioned).toBe(2); expect(annotated.bytes.equals(scan)).toBe(false)
+  expect((await sharp(annotated.bytes).metadata()).width).toBe(700)
+  const raw = await sharp(annotated.bytes).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+  const pixel = (x: number, y: number) => [...raw.data.subarray((y * raw.info.width + x) * 3, (y * raw.info.width + x) * 3 + 3)]
+  expect(pixel(80, 40)[1]).toBeGreaterThan(pixel(80, 40)[0]!)
+  expect(pixel(80, 140)[0]).toBeGreaterThan(pixel(80, 140)[1]!)
 })

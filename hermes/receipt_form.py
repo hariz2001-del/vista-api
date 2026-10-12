@@ -15,22 +15,36 @@ def label(options, field, value):
     return next((x['label'] for x in options[key] if x['value']==value),'—')
 
 def stamp(view):
-    data=[view['options'],view['form']['version'],view['form']['readingHash']]
+    data=[view['options'],view['form']['version'],view['form']['readingHash'],view.get('workflow',{}).get('version',0)]
     return hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()[:6]
 
 def text(view, page=0):
     r,f,o=view['receipt'],view['form'],view['options']
     lines=[r.get('vendor') or 'Merchant needs review',r.get('date') or 'Date needs review','']
-    for i,line in list(enumerate(f['lines']))[page*8:page*8+8]:
+    pending=view.get('workflow',{}).get('pendingIndices',list(range(len(f['lines']))))
+    selected=f.get('selectedIndices',pending);stage=f.get('stage','configure')
+    indices=selected if stage=='configure' else pending
+    if stage=='select':lines += ['Split receipt — tick the items for this key-in, then Continue.','']
+    if stage=='remaining':lines += ['These items are still unassigned. Categorise them, split again, or scrap them.','']
+    for i in indices[page*8:page*8+8]:
+        line=f['lines'][i]
         quantity='?' if line['quantityMilli'] is None else f"{line['quantityMilli']/1000:g}"
-        lines.append(f"{i+1}. {line['name']} ×{quantity} — {money(line['amountSen'])}\n   ({label(o,'category',line['category']) or 'Choose category'} · {label(o,'brand',line['brand'])})")
+        mark=('☑ ' if i in selected else '☐ ') if stage=='select' else ''
+        category=f" ({label(o,'category',line['category'])})" if stage=='configure' else ''
+        lines.append(f"{mark}{i+1}. {line['name']} ×{quantity} — {money(line['amountSen'])}{category}")
     if not f['lines']: lines.append('Parsing receipt… You can stash it now, or reopen Categorise when the reading is ready.')
     lines += ['',f"Total: {money(r['totalSen'])}",f"Funding: {label(o,'funding',f['paidBy'])} · Method: {label(o,'method',f['paymentMethod'])}",f"Invoice: {r.get('receiptNo') or '—'} · {'photo attached' if r.get('photoAttached') else 'photo pending'}",r['ref']]
+    if selected:
+        brands={f['lines'][i]['brand'] for i in selected}
+        lines.append('Brand for this group: '+(label(o,'brand',next(iter(brands))) if len(brands)==1 else 'Mixed — choose one Brand for this group'))
+        lines.append('Selected: '+money(sum(f['lines'][i]['amountSen'] or 0 for i in selected)))
+    if view.get('workflow',{}).get('postedSen') or view.get('workflow',{}).get('scrappedSen'):
+        lines.append(f"Already booked: {money(view['workflow']['postedSen'])} · Scrapped: {money(view['workflow']['scrappedSen'])}")
     if r.get('reviewFlags'): lines.append('Review: '+'; '.join(r['reviewFlags'])[:400])
     if view.get('readingChanged'):lines.append('The reading changed; earlier category choices were reset. Review again.')
     for c in view.get('duplicates',[])[:2]: lines.append(f"Possible same paper as {c['ref']}: {', '.join(c['reasons'])}. Ask Hermes to explain/reuse/split before saving.")
     if view.get('matches'):lines.append('Existing transactions may match. Link those instead of posting the purchase again; ask Hermes to review the evidence.')
-    if view.get('readOnly'):lines.append('Already processed; no second full-receipt posting. Ask Hermes for a NEW brand allocation or to link existing entries.')
+    if view.get('readOnly'):lines.append('No further unassigned items can be booked from this card. Original receipt preserved.')
     return '\n'.join(lines)[:3900]
 
 def button(name, data):
@@ -39,18 +53,34 @@ def button(name, data):
 
 def keyboard(view,page=0):
     rid=view['receipt']['id'];prefix=f'vf:{rid}:';f,o=view['form'],view['options'];s=stamp(view)
+    annotation=view.get('workflow',{}).get('annotation')
+    annotation_row=[[{'text':'View annotated Drive copy','url':annotation['url']}]] if annotation else []
     if view.get('readOnly'):
-        return [[button('Review allocations / link existing',prefix+'help')],[button('View scan',f'vr:{rid}:scan')]]
+        return [[button('Review allocations / link existing',prefix+'help')],[button('View scan',f'vr:{rid}:scan')]]+annotation_row
     rows=[]
-    for i,l in list(enumerate(f['lines']))[page*8:page*8+8]:
-        rows.append([button(f"{i+1}. {l['name'][:22]} · {label(o,'category',l['category'])}",prefix+f'pick:c:{i}:{page}'),button(label(o,'brand',l['brand']),prefix+f'pick:b:{i}:{page}')])
-    pages=(len(f['lines'])+7)//8
-    if pages>1:rows.append([button(f'Lines {p*8+1}–{min((p+1)*8,len(f["lines"]))}',prefix+f'page:{p}') for p in range(pages)])
-    rows.append([button('All categories',prefix+f'pick:c:a:{page}'),button('All brands',prefix+f'pick:b:a:{page}')])
+    pending=view.get('workflow',{}).get('pendingIndices',list(range(len(f['lines']))));selected=f.get('selectedIndices',pending);stage=f.get('stage','configure')
+    indices=selected if stage=='configure' else pending
+    for i in indices[page*8:page*8+8]:
+        l=f['lines'][i]
+        if stage=='select':rows.append([button(f"{'☑' if i in selected else '☐'} {i+1}. {l['name'][:30]} · {money(l['amountSen'])}",prefix+f'tick:{i}:{page}:{s}')])
+        elif stage=='configure':rows.append([button(f"{i+1}. {l['name'][:24]} · {label(o,'category',l['category'])}",prefix+f'pick:c:{i}:{page}')])
+    pages=(len(indices)+7)//8
+    if pages>1:rows.append([button(f'Page {p+1}',prefix+f'page:{p}') for p in range(pages)])
+    if stage=='remaining':
+        rows += [[button('Categorise remaining',prefix+f'cont:{s}'),button('Split remaining',prefix+f'split:{s}')],[button('Scrap remaining',prefix+f'discard:{s}')]]
+        return rows+annotation_row+[[button('View scan',f'vr:{rid}:scan')]]
+    if stage=='select':
+        rows += [[button('Select all',prefix+f'all:{s}'),button('Clear',prefix+f'split:{s}')],[button('Continue → Categorise',prefix+f'cont:{s}')],[button('Scrap selected',prefix+f'discard:{s}'),button('Cancel',prefix+'cancel')]]
+        return rows
+    group_brands={f['lines'][i]['brand'] for i in selected}
+    brand_label=label(o,'brand',next(iter(group_brands))) if len(group_brands)==1 else 'Choose'
+    rows.append([button('All categories',prefix+f'pick:c:a:{page}'),button('Brand: '+brand_label,prefix+f'pick:b:a:{page}')])
     rows.append([button('Funding',prefix+f'pick:f:a:{page}'),button('Method',prefix+f'pick:m:a:{page}')])
     if o.get('split') and any(l['brand']=='SHARED' for l in f['lines']):rows.append([button('Shared split %',prefix+f'pick:s:a:{page}')])
     rows.append([button('✅ Save (preview)',prefix+f'save:{s}'),button('Cancel',prefix+'cancel')])
     rows.append([button('Edit reading',f'vr:{rid}:edit'),button('View scan',f'vr:{rid}:scan')])
+    rows.append([button('Split receipt',prefix+f'split:{s}')])
+    rows += annotation_row
     if view.get('matches') or view.get('duplicates'):rows.append([button('Explain duplicate / Link existing',prefix+'help')])
     if view.get('duplicates'):rows.extend(duplicate_keyboard(rid))
     return rows
@@ -104,10 +134,18 @@ async def callback(adapter,query,data,m):
         elif action.startswith('why:'):
             reason=action.split(':')[1]
             request={'brand':'I resent this paper for another brand allocation. Inspect existing allocations and remaining balance. If none are posted, open the native Categorise card to configure all brands together; otherwise prepare only NEW remaining allocation, append=true and a fresh exact preview.', 'link':'I resent this paper to attach receipt evidence to existing entries. Find matching transactions, show each ID/date/vendor/amount and reasons; ask explicit confirmation of exact rows before linking. Do NOT post new spending.', 'different':'I believe this is a different purchase. Check the same-photo/invoice/date/vendor/total evidence and explain conflicts. Do not treat identical evidence as proof of another purchase or post it automatically; collect the correct distinct receipt or clarification.'}[reason]
+            if reason=='brand':request='I resent this paper for another brand allocation. Inspect the native receipt form and remaining-item tracking. For tracked receipts show the remaining-item card, then Split receipt for the next group; never use legacy append or re-book consumed items. Only older untracked receipts may need explicitly previewed append allocations.'
             await handoff(adapter,query,rid,request)
         elif action=='help':
             await handoff(adapter,query,rid,'Explain duplicate receipt evidence and matching transactions. Ask why: another brand allocation, attach existing entries, or different purchase. Review prior allocations and remaining total. Give real choice buttons.')
         elif action.startswith('page:'):await show(query,view,int(action.split(':')[1]))
+        elif action.startswith(('split:','all:','tick:','cont:')):
+            parts=action.split(':');kind=parts[0]
+            if parts[-1]!=stamp(view):raise ValueError('stale')
+            field='stage' if kind=='cont' else 'toggle' if kind=='tick' else 'selection'
+            value='configure' if kind=='cont' else int(parts[1]) if kind=='tick' else view['workflow']['pendingIndices'] if kind=='all' else []
+            updated=await call('PATCH',body={'version':view['form']['version'],'ledgerVersion':view['workflow']['version'],'field':field,'value':value})
+            await show(query,updated,int(parts[2]) if kind=='tick' else 0)
         elif action.startswith('pick:'):
             _,field,index,page=action.split(':')
             await query.edit_message_text(text='Choose from current Vista settings. '+('Applies to ALL lines.' if index=='a' else f'Line {int(index)+1} only.'),reply_markup=markup(picker(view,field,index,int(page))))
@@ -115,7 +153,7 @@ async def callback(adapter,query,data,m):
             _,field,index,option,s=action.split(':')
             if s!=stamp(view):raise ValueError('stale')
             options=choices(view,field);value=options[int(option)][1]
-            body={'version':view['form']['version'],'field':{'c':'category','b':'brand','f':'funding','m':'method','s':'split'}[field],'value':value}
+            body={'version':view['form']['version'],'ledgerVersion':view.get('workflow',{}).get('version',0),'field':{'c':'category','b':'brand','f':'funding','m':'method','s':'split'}[field],'value':value}
             if index!='a':body['lineIndex']=int(index)
             await show(query,await call('PATCH',body=body),0 if index=='a' else int(index)//8)
         elif action.startswith('save:'):
@@ -126,17 +164,27 @@ async def callback(adapter,query,data,m):
                 lines.append(f"{money(e['amountSen'])} · {label(view['options'],'category',e['category'])} · {e['brand']}\nFunding: {label(view['options'],'funding',e['paidBy'])} · Method: {label(view['options'],'method',e.get('paymentMethod'))}")
                 if e['brandId'] is None:lines.append(f"Shared split: {e['foodSplitPct']}% {view['options']['split']['firstBrand']}")
             lines.append('Total: '+money(preview['entriesTotalSen']))
+            if preview.get('remainingIndices'):lines.append(f"{len(preview['remainingIndices'])} unselected items remain. They will be shown after confirmation; this saves ONLY the selected group.")
             if preview.get('matches') or view.get('duplicates'):lines.append('WARNING: possible existing purchase/evidence. If this is the SAME purchase, link/reuse instead; do not confirm a duplicate expense.')
             await query.edit_message_text(text='\n\n'.join(lines)[:3900],reply_markup=markup([[button('✅ Confirm Save',f'vf:{rid}:post:{preview["confirmationId"]}')],[button('Back',f'vf:{rid}:page:0'),button('Cancel',f'vf:{rid}:cancel')]]+([[button('Review / Link existing',f'vf:{rid}:help')]] if preview.get('matches') or view.get('duplicates') else [])))
         elif action.startswith('post:'):
             result=await call('POST','/post',{'confirmationId':action.split(':')[1]})
-            await query.edit_message_text(text=f"Saved {len(result.get('expenseIds',[]))} Vista entries. {view['receipt']['ref']} · {money(view['receipt']['totalSen'])}. Receipt retained in Drive.",reply_markup=markup([[button('View scan',f'vr:{rid}:scan')]]))
+            next_view=result['next']
+            await query.edit_message_text(text=f"✅ Selected group saved as {len(result.get('expenseIds',[]))} Vista entries.\n\n"+text(next_view),reply_markup=markup(keyboard(next_view)))
+        elif action.startswith('discard:'):
+            if action.split(':')[1]!=stamp(view):raise ValueError('stale')
+            preview=await call('POST','/scrap-preview')
+            body='Scrap these items? They will not be booked. Original receipt stays unchanged.\n\n'+'\n'.join(f"{i+1}. {l['name']} — {money(l['amountSen'])}" for i,l in zip(preview['indices'],preview['lines']))
+            await query.edit_message_text(text=body[:3900],reply_markup=markup([[button('Confirm scrap',f'vf:{rid}:scrap:{preview["confirmationId"]}')],[button('Back',f'vf:{rid}:page:0'),button('Cancel',f'vf:{rid}:cancel')]]))
+        elif action.startswith('scrap:'):
+            result=await call('POST','/scrap',{'confirmationId':action.split(':')[1]})
+            await query.edit_message_text(text='Selected items scrapped; no expense posted for them.\n\n'+text(result['next']),reply_markup=markup(keyboard(result['next'])))
         else:return False
         return True
     except Exception as error:
         # Do not expose raw transport/provider errors or credentials.
         message='The form changed or an option is unavailable. Reopen Categorise; nothing new was posted.'
-        if action.startswith('post:'):message='Could not confirm the save result. Reopen Categorise to check its current status before retrying.'
+        if action.startswith(('post:','scrap:')):message='Could not confirm the result. Reopen Categorise to check its current status before retrying.'
         if isinstance(error,m.VistaError) and 'FORM_INCOMPLETE' in str(error):message=str(error)[:180]
         if isinstance(error,m.VistaError) and 'FORM_INCOMPLETE' in str(error) and 'Something went wrong' in message:
             message='Choose a category and brand for every line, and review missing receipt fields, then Save again. Nothing was posted.'
