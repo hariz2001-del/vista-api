@@ -33,6 +33,13 @@ class Bridge:
         self.calls.append((method,path,body,user))
         return {'duplicate':self.duplicate, 'duplicateReason':'identical image bytes', 'receipt':{'id':'11111111-1111-4111-8111-111111111111','ref':'R-111111','status':'UPLOADED','expenses':[]}}
 class ReceiptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discovery_metadata_does_not_masquerade_as_enabled_skills(self):
+        spec=importlib.util.spec_from_file_location('enable_ops',root/'enable-operations.py')
+        ops=importlib.util.module_from_spec(spec);spec.loader.exec_module(ops)
+        original='platform_toolsets:\n  telegram:\n    - memory\n    - vista\nmcp_servers:\n  vista: {}\nknown_builtin_toolsets:\n  tools:\n    - skills\n'
+        updated=ops.enable(original)
+        self.assertIn('    - vista\n    - skills\nmcp_servers:',updated)
+        self.assertEqual(ops.enable(updated),updated)
     async def test_business_questions_get_current_capabilities_without_erasing_context(self):
         a=Adapter(); event=types.SimpleNamespace(channel_prompt='Existing context')
         result=m.business_context(a,event)
