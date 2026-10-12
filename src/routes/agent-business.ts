@@ -127,11 +127,19 @@ export async function agentBusinessRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/agent/queue/:id/finish', write, async request => {
     const body = z.object({ leaseToken: z.string().datetime(), error: z.string().max(1000).optional() }).parse(request.body)
     const jobId = id.parse(request.params.id)
-    const job = await request.db.receiptJob.findUnique({ where: { id: jobId } })
+    return request.db.$transaction(async tx => {
+    const job = await tx.receiptJob.findUnique({ where: { id: jobId } })
     if (!job || job.status !== 'RUNNING' || job.leaseUntil?.toISOString() !== body.leaseToken || job.leaseUntil < new Date()) throw conflict('agent:LEASE_STALE')
-    const result = await request.db.receiptJob.updateMany({ where: { id: jobId, status: 'RUNNING', leaseUntil: new Date(body.leaseToken) }, data: { status: body.error ? job.attempts >= 5 ? 'FAILED' : 'PENDING' : 'DONE', error: body.error ?? null, leaseUntil: null } })
+    await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id = ${job.receiptId} AND business_id = ${request.businessId} FOR UPDATE`
+    const receipt = await tx.receiptDocument.findUnique({ where: { id: job.receiptId } })
+    const workflow = (receipt?.extracted as any)?._lineWorkflow
+    const needsAnnotation = !body.error && workflow?.decisions.some((d: any) => d.state !== 'pending') && workflow.annotation?.version !== workflow.version
+    // An allocation can arrive during a running OCR/annotation lease. Do not
+    // lose that newer work by marking the old generation DONE.
+    const result = await tx.receiptJob.updateMany({ where: { id: jobId, status: 'RUNNING', leaseUntil: new Date(body.leaseToken) }, data: { status: body.error || needsAnnotation ? job.attempts >= 5 ? 'FAILED' : 'PENDING' : 'DONE', error: body.error ?? (needsAnnotation ? 'Newer allocation annotation pending.' : null), leaseUntil: null } })
     if (!result.count) throw conflict('agent:LEASE_STALE')
     return { saved: true }
+    })
   })
 
   app.get('/agent/reconciliation', owner, async request => {

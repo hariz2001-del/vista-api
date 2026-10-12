@@ -57,6 +57,8 @@ def keyboard(view,page=0):
     annotation_row=[[{'text':'View annotated Drive copy','url':annotation['url']}]] if annotation else []
     if view.get('readOnly'):
         return [[button('Review allocations / link existing',prefix+'help')],[button('View scan',f'vr:{rid}:scan')]]+annotation_row
+    if not f['lines']:
+        return [[button('Refresh reading',f'vr:{rid}:key'),button('Stash for later',f'vr:{rid}:stash')],[button('Edit receipt',f'vr:{rid}:edit'),button('View scan',f'vr:{rid}:scan')]]
     rows=[]
     pending=view.get('workflow',{}).get('pendingIndices',list(range(len(f['lines']))));selected=f.get('selectedIndices',pending);stage=f.get('stage','configure')
     indices=selected if stage=='configure' else pending
@@ -65,7 +67,11 @@ def keyboard(view,page=0):
         if stage=='select':rows.append([button(f"{'☑' if i in selected else '☐'} {i+1}. {l['name'][:30]} · {money(l['amountSen'])}",prefix+f'tick:{i}:{page}:{s}')])
         elif stage=='configure':rows.append([button(f"{i+1}. {l['name'][:24]} · {label(o,'category',l['category'])}",prefix+f'pick:c:{i}:{page}')])
     pages=(len(indices)+7)//8
-    if pages>1:rows.append([button(f'Page {p+1}',prefix+f'page:{p}') for p in range(pages)])
+    if pages>1:
+        navigation=[]
+        if page>0:navigation.append(button('← Previous',prefix+f'page:{page-1}'))
+        if page+1<pages:navigation.append(button('Next →',prefix+f'page:{page+1}'))
+        rows.append(navigation)
     if stage=='remaining':
         rows += [[button('Categorise remaining',prefix+f'cont:{s}'),button('Split remaining',prefix+f'split:{s}')],[button('Scrap remaining',prefix+f'discard:{s}')]]
         return rows+annotation_row+[[button('View scan',f'vr:{rid}:scan')]]
@@ -78,7 +84,7 @@ def keyboard(view,page=0):
     rows.append([button('Funding',prefix+f'pick:f:a:{page}'),button('Method',prefix+f'pick:m:a:{page}')])
     if o.get('split') and any(l['brand']=='SHARED' for l in f['lines']):rows.append([button('Shared split %',prefix+f'pick:s:a:{page}')])
     rows.append([button('✅ Save (preview)',prefix+f'save:{s}'),button('Cancel',prefix+'cancel')])
-    rows.append([button('Edit reading',f'vr:{rid}:edit'),button('View scan',f'vr:{rid}:scan')])
+    rows.append([button('Edit receipt',f'vr:{rid}:edit'),button('View scan',f'vr:{rid}:scan')])
     rows.append([button('Split receipt',prefix+f'split:{s}')])
     rows += annotation_row
     if view.get('matches') or view.get('duplicates'):rows.append([button('Explain duplicate / Link existing',prefix+'help')])

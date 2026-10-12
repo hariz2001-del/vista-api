@@ -81,7 +81,7 @@ async def photo(adapter, message, event, data):
             warning = f"Already saved: {result.get('duplicateReason', 'same receipt')}. Existing entries RM {amount:.2f}. You can add a brand allocation or link existing expenses; I will not duplicate the purchase.\n"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton('Categorise', callback_data=f'vr:{rid}:key'), InlineKeyboardButton('Stash for later', callback_data=f'vr:{rid}:stash')],
-            [InlineKeyboardButton('Edit reading', callback_data=f'vr:{rid}:edit'), InlineKeyboardButton('View scan', callback_data=f'vr:{rid}:scan')],
+            [InlineKeyboardButton('Edit receipt', callback_data=f'vr:{rid}:edit'), InlineKeyboardButton('View scan', callback_data=f'vr:{rid}:scan')],
             [InlineKeyboardButton('Split receipt', callback_data=f'vr:{rid}:split')],
         ])
         if result.get('duplicate'):

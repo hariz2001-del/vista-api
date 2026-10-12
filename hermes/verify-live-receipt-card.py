@@ -38,7 +38,7 @@ async def main():
     view=m._call('GET',f'/agent/receipts/{RID}/form',telegram_user='304348232')
     await form.callback(a,q,f'vf:{RID}:save:{form.stamp(view)}',m)
     assert q.edits and 'NOT saved yet' in q.edits[-1]['text'], a.notices
-    labels=[b.text for row in form.keyboard(view) for b in row if 'text' in b]
+    labels=[b['text'] for row in form.keyboard(view) for b in row if 'text' in b]
     assert sum(x.startswith('Brand:') for x in labels)==1
     denied=Query('999999999999');await transport.callback(a,denied,f'vr:{RID}:key')
     assert not denied.edits

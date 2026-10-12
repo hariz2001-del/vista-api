@@ -13,6 +13,10 @@ def call(method,body):
     if not result.get('ok'):raise SystemExit('Telegram rejected the name change.')
     return result['result']
 call('setMyName',{'name':'Chopper'})
+call('setMyDescription',{'description':'I’m Chopper, your Sarang business operations assistant. Send receipts to categorise, split by item, or stash for later. Ask about sales, staff rosters, stock, costs and reports. Vista is the source of truth; expenses require your confirmation.'})
+call('setMyShortDescription',{'short_description':'Chopper — your Sarang assistant for receipts, sales, staff rosters and stock.'})
 bot=call('getMe',{})
 assert bot['first_name']=='Chopper'
+assert 'Chopper' in call('getMyDescription',{})['description']
+assert 'Chopper' in call('getMyShortDescription',{})['short_description']
 print({'name':bot['first_name'],'username':bot.get('username'),'verified':True})

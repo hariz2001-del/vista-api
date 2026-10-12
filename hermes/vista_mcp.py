@@ -481,7 +481,7 @@ def _run(name: str, args: dict) -> object:
         import receipt_form
         view=_call('GET',f'/agent/receipts/{rid}/form',telegram_user=user)
         text = receipt_form.text(view)+'\n\nTap Categorise to set each line’s category and brand. Nothing has been posted.'
-        keyboard = [[{'text': label, 'callback_data': f'vr:{rid}:{action}'} for label, action in row] for row in [[('Categorise', 'key'), ('Stash for later', 'stash')], [('Edit reading', 'edit'), ('View scan', 'scan')]]]
+        keyboard = [[{'text': label, 'callback_data': f'vr:{rid}:{action}'} for label, action in row] for row in [[('Categorise', 'key'), ('Stash for later', 'stash')], [('Edit receipt', 'edit'), ('View scan', 'scan')]]]
         keyboard.append([{'text':'Split receipt','callback_data':f'vr:{rid}:split'}])
         if view.get('duplicates'):
             text += '\nWhy was the same receipt sent again? Choose below; no accounting decision has been made.'
@@ -552,7 +552,7 @@ def _run(name: str, args: dict) -> object:
     if name == "vista_receipt_choices":
         step = args["step"]
         static = {
-            "start": ("What would you like to do with this receipt?", ["Categorise", "Stash for later", "Edit reading", "View scan"]),
+            "start": ("What would you like to do with this receipt?", ["Categorise", "Stash for later", "Edit receipt", "View scan"]),
             "review": ("Is this reading correct?", ["Continue", "Edit reading", "Adjust crop", "Stash for later"]),
             "edit": ("What would you like to edit?", ["Line items", "Total / tax / discount", "Vendor / date / receipt number", "Back"]),
             "confirm": ("Post these exact entries to Vista?", ["Post to Vista", "Change details", "Edit line items", "Stash for later"]),

@@ -137,9 +137,9 @@ it('isolates concurrent actors and binds exclusion confirmation to its original 
   const other = (await s.call('GET', s.path, undefined, '222')).json()
   expect((await s.call('PATCH', s.path, { version: other.form.version, ledgerVersion: other.workflow.version, field: 'selection', value: [0] }, '222')).statusCode).toBe(200)
   const second = (await s.call('POST', s.path + '/preview', {}, '222')).json()
-  // Other actor's draft changed receipt.updatedAt: the first token is stale.
-  expect((await s.call('POST', s.path + '/post', { confirmationId: first.confirmationId })).statusCode).toBe(409)
-  expect((await s.call('POST', s.path + '/post', { confirmationId: second.confirmationId }, '222')).statusCode).toBe(200)
+  // Another draft is harmless; the first confirmation atomically claims items.
+  expect((await s.call('POST', s.path + '/post', { confirmationId: first.confirmationId })).statusCode).toBe(200)
+  expect((await s.call('POST', s.path + '/post', { confirmationId: second.confirmationId }, '222')).statusCode).toBe(409)
   expect((await s.call('POST', s.path + '/post', { confirmationId: first.confirmationId })).statusCode).toBe(409)
   const scrap = await s.ok('POST', s.path + '/scrap-preview')
   expect((await s.call('POST', s.path + '/scrap', { confirmationId: scrap.confirmationId }, '222')).statusCode).toBe(404)
@@ -156,4 +156,17 @@ it('renders highlights and straight exclusions on a separate scan with a brand l
   const pixel = (x: number, y: number) => [...raw.data.subarray((y * raw.info.width + x) * 3, (y * raw.info.width + x) * 3 + 3)]
   expect(pixel(80, 40)[1]).toBeGreaterThan(pixel(80, 40)[0]!)
   expect(pixel(80, 140)[0]).toBeGreaterThan(pixel(80, 140)[1]!)
+})
+it('retains newer annotation work when allocation arrives during a worker lease', async () => {
+  const s = await setup()
+  const lease = await s.ok('POST', '/agent/queue/claim', {})
+  expect(lease.job.receiptId).toBe(s.rid)
+  await s.set('selection', [0])
+  const preview = await s.ok('POST', s.path + '/preview')
+  await s.ok('POST', s.path + '/post', { confirmationId: preview.confirmationId })
+  await s.ok('POST', `/agent/queue/${lease.job.id}/finish`, { leaseToken: lease.leaseToken })
+  const job = await prisma.receiptJob.findUniqueOrThrow({ where: { id: lease.job.id } })
+  expect(job.status).toBe('PENDING'); expect(job.attempts).toBe(1)
+  expect(job.error).toContain('annotation pending')
+  expect(await prisma.expense.count({ where: { businessId: s.b.businessId } })).toBe(1)
 })

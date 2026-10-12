@@ -6,13 +6,13 @@ import { DomainError, conflict, notFound } from '../errors.ts'
 import { formEntries, initialForm, lineWorkflow, readingHash, selectedIndices, type FormOptions, type ReceiptForm } from '../receipt-form.ts'
 import type { Tx } from '../db.ts'
 import { createExpense, expenseBody } from './rms.ts'
-import { previewToken } from './agent.ts'
 import { annotateReceipt } from '../integrations/receipt-annotation.ts'
 
 const ID = z.string().uuid()
 const guard = { preHandler: requireAgent('BOOKKEEPER') }
 const fieldMap = { merchant: 'Expense.vendor', invoice: 'Expense.receiptNo (supplier invoice, not internal ID)', date: 'Expense.businessDate', funding: 'Expense.paidBy', method: 'Expense.paymentMethod', category: 'Expense.category', brand: 'Expense.brandId', split: 'Expense.foodSplitPct; allocated amount snapshots via RMS rules', lines: 'ExpenseItem.name / quantityMilli / unit / unitPriceSen / totalSen', receipt: 'Expense.receiptDocumentId → ReceiptDocument → original/scan Drive IDs' }
 const json = (v: unknown) => JSON.parse(JSON.stringify(v))
+const expenseSnapshot = (expenses: Array<{ id: string; amountSen: number; brandId: string | null }>) => expenses.map(e => ({ id: e.id, amountSen: e.amountSen, brandId: e.brandId })).toSorted((a, b) => a.id.localeCompare(b.id))
 async function queueAnnotation(tx: Tx, id: string, businessId: string) {
   const existing = await tx.receiptJob.findUnique({ where: { receiptId: id } })
   if (existing?.status === 'RUNNING' && existing.leaseUntil && existing.leaseUntil > new Date()) return
@@ -97,7 +97,7 @@ export async function agentReceiptFormRoutes(app: FastifyInstance) {
     if (readOnly) throw conflict('agent:RECEIPT_DONE')
     const entries = formEntries(form, receipt, choices), append = receipt.expenses.length > 0
     const preview = await invoke(request, 'POST', `/agent/receipts/${id}/preview`, { entries, append })
-    const confirmation = await request.db.agentAction.create({ data: { businessId: request.businessId, agentUserId: request.agentUser!.id, action: 'receipt.form.previewed', entityType: 'receipt', entityId: id, detail: json({ entries, append, previewToken: preview.previewToken, version: form.version, readingHash: form.readingHash, ledgerVersion: ledger.version, indices: selectedIndices(form), choices }) } })
+    const confirmation = await request.db.agentAction.create({ data: { businessId: request.businessId, agentUserId: request.agentUser!.id, action: 'receipt.form.previewed', entityType: 'receipt', entityId: id, detail: json({ entries, append, previewToken: preview.previewToken, version: form.version, readingHash: form.readingHash, ledgerVersion: ledger.version, indices: selectedIndices(form), choices, expenseSnapshot: expenseSnapshot(receipt.expenses) }) } })
     return { ...preview, selectedIndices: selectedIndices(form), remainingIndices: ledger.decisions.flatMap((d, i) => d.state === 'pending' && !selectedIndices(form).includes(i) ? [i] : []), confirmationId: confirmation.id.toString(), fieldMap, matches: (await invoke(request, 'GET', `/agent/receipts/${id}/matches`)).matches }
   })
   app.post<{ Params: { id: string } }>('/agent/receipts/:id/form/post', guard, async request => {
@@ -111,7 +111,9 @@ export async function agentReceiptFormRoutes(app: FastifyInstance) {
       if (readOnly) throw conflict('agent:RECEIPT_DONE')
       if (form.version !== saved.version || form.readingHash !== saved.readingHash || ledger.version !== saved.ledgerVersion || !isDeepStrictEqual(choices, saved.choices)) throw conflict('agent:FORM_STALE')
       const entries = saved.entries.map((e: unknown) => expenseBody.parse(e))
-      if (!isDeepStrictEqual(formEntries(form, receipt, choices), entries) || previewToken(receipt, { entries, append: saved.append }) !== saved.previewToken) throw conflict('agent:PREVIEW_STALE')
+      // Financial/draft snapshots, not updatedAt: background annotation uploads
+      // must not invalidate an otherwise identical human-reviewed selection.
+      if (!isDeepStrictEqual(formEntries(form, receipt, choices), entries) || !isDeepStrictEqual(expenseSnapshot(receipt.expenses), saved.expenseSnapshot)) throw conflict('agent:PREVIEW_STALE')
       const owner = await tx.user.findFirst({ where: { role: 'OWNER', isActive: true }, orderBy: { createdAt: 'asc' } })
       if (!owner) throw conflict('agent:NO_OWNER')
       const ids: string[] = []
