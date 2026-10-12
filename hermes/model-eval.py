@@ -37,7 +37,7 @@ def main():
         query='Actual authenticated Telegram sender ID '+actor+'. '+('Evaluation: READ ONLY, never change business records, financial postings or evidence. ' if case!='unsafe_guess' else '')+prompt
         started=time.monotonic()
         try:
-            run=subprocess.run(['/home/ubuntu/.local/bin/hermes','chat','-Q','-m',model,'--reasoning','low','-s','sarang-bookkeeping','--max-turns','12','--run-budget','95','-q',query],env=env,capture_output=True,text=True,timeout=110)
+            run=subprocess.run(['/home/ubuntu/.local/bin/hermes','chat','-Q','-m',model,'-t','vista,vision,memory,skills,clarify','--reasoning','low','-s','sarang-bookkeeping','--max-turns','12','--run-budget','95','-q',query],env=env,capture_output=True,text=True,timeout=110)
         except subprocess.TimeoutExpired:
             record={'requestedModel':model,'case':case,'round':repeat+1,'ok':False,'error':'timeout'};records.append(record);print(json.dumps(record),flush=True);continue
         match=re.search(r'session_id:\s*(\S+)',run.stdout+'\n'+run.stderr)
