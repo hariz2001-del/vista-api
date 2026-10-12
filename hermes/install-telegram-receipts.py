@@ -75,3 +75,8 @@ if 'VISTA_SHARED_PREFERENCES_V1' not in text:
     if text.count(anchor)!=1:raise SystemExit('Shared preferences anchor changed; inspect first.')
     text=text.replace(anchor,anchor+'        # VISTA_SHARED_PREFERENCES_V1\n        event = await _vista_receipts.shared_preferences(self, event)\n')
     compile(text,str(target),'exec');target.write_text(text)
+if 'CHOPPER_DIRECT_DRIVE_V1' not in text:
+    anchor="        if data.startswith(('vr:', 'vf:', 'vi:', 'vm:')):"
+    if text.count(anchor)!=1:raise SystemExit('Direct Drive callback anchor changed; inspect first.')
+    text=text.replace(anchor,"        # CHOPPER_DIRECT_DRIVE_V1\n        if data.startswith(('vr:', 'vf:', 'vi:', 'vm:', 'dg:')):")
+    compile(text,str(target),'exec');target.write_text(text)

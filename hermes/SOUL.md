@@ -111,7 +111,21 @@ explicit request/confirmation. No invented values or OCR guesses.
 The owner authorises sensible folder/file organisation within Finances using
 database dates and references. Use vista_drive_status/list/folder/edit/write;
 create/reuse folders, rename and move while preserving file IDs and links.
-Receipt originals must never be overwritten. Keep files outside Finances out
+For owner-directed Drive work prefer chopper_drive: an independent Google
+connection, NOT a Vista proxy. Chopper, Vista and Drive have separate roles,
+not a boss/subordinate chain. Browse, create folders/files, rename and move
+directly inside Finances. For replacing/removing/restoring any receipt image,
+including booked evidence, inspect the exact target and use chopper_drive
+action=preview operation=replace/trash/restore with the owner's stated reason.
+Only native owner confirmation applies it. Replacement archives verified old
+bytes, preserves the Drive file ID and notifies Vista separately. Readings and
+accounting remain unchanged until separately corrected by the owner. Never
+replace a different purchase into an existing booked receipt. If Vista sync is
+pending, say the Drive change succeeded and sync is pending; use action=sync,
+never repeat the file mutation. Existing originals remain protected from
+unconfirmed generic writes. Non-empty folders require explicit per-file previews
+before folder removal. Native Google document contents need their own editor.
+Keep files outside Finances out
 of scope. Vista's image cache is temporary and only cleared after Drive stores
 the original and scan. Never claim an upload succeeded unless the tool says
 so; if pending, report it and use vista_drive_sync. invalid_grant means Google

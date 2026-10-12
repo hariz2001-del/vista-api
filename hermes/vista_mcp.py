@@ -448,6 +448,15 @@ for _definition in TOOLS:
 
 TOOLS.append(_tool('vista_receipt_form', 'Read live Vista receipt categorisation card and show its real line category/brand, funding, method, Save/Cancel buttons in the original receipt chat. Use after editing a reading or when the owner asks to categorise. No posting; native Confirm Save is required.', {'receipt_id': {'type':'string'}, 'show_buttons': {'type':'boolean'}}, ['receipt_id']))
 
+TOOLS.append(_tool('chopper_drive', 'OWNER direct Google Drive connection, independent of Vista proxy, scoped to Finances. status/list/get/read/folder/edit manage files by actual Google file ID. preview operation=replace/trash/restore sends owner-native confirmation; the model CANNOT confirm. Replacement requires inspected local_path under profile cache and archives old bytes, preserving the file ID. Never swap a different purchase into booked evidence. Trashing booked evidence is permitted only on explicit owner confirmation; accounting stays unchanged. pending/sync recover separate durable Vista notifications, never repeat the Drive mutation. Root/shortcuts/outside Finances are blocked. Native Google document content needs its document editor.', {
+    'action': {'type':'string','enum':['status','list','get','read','folder','write','edit','preview','pending','sync']},
+    'file_id': {'type':'string','description':'Actual Google Drive file ID; not an R-reference or receipt UUID'},
+    'parent_id': {'type':'string'}, 'page_token': {'type':'string'}, 'trashed': {'type':'boolean'},
+    'name': {'type':'string'}, 'description': {'type':'string'},
+    'operation': {'type':'string','enum':['replace','trash','restore']},
+    'local_path': {'type':'string'}, 'mime_type': {'type':'string'}, 'text': {'type':'string'}, 'reason': {'type':'string'}, 'show_buttons': {'type':'boolean'},
+}, ['action']))
+
 TOOLS.append(_tool('vista_receipt_annotate', 'Maintain a SEPARATE annotated Drive scan showing posted items by brand and crossed-out scrapped items. Never changes receipt text, amounts, originals or accounting. Inspect the actual cropped scan with vision before supplying normalized scan regions per ZERO-BASED line index. Use reading_hash from vista_receipt_form. Omit regions to retry upload only. Unknown positions stay unmarked, not guessed.', {'receipt_id':{'type':'string'},'reading_hash':{'type':'string'},'regions':{'type':'array','items':{'type':'object','properties':{k:{'type':'integer' if k=='index' else 'number'} for k in ('index','x','y','width','height')},'required':['index','x','y','width','height']}}}, ['receipt_id']))
 
 def _receipt_card_send(rid, view, user):
@@ -502,6 +511,17 @@ def _bulk_notify(user,receipt_id=None):
 
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name == 'chopper_drive':
+        import chopper_drive
+        return chopper_drive.run(sys.modules[__name__], user or _default_user(), args)
+    args = dict(args)
+    for field in ('receipt_id', 'canonical_id'):
+        if args.get(field):
+            value = str(args[field])
+            if re.fullmatch(r'R-[A-Fa-f0-9]{6}', value):
+                args[field] = _call('GET', '/agent/receipts/resolve?ref=' + value, telegram_user=user)['id']
+            elif not re.fullmatch(r'[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}', value):
+                raise VistaError('NON_RETRYABLE invalid receipt ID: use a full UUID or exact R-XXXXXX reference. Look up the target; do not repeat this call.')
     if name=='vista_preferences':
         if args['action']=='list':return _call('GET','/agent/preferences',telegram_user=user)
         return _call('POST','/agent/preferences',{k:args[k] for k in ('action','key','value') if k in args},user)

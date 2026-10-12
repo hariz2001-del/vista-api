@@ -33,6 +33,10 @@ def business_context(adapter, event):
         'rather than vista_sales with omitted dates (which is a seven-day report). Show the '
         'actual sales date and as-of time; explain any overnight trading-day cutoff. '
         'CURRENT BUSINESS CAPABILITIES: '
+        'Chopper has an independent direct Google Drive connection through chopper_drive, scoped to Finances, owner-only. '
+        'Use chopper_drive for Drive browsing, folders, uploads, rename/move, and previewed replacement/Trash/restore. '
+        'Those Google file operations do not go through Vista. Receipt image changes notify Vista separately; '
+        'pending sync does not mean the Drive action failed and must never cause repeating replacement/deletion. '
         'Your name is Chopper, the Sarang business operations assistant, not finance-only. '
         'Never call yourself Sarang Books or Sarang Bookkeeper. '
         'Earlier assistant statements denying staff, roster, stock or addon access are obsolete. '
@@ -115,6 +119,10 @@ async def photo(adapter, message, event, data):
 
 async def callback(adapter, query, data):
     if not enabled(adapter): return False
+    if data.startswith('dg:'):
+        form_module()
+        import chopper_drive
+        return await chopper_drive.callback(adapter, query, data, bridge())
     if data.startswith('vm:'):
         form_module()
         import receipt_maintenance

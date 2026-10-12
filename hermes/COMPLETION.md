@@ -228,3 +228,36 @@ Tests cover invalid readback before Trash, colour pixels, retry idempotence,
 non-retroactive retention, command silence, initial scan+menu delivery, manual
 advance, global numbered pages, completion-delivery lease and shared preferences
 across OWNER/BOOKKEEPER/VIEWER with cross-business/unknown-actor isolation.
+
+## Independent Chopper / Finances Drive control — 2026-10-13
+
+Chopper's chopper_drive tool connects directly to Google using existing profile
+OAuth, not the Vista Drive proxy. Finances ancestry is verified for every target
+and destination. Owner-only browse/read/create/upload/move/rename plus native
+owner-confirmed replace/trash/restore. Root/shortcuts/outside-root are blocked;
+non-empty folders need individual contents previews; native Google document
+content needs a document editor. Regular-file read/upload limit is 3 MB.
+
+Replacement verifies an archived backup before updating the same file ID;
+old reading, receipt UUID, intake dedup identity, allocations and ledger remain.
+SQLite stores actor-bound 15-minute previews, cancellation, operation state and
+pending sync. Model cannot confirm; actual Telegram callback rechecks actor.
+Vista offline does not block direct Drive reads/organisation. Failed record sync
+retries only the notification, never replacement/deletion. Uncertain running
+actions require inspection/reconciliation, not blind retry. This is not a fully
+automatic crash-recovery system for failures between external writes and local
+completion persistence.
+
+Separate /agent/drive/changes validates Google readback/scope/backup, idempotently
+audits notification, clears stale cache and invalidates derived scans after an
+original replacement. Image retrieval respects recoverable Trash; booked rows
+and expenses are never deleted by an image operation. Pending notifications are
+retried by the existing evidence worker; worker cannot edit or preview Drive.
+Chopper-originated changes sync; unsolicited manual Google edits do not yet have
+a Drive push-notification/reconciliation watcher.
+
+Receipt R-references resolve uniquely within the authenticated business before
+tool calls; ambiguous references fail instead of selecting a guessed UUID.
+250 backend tests, 43 Python tests and build pass; focused image/maintenance
+tests pass after final image-serving guards. Production destructive tests use
+fixtures only; live checks are read-only. User confirmation acceptance remains.

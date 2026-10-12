@@ -97,7 +97,7 @@ function serialiseReceipt(receipt: ReceiptRow & { expenses?: Array<{ id: string;
     inDrive: Boolean(receipt.driveFileId),
     driveUrl: receipt.driveUrl,
     scanDriveUrl: receipt.scanDriveUrl,
-    hasScan: Boolean(receipt.scanDriveFileId || (receipt.extracted && typeof receipt.extracted === 'object' && 'scan' in receipt.extracted)),
+    hasScan: Boolean((receipt.scanDriveFileId && !(receipt.extracted as any)?._driveFiles?.[receipt.scanDriveFileId]?.trashed) || (!receipt.scanDriveFileId && receipt.extracted && typeof receipt.extracted === 'object' && 'scan' in receipt.extracted)),
     createdAt: receipt.createdAt.toISOString(),
     updatedAt: receipt.updatedAt.toISOString(),
     expenses: receipt.expenses?.map((expense) => ({
@@ -392,6 +392,14 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     return { total, receipts: rows.map((row) => serialiseReceipt(row)) }
   })
 
+  app.get('/agent/receipts/resolve', { preHandler: requireAgent('VIEWER') }, async request => {
+    const { ref } = z.object({ ref: z.string().regex(/^R-[a-f0-9]{6}$/i) }).parse(request.query)
+    const matches = await request.db.receiptDocument.findMany({ where: { id: { startsWith: ref.slice(2).toLowerCase(), mode: 'insensitive' } }, select: { id: true }, take: 2 })
+    if (!matches.length) throw notFound('agent:RECEIPT_NOT_FOUND')
+    if (matches.length !== 1) throw conflict('agent:AMBIGUOUS_RECEIPT_REF', 'Reference matches multiple receipts; select by full UUID.')
+    return { id: matches[0]!.id, ref: ref.toUpperCase() }
+  })
+
   app.get<{ Params: { id: string } }>('/agent/receipts/:id', { preHandler: requireAgent('VIEWER') }, async (request) => {
     const id = ID.parse(request.params.id)
     await requireReceipt(request.db, id)
@@ -407,7 +415,9 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     if((receipt.extracted as any)?._deletedEvidence)throw conflict('agent:DUPLICATE_PHOTOS_REMOVED','Duplicate photos were removed; use the preserved canonical receipt instead.')
     const original = z.object({ original: z.enum(['true', 'false']).optional() }).parse(request.query).original === 'true'
     const scanOnly=Boolean((receipt.extracted as any)?._inbox?.originalRetired)
-    const scanned = (!original || scanOnly) && (image?.scanBytes || receipt.scanDriveFileId)
+    const scanned = (!original || scanOnly) && (image?.scanBytes || receipt.scanDriveFileId && !(receipt.extracted as any)?._driveFiles?.[receipt.scanDriveFileId]?.trashed)
+    const activeFile = scanned ? receipt.scanDriveFileId : receipt.driveFileId
+    if (activeFile && (receipt.extracted as any)?._driveFiles?.[activeFile]?.trashed) throw notFound('agent:RECEIPT_NOT_FOUND', 'Receipt image is in recoverable Drive Trash. Restore it to view it.')
     const bytes = scanned ? image?.scanBytes ? Buffer.from(image.scanBytes) : await readFromDrive(receipt.scanDriveFileId!) : image ? Buffer.from(image.bytes) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
     return {
       mimeType: scanned ? 'image/jpeg' : receipt.mimeType,

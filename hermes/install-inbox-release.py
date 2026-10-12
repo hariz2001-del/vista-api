@@ -3,7 +3,7 @@ import sys,shutil
 from pathlib import Path
 stage=Path(sys.argv[1]).resolve();home=Path('/home/ubuntu/.hermes/profiles/sarangbooks')
 if stage.parent!=Path('/tmp') or not stage.name.startswith('chopper-release.'):raise SystemExit('Unexpected staging directory.')
-files=('vista_mcp.py','receipt_form.py','receipt_inbox.py','receipt_maintenance.py','telegram_receipts.py','vista_actor_guard.py','receipt-worker-prompt.txt','install-telegram-receipts.py','update-receipt-worker.py','verify-live-inbox.py','verify-live-receipt-card.py','verify-actor-transport.py','verify-live-bulk.py')
+files=('vista_mcp.py','chopper_drive.py','receipt_form.py','receipt_inbox.py','receipt_maintenance.py','telegram_receipts.py','vista_actor_guard.py','receipt-worker-prompt.txt','install-telegram-receipts.py','update-receipt-worker.py','verify-live-inbox.py','verify-live-receipt-card.py','verify-actor-transport.py','verify-live-bulk.py')
 for name in files:
     path=stage/name
     if not path.is_file():raise SystemExit('Incomplete release.')

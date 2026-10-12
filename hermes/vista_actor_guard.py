@@ -15,6 +15,10 @@ def bind(config,tool_name,args,session=None):
             raise PermissionError('Identity substitution blocked. Use only the authenticated sender; never retry another user ID.')
         result['telegram_user_id']=str(actor)
     elif session('HERMES_CRON_SESSION')=='1':
+        if tool_name == 'chopper_drive':
+            if args.get('action') != 'sync':raise PermissionError('Receipt worker can only retry pending Drive-to-Vista notifications, never change Drive files.')
+            result['telegram_user_id']='304348232'
+            return result
         if tool_name not in WORKER_TOOLS:raise PermissionError('Receipt worker cannot perform this business action.')
         if tool_name=='vista_receipt_form':result['show_buttons']=False
         # Existing explicitly owner-authorised background evidence service context.

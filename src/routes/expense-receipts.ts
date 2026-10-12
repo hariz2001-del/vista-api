@@ -11,7 +11,9 @@ export async function expenseReceiptRoutes(app: FastifyInstance) {
     const receipt = expense?.receiptDocument
     if (!receipt) throw notFound('agent:RECEIPT_NOT_FOUND')
     const original = z.object({ original: z.enum(['true', 'false']).optional() }).parse(request.query).original === 'true'
-    const scanned = (!original || Boolean((receipt.extracted as any)?._inbox?.originalRetired)) && (receipt.image?.scanBytes || receipt.scanDriveFileId)
+    const scanned = (!original || Boolean((receipt.extracted as any)?._inbox?.originalRetired)) && (receipt.image?.scanBytes || receipt.scanDriveFileId && !(receipt.extracted as any)?._driveFiles?.[receipt.scanDriveFileId]?.trashed)
+    const activeFile = scanned ? receipt.scanDriveFileId : receipt.driveFileId
+    if (activeFile && (receipt.extracted as any)?._driveFiles?.[activeFile]?.trashed) throw notFound('agent:RECEIPT_NOT_FOUND', 'Receipt image is in recoverable Drive Trash. Restore it to view it.')
     const bytes = scanned ? receipt.image?.scanBytes ? Buffer.from(receipt.image.scanBytes) : await readFromDrive(receipt.scanDriveFileId!) : receipt.image ? Buffer.from(receipt.image.bytes) : receipt.driveFileId ? await readFromDrive(receipt.driveFileId) : null
     if (!bytes) throw notFound('agent:RECEIPT_NOT_FOUND')
     reply.header('Cache-Control', 'private, no-store')

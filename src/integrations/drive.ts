@@ -203,6 +203,7 @@ export async function fileByDate(db: Tx, receiptId: string): Promise<void> {
 
 /** The photo's bytes, from Drive. */
 export async function readFromDrive(fileId: string): Promise<Buffer> {
+  await withinFinances(fileId) // Trashed/out-of-scope files are not active evidence.
   const response = await fetch(`${API}/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${await accessToken()}` } })
   if (!response.ok) throw new Error(`drive read ${response.status}`)
   return Buffer.from(await response.arrayBuffer())
@@ -225,14 +226,14 @@ export async function trashDuplicateReceiptFile(id: string, receiptId: string) {
 }
 
 /** No arbitrary Google Drive access: both source and destination must descend from Finances. */
-export async function withinFinances(id: string): Promise<DriveFile> {
+export async function withinFinances(id: string, includeTrashed = false): Promise<DriveFile> {
   if (!driveConfigured()) throw new Error('Google Drive is not configured on this deployment.')
   const original = await driveFile(id)
   const pending = [original]
   const seen = new Set<string>()
   while (pending.length && seen.size < 100) {
     const file = pending.shift()!
-    if (file.trashed) continue
+    if (file.trashed && !includeTrashed) continue
     if (file.id === env.DRIVE_FINANCES_FOLDER_ID) return original
     if (seen.has(file.id)) continue
     seen.add(file.id)
