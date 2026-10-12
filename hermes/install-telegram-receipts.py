@@ -42,4 +42,10 @@ if 'VISTA_BUSINESS_CONTEXT_V1' not in text:
     text = text.replace(context_anchor, hook)
     compile(text, str(target), 'exec')
     target.write_text(text)
-print('Receipt hooks and business capability context installed; non-Sarang bots unchanged.')
+if 'VISTA_RECEIPT_FORM_V1' not in text:
+    anchor = "        if data.startswith('vr:'):\n"
+    if text.count(anchor) != 1: raise SystemExit('Receipt callback anchor changed; inspect first.')
+    text = text.replace(anchor, "        # VISTA_RECEIPT_FORM_V1\n        if data.startswith(('vr:', 'vf:')):\n")
+    compile(text, str(target), 'exec')
+    target.write_text(text)
+print('Receipt hooks, native categorisation and business capability context installed; non-Sarang bots unchanged.')

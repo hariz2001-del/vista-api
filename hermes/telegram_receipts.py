@@ -8,9 +8,16 @@ import base64
 import dataclasses
 import importlib.util
 import re
+import sys
 from pathlib import Path
 
 HOME = Path('/home/ubuntu/.hermes/profiles/sarangbooks')
+
+def form_module():
+    folder = str(Path(__file__).resolve().parent)
+    if folder not in sys.path: sys.path.insert(0, folder)
+    import receipt_form
+    return receipt_form
 
 def business_context(adapter, event):
     """Refresh capabilities on actual Telegram turns, preserving old chat history."""
@@ -41,6 +48,8 @@ def business_context(adapter, event):
         'No financial posting or business mutation is authorised by a read-only question.'
     )
     event.channel_prompt = '\n\n'.join(x for x in [getattr(event, 'channel_prompt', '') or '', context] if x)
+    # Hermes' supported auto-skill path avoids a separate model/tool round trip.
+    event.auto_skill = 'sarang-bookkeeping'
     return event
 
 def enabled(adapter):
@@ -70,10 +79,17 @@ async def photo(adapter, message, event, data):
             amount = sum(row['amountSen'] for row in receipt.get('expenses', [])) / 100
             warning = f"Already saved: {result.get('duplicateReason', 'same receipt')}. Existing entries RM {amount:.2f}. You can add a brand allocation or link existing expenses; I will not duplicate the purchase.\n"
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton('Key in', callback_data=f'vr:{rid}:key'), InlineKeyboardButton('Stash for later', callback_data=f'vr:{rid}:stash')],
+            [InlineKeyboardButton('Categorise', callback_data=f'vr:{rid}:key'), InlineKeyboardButton('Stash for later', callback_data=f'vr:{rid}:stash')],
             [InlineKeyboardButton('Edit reading', callback_data=f'vr:{rid}:edit'), InlineKeyboardButton('View scan', callback_data=f'vr:{rid}:scan')],
         ])
-        kwargs = {'chat_id': message.chat.id, 'text': f"{warning}{receipt['ref']} saved safely. What would you like to do? Reading/scan can continue in the background.", 'reply_markup': keyboard}
+        if result.get('duplicate'):
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Another brand allocation', callback_data=f'vf:{rid}:why:brand')],
+                [InlineKeyboardButton('Attach existing entries', callback_data=f'vf:{rid}:why:link')],
+                [InlineKeyboardButton('Different purchase', callback_data=f'vf:{rid}:why:different'),InlineKeyboardButton('Stop', callback_data=f'vf:{rid}:cancel')],
+            ])
+            warning += 'Why are you sending this receipt again?\n'
+        kwargs = {'chat_id': message.chat.id, 'text': f"🔎 Parsing receipt…\n{warning}{receipt['ref']} saved safely. Choose what to do; reading/scan continues in the background.", 'reply_markup': keyboard}
         if message.message_thread_id: kwargs['message_thread_id'] = message.message_thread_id
         await adapter._bot.send_message(**kwargs)
         # Caption requests still reach Hermes with the durable receipt reference.
@@ -88,6 +104,8 @@ async def photo(adapter, message, event, data):
 
 async def callback(adapter, query, data):
     if not enabled(adapter): return False
+    if data.startswith('vf:'):
+        return await form_module().callback(adapter, query, data, bridge())
     match = re.fullmatch(r'vr:([a-f0-9-]{36}):(key|stash|edit|scan)', data)
     if not match: return False
     rid, action = match.groups(); user = str(query.from_user.id)
@@ -98,12 +116,16 @@ async def callback(adapter, query, data):
         if action == 'stash':
             status = receipt['receipt']['status']
             if status in ('POSTED', 'LINKED', 'REJECTED'):
-                await query.answer('Already processed. Use Key in to review existing allocations.', show_alert=True)
+                await query.answer('Already processed. Use Categorise to review existing allocations.', show_alert=True)
                 return True
             await asyncio.to_thread(m._call, 'POST', f'/agent/receipts/{rid}/skip', {'reason': 'Stashed from Telegram button'}, user)
             await query.answer('Stashed; no expense posted.')
             return True
         await query.answer()
+        if action == 'key':
+            form = await asyncio.to_thread(m._call, 'GET', f'/agent/receipts/{rid}/form', None, user)
+            await form_module().show(query, form)
+            return True
         if action == 'scan':
             result = await asyncio.to_thread(m._run, 'vista_get_receipt', {'receipt_id': rid, 'with_image': True, 'telegram_user_id': user})
             path = result['receipt'].get('image_path')

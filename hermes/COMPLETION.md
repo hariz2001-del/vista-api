@@ -71,3 +71,37 @@ clicks. A delivered menu and transport tests do not prove an owner click-through
 Recipe costs cannot be populated without real owner-supplied recipe/purchase
 data. Named bank reconciliation cannot be represented as a separate bank ledger
 because existing Vista keeps one combined stall cash book; explain that clearly.
+
+## Native receipt card and faster model (12 October 2026)
+
+`GET/PATCH /agent/receipts/:id/form` exposes actor-specific persistent drafts
+using live Vista options; line categories map to Expense.category and brands
+to Expense.brandId. Identical settings are grouped into entries while quantity,
+unit and price map to ExpenseItem. Missing OCR values block preview. Printed
+total differences are explicit adjustment rows, never silently distributed.
+`/form/preview` uses the existing RMS accounting engine and durable actor-bound
+confirmation records; `/form/post` revalidates reading, choices, draft version
+and the exact shared preview token. No new financial schema or second ledger.
+Completed receipts cannot be saved in full again. Reading/scan writes serialize
+with draft updates so processing cannot erase concurrent categorisation.
+
+`receipt_form.py` renders real native Telegram line category/brand buttons,
+global funding/method/brand controls, pagination, exact preview and Confirm Save.
+Callbacks carry durable IDs and option fingerprints, never credentials. Old
+`vr:...:key` callbacks still work; visible label is now Categorise. Cancel keeps
+the evidence and does not skip/reject/post it. Actor identity and role are
+revalidated for every action. Possible duplicate/matching records are shown and
+can be handed back to Hermes for explicit reuse or linking. Original and scan
+remain in Drive; all new entries point at the same receipt document.
+
+`configure-speed.py` changes sarangbooks only to GPT-6 Luna, low reasoning and
+direct Vista schemas (no tool-discovery round trips), preserving all toolsets,
+MCP settings and credentials. Backup: config.yaml.before-speed-v1. Telegram
+events preload sarang-bookkeeping through Hermes' supported auto-skill path.
+SOUL contains short accurate routing and multi-brand workflow examples. This
+is instruction/tool optimisation, not weight fine-tuning. The current provider
+is openai-codex with subscription_included billing; public API token pricing
+does not describe the owner's actual bill. `model-eval.py` runs bounded live
+read-only cases and checks effective model, expected tools, actual sender ID
+and forbidden mutations. Do not interpret passing tool assertions as exhaustive
+accuracy proof; inspect the returned answers and verify native owner clicks.

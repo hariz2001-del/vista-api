@@ -418,7 +418,11 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     if (!bytes) throw notFound('agent:RECEIPT_NOT_FOUND')
     const scan = await receiptScan(bytes, body.corners)
     await request.db.receiptImage.upsert({ where: { receiptId: id }, create: { receiptId: id, businessId: request.businessId, bytes: new Uint8Array(bytes), scanBytes: new Uint8Array(scan) }, update: { scanBytes: new Uint8Array(scan) } })
-    await request.db.receiptDocument.update({ where: { id }, data: { extracted: JSON.parse(JSON.stringify({ ...(typeof receipt.extracted === 'object' && receipt.extracted ? receipt.extracted : {}), scan: { corners: body.corners ?? null, madeAt: new Date().toISOString(), originalPreserved: true } })) } })
+    await request.db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id = ${id} AND business_id = ${request.businessId} FOR UPDATE`
+      const latest = await requireReceipt(tx, id)
+      await tx.receiptDocument.update({ where: { id }, data: { extracted: JSON.parse(JSON.stringify({ ...(typeof latest.extracted === 'object' && latest.extracted ? latest.extracted : {}), scan: { corners: body.corners ?? null, madeAt: new Date().toISOString(), originalPreserved: true } })) } })
+    })
     await act(request.db, request, 'receipt.scanned', 'receipt', id, { corners: body.corners, originalPreserved: true })
     let driveError: string | null = null
     try { await storeReceiptImage(request.db, id) } catch (error) { driveError = error instanceof Error ? error.message : 'Drive upload failed' }
@@ -433,6 +437,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       const id = ID.parse(request.params.id)
       const body = extractionBody.parse(request.body)
       await request.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM receipt_documents WHERE id = ${id} AND business_id = ${request.businessId} FOR UPDATE`
         const receipt = await requireReceipt(tx, id)
         assertOpen(receipt)
         if (body.onlyMissing) {

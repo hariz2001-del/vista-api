@@ -90,7 +90,7 @@ def _call(method: str, path: str, body: object | None = None, telegram_user: str
     except urllib.error.HTTPError as error:
         try:
             detail = json.loads(error.read())
-            message = detail.get("message") or detail.get("error") or str(detail)
+            message = (str(detail.get('error',''))+': '+str(detail.get('detail') or detail.get("message") or 'Vista rejected the action')).strip(': ')
             if detail.get("fields"):
                 message += " " + "; ".join(f"{field['path']}: {field['message']}" for field in detail["fields"])
         except Exception:  # noqa: BLE001 - any body shape
@@ -433,8 +433,30 @@ for _definition in TOOLS:
     if _definition['name'] == 'vista_post':
         _definition['description'] = 'Post only the user-confirmed NEW previewed entries atomically. append=true adds a further brand allocation to an existing receipt after showing prior/remaining/combined totals. Pass the same append flag and NEW preview token; repeated taps are refused.'
 
+TOOLS.append(_tool('vista_receipt_form', 'Read live Vista receipt categorisation card and show its real line category/brand, funding, method, Save/Cancel buttons in the original receipt chat. Use after editing a reading or when the owner asks to categorise. No posting; native Confirm Save is required.', {'receipt_id': {'type':'string'}, 'show_buttons': {'type':'boolean'}}, ['receipt_id']))
+
+def _receipt_card_send(rid, view, user):
+    import receipt_form
+    context=_call('GET',f'/agent/receipts/{rid}/telegram-context',telegram_user=user)
+    if not context['chatId']:raise VistaError('Receipt has no originating Telegram chat; do not invent a destination.')
+    token=_dotenv().get('TELEGRAM_BOT_TOKEN','')
+    if not token:raise VistaError('Finance Telegram send credential missing')
+    body={'chat_id':context['chatId'],'text':receipt_form.text(view),'reply_markup':{'inline_keyboard':receipt_form.keyboard(view)}}
+    request=urllib.request.Request('https://api.telegram.org/bot'+token+'/sendMessage',data=json.dumps(body).encode(),headers={'Content-Type':'application/json'},method='POST')
+    try:
+        with urllib.request.urlopen(request,timeout=30) as response:result=json.load(response)
+        if not result.get('ok'):raise VistaError('Telegram rejected receipt card')
+    except Exception:raise VistaError('Telegram receipt card failed; credential not logged') from None
+    return {'sent':True,'message_id':result['result']['message_id']}
+
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name == 'vista_receipt_form':
+        rid=args['receipt_id']
+        view=_call('GET',f'/agent/receipts/{rid}/form',telegram_user=user)
+        if args.get('show_buttons',True):
+            _receipt_card_send(rid,view,user)
+        return view
     if name == 'vista_current_time':
         return _call('GET', '/agent/time', telegram_user=user)
     if name == 'vista_sales_today':
@@ -450,16 +472,13 @@ def _run(name: str, args: dict) -> object:
         rid = args['receipt_id']
         context = _call('GET', f'/agent/receipts/{rid}/telegram-context', telegram_user=user)
         if context['notified'] or not context['chatId']: return {'sent': False, 'reason': 'already notified or no Telegram origin'}
-        r = _call('GET', f'/agent/receipts/{rid}', telegram_user=user)['receipt']
-        candidates = _call('GET', f'/agent/receipts/{rid}/duplicates', telegram_user=user)['candidates']
-        total_text = f"RM {r['totalSen']/100:.2f}" if r.get('totalSen') is not None else 'Total needs review'
-        text = f"{r['ref']} · {r.get('vendor') or 'Merchant needs review'} · {total_text}\n"
-        if candidates:
-            c = candidates[0]
-            text += f"Possible same receipt as {c['ref']}: {', '.join(c['reasons'])}. It may be another brand allocation, not duplicate spending. Tap Key in to choose split/link/different purchase.\n"
-        if r.get('reviewFlags'): text += 'Needs review: ' + '; '.join(r['reviewFlags'])[:600] + '\n'
-        text += 'Reading saved. Choose what to do; nothing has been posted.'
-        keyboard = [[{'text': label, 'callback_data': f'vr:{rid}:{action}'} for label, action in row] for row in [[('Key in', 'key'), ('Stash for later', 'stash')], [('Edit reading', 'edit'), ('View scan', 'scan')]]]
+        import receipt_form
+        view=_call('GET',f'/agent/receipts/{rid}/form',telegram_user=user)
+        text = receipt_form.text(view)+'\n\nTap Categorise to set each line’s category and brand. Nothing has been posted.'
+        keyboard = [[{'text': label, 'callback_data': f'vr:{rid}:{action}'} for label, action in row] for row in [[('Categorise', 'key'), ('Stash for later', 'stash')], [('Edit reading', 'edit'), ('View scan', 'scan')]]]
+        if view.get('duplicates'):
+            text += '\nWhy was the same receipt sent again? Choose below; no accounting decision has been made.'
+            keyboard=receipt_form.duplicate_keyboard(rid)+keyboard
         # Never inherit the personal/marketing bot token from a multiplexed host.
         token = _dotenv().get('TELEGRAM_BOT_TOKEN', '')
         if not token: raise VistaError('Finance Telegram send credential missing')
@@ -526,7 +545,7 @@ def _run(name: str, args: dict) -> object:
     if name == "vista_receipt_choices":
         step = args["step"]
         static = {
-            "start": ("What would you like to do with this receipt?", ["Key in", "Stash for later", "Edit reading", "View scan"]),
+            "start": ("What would you like to do with this receipt?", ["Categorise", "Stash for later", "Edit reading", "View scan"]),
             "review": ("Is this reading correct?", ["Continue", "Edit reading", "Adjust crop", "Stash for later"]),
             "edit": ("What would you like to edit?", ["Line items", "Total / tax / discount", "Vendor / date / receipt number", "Back"]),
             "confirm": ("Post these exact entries to Vista?", ["Post to Vista", "Change details", "Edit line items", "Stash for later"]),
@@ -688,7 +707,7 @@ def _handle(message: dict) -> None:
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "vista", "version": "2.0.0"},
-                "instructions": "Vista tools for Sarang receipts, Finances Drive files, staff rosters, stock, payroll reads and PDF/PNG reports. For every new receipt photo: save, read, make a scan, then clarify buttons Key in / Stash / Edit / View scan. All form options come from vista_receipt_choices. Amounts in RM. Preview before posting; post only after the user confirms.",
+                "instructions": "Vista tools for Sarang receipts, Finances Drive files, staff rosters, stock, payroll reads and PDF/PNG reports. Receipt photo hooks show Categorise / Stash / Edit / View scan immediately. Use vista_receipt_form for native live categorisation after editing. Amounts in RM. Preview before posting; post only after the user confirms.",
             },
         })
     elif method == "ping":

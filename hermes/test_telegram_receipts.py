@@ -72,13 +72,15 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
         msg=types.SimpleNamespace(chat=types.SimpleNamespace(id=123),from_user=types.SimpleNamespace(id=456),message_id=9,message_thread_id=None,caption=None)
         self.assertTrue(await m.photo(a,msg,types.SimpleNamespace(),b'photo'))
         self.assertEqual(len(a.sent),1); self.assertEqual(a.events,[])
-        self.assertEqual([x['text'] for row in a.sent[0]['reply_markup'] for x in row],['Key in','Stash for later','Edit reading','View scan'])
+        self.assertEqual([x['text'] for row in a.sent[0]['reply_markup'] for x in row],['Categorise','Stash for later','Edit reading','View scan'])
         self.assertTrue(b.calls[0][2]['deferProcessing']); self.assertEqual(b.calls[0][3],'456')
     async def test_duplicate_still_gets_menu_and_reason(self):
         a=Adapter(); b=Bridge(True); m.bridge=lambda:b
         msg=types.SimpleNamespace(chat=types.SimpleNamespace(id=123),from_user=types.SimpleNamespace(id=456),message_id=9,message_thread_id=None,caption=None)
         await m.photo(a,msg,types.SimpleNamespace(),b'photo')
-        self.assertIn('identical image bytes',a.sent[0]['text']); self.assertEqual(len(a.sent[0]['reply_markup']),2)
+        self.assertIn('identical image bytes',a.sent[0]['text']); self.assertIn('Why are you sending',a.sent[0]['text'])
+        labels=[x['text'] for row in a.sent[0]['reply_markup'] for x in row]
+        self.assertIn('Another brand allocation',labels);self.assertIn('Attach existing entries',labels)
     async def test_other_bots_are_untouched(self):
         a=Adapter(); a._update_receipt_dir=Path('/other-profile')
         self.assertFalse(await m.photo(a,None,None,b'photo')); self.assertEqual(a.sent,[])
@@ -91,7 +93,7 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
         a=Adapter(); b=Bridge(); m.bridge=lambda:b
         async def answer(*args,**kwargs): pass
         q=types.SimpleNamespace(from_user=types.SimpleNamespace(id=456,full_name='Owner'),message=types.SimpleNamespace(),id='callback',answer=answer)
-        self.assertTrue(await m.callback(a,q,'vr:11111111-1111-4111-8111-111111111111:key'))
+        self.assertTrue(await m.callback(a,q,'vr:11111111-1111-4111-8111-111111111111:edit'))
         self.assertEqual(a.events[0].source.user_id,'456'); self.assertFalse(a.events[0].source.is_bot)
         self.assertIn('Receipt UUID',a.events[0].text)
 if __name__=='__main__': unittest.main()
