@@ -107,6 +107,7 @@ class Drive:
         directory.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(directory / 'operations.sqlite3', timeout=10)
         db.execute('CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, actor TEXT NOT NULL, made REAL NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, result TEXT)')
+        db.execute('CREATE TABLE IF NOT EXISTS awaiting_images (actor TEXT PRIMARY KEY, made REAL NOT NULL, file_id TEXT NOT NULL, reason TEXT NOT NULL)')
         try:
             with db:
                 yield db
@@ -298,6 +299,18 @@ def run(m, actor, args):
         if (parent and parent not in final.get('parents', [])) or ('name' in fields and final['name'] != fields['name']):
             raise ValueError('Move/rename readback did not match; inspect before retrying.')
         return {'file': final, 'links': 'same file ID; receipt links unchanged'}
+    if action == 'await_image':
+        file = client.scoped(args['file_id'])
+        reason = str(args.get('reason', '')).strip()[:1000]
+        if not reason or file['mimeType'] == FOLDER:
+            raise ValueError('Select the exact receipt image and owner-requested replacement purpose.')
+        with client.db() as db:
+            db.execute('INSERT OR REPLACE INTO awaiting_images VALUES (?,?,?,?)', (client.actor, time.time(), file['id'], reason))
+        return {'waiting_for': 'next owner photo, for 15 minutes', 'target': file, 'note': 'No file changed. Inspect/scan the incoming image and show a native replacement preview before confirmation.'}
+    if action == 'cancel_image':
+        with client.db() as db:
+            db.execute('DELETE FROM awaiting_images WHERE actor=?', (client.actor,))
+        return {'waiting_for': None, 'note': 'Pending replacement-photo request cancelled. Files unchanged.'}
     if action == 'preview':
         result = client.preview(args)
         if args.get('show_buttons', True):
@@ -320,6 +333,27 @@ def run(m, actor, args):
             rows = db.execute('SELECT id,result FROM operations WHERE actor=? AND state=\'drive_done\'', (client.actor,)).fetchall()
         return {'results': [client.sync(id, json.loads(result)) for id, result in rows[:10]]}
     raise ValueError('Unsupported direct Drive action.')
+
+
+def photo_intent(m, actor, caption=''):
+    """Consume a pending owner image request, or preserve an explicit caption.
+
+    This is a handoff only. It cannot replace, remove, or book anything.
+    """
+    try:
+        client = Drive(m, actor)
+    except (PermissionError, ValueError):
+        return None
+    with client.db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT made,file_id,reason FROM awaiting_images WHERE actor=?', (client.actor,)).fetchone()
+        if row:
+            db.execute('DELETE FROM awaiting_images WHERE actor=?', (client.actor,))
+    if re.search(r'\b(replace|replacement|rescan|re-scan|swap|ganti|tukar)\b', caption, re.I):
+        return {'caption': caption, 'note': 'Resolve exact target from the owner request; ask if ambiguous.'}
+    if row and time.time() - row[0] <= 900:
+        return {'target_file_id': row[1], 'reason': row[2]}
+    return None
 
 
 async def callback(adapter, query, data, m):

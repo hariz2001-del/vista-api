@@ -18,3 +18,9 @@ if 'VISTA_ACTOR_GUARD_V1' not in text:
 """
     text=text.replace(anchor,hook+anchor);compile(text,str(target),'exec');target.write_text(text)
 print('Vista session actor and evidence-only worker guard installed; other MCP connections unchanged.')
+if 'CHOPPER_DRIVE_ACTOR_GUARD_V1' not in text:
+    anchor="    if '/home/ubuntu/.hermes/profiles/sarangbooks/integrations/vista_mcp.py' in getattr(server, '_config', {}).get('args', []):"
+    if text.count(anchor)!=1:raise SystemExit('Independent Drive actor anchor changed; inspect first.')
+    replacement="    # CHOPPER_DRIVE_ACTOR_GUARD_V1\n    if any(_path in getattr(server, '_config', {}).get('args', []) for _path in ('/home/ubuntu/.hermes/profiles/sarangbooks/integrations/vista_mcp.py', '/home/ubuntu/.hermes/profiles/sarangbooks/integrations/drive_mcp.py')):"
+    text=text.replace(anchor,replacement);compile(text,str(target),'exec');target.write_text(text)
+print('Both independent finance MCP connections bind the real session actor before RPC.')

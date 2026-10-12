@@ -5,6 +5,8 @@ import importlib.util
 import sys
 import types
 import unittest
+import tempfile
+from unittest.mock import patch
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
@@ -33,6 +35,29 @@ class Bridge:
         self.calls.append((method,path,body,user))
         return {'duplicate':self.duplicate, 'bulk':getattr(self,'bulk',False),'autoStash':getattr(self,'auto_stash',False), 'duplicateReason':'identical image bytes', 'receipt':{'id':'11111111-1111-4111-8111-111111111111','ref':'R-111111','status':'UPLOADED','expenses':[]}}
 class ReceiptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replacement_photo_reaches_agent_with_exact_input_not_duplicate_stored_image(self):
+        with tempfile.TemporaryDirectory() as folder:
+            a=Adapter();b=Bridge(duplicate=True);b.PROFILE=Path(folder);m.bridge=lambda:b
+            msg=types.SimpleNamespace(chat=types.SimpleNamespace(id=123),message_id=7,from_user=types.SimpleNamespace(id=304348232),caption='replace R-111111')
+            event=types.SimpleNamespace(channel_prompt='Existing')
+            with patch('chopper_drive.photo_intent',return_value={'caption':msg.caption}):
+                self.assertFalse(await m.photo(a,msg,event,b'exact incoming bytes'))
+            self.assertEqual(a.sent,[])
+            self.assertIn('REPLACEMENT PHOTO HANDOFF',event.channel_prompt)
+            self.assertIn('Do not reupload',event.channel_prompt)
+            self.assertIn('current Drive image may be different',event.channel_prompt)
+            files=list((Path(folder)/'cache'/'receipt-replacements').iterdir())
+            self.assertEqual(files[0].read_bytes(),b'exact incoming bytes')
+            self.assertEqual(len(b.calls),1)
+
+    async def test_bulk_photo_does_not_consume_replacement_intent(self):
+        a=Adapter();b=Bridge();b.bulk=True;b.PROFILE=Path('/not-used');m.bridge=lambda:b
+        msg=types.SimpleNamespace(chat=types.SimpleNamespace(id=123),message_id=7,from_user=types.SimpleNamespace(id=304348232),caption='replace R-111111')
+        with patch('chopper_drive.photo_intent') as intent:
+            self.assertTrue(await m.photo(a,msg,types.SimpleNamespace(),b'photo'))
+            intent.assert_not_called()
+        self.assertEqual(a.sent,[])
+
     async def test_sales_today_uses_live_business_date_with_explicit_single_day_range(self):
         spec=importlib.util.spec_from_file_location('clock_bridge',root/'vista_mcp.py')
         bridge=importlib.util.module_from_spec(spec);spec.loader.exec_module(bridge)

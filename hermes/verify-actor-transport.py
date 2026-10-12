@@ -30,4 +30,13 @@ async def main():
         assert (await _call_tool_racing_stdio_death(server,'vista','vista_get_receipt',{}))['telegram_user_id']=='304348232'
     finally:clear_session_vars(tokens)
     print('PASS installed transport: concurrent actors isolated, substituted identity blocked before RPC, worker posting blocked, evidence reads allowed.')
+    direct=SimpleNamespace(_config={'args':['/home/ubuntu/.hermes/profiles/sarangbooks/integrations/drive_mcp.py']},session=Session())
+    tokens=set_session_vars(platform='telegram',user_id='viewer-one')
+    try:
+        assert (await _call_tool_racing_stdio_death(direct,'finances_drive','chopper_drive',{'action':'status'}))['telegram_user_id']=='viewer-one'
+        try:await _call_tool_racing_stdio_death(direct,'finances_drive','chopper_drive',{'action':'preview','telegram_user_id':'304348232'})
+        except PermissionError:pass
+        else:raise AssertionError('Independent Drive identity substitution reached RPC')
+    finally:clear_session_vars(tokens)
+    print('PASS separate Drive transport: actor bound; owner impersonation blocked before independent RPC.')
 asyncio.run(main())

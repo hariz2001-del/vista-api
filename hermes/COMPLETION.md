@@ -258,7 +258,7 @@ a Drive push-notification/reconciliation watcher.
 
 Receipt R-references resolve uniquely within the authenticated business before
 tool calls; ambiguous references fail instead of selecting a guessed UUID.
-250 backend tests, 44 Python tests and build pass; focused image/maintenance
+250 backend tests, 51 Python tests and build pass; focused image/maintenance
 tests pass after final image-serving guards. Production destructive tests use
 fixtures only; live checks are read-only. User confirmation acceptance remains.
 
@@ -273,3 +273,21 @@ Follow-up bot-only guard serializes uncertain/running mutations on the same file
 known pre-write stale inputs are cancelled safely. No live photo mutations or
 financial writes were performed for acceptance. Replacing/removing receipt
 images is owner-only; no partner/dev/shell privileges were broadened.
+
+await_image/cancel_image provide a durable 15-minute, owner-bound next-photo
+handoff. Replacement captions (including ganti/tukar) also reach Hermes rather
+than the generic menu. Incoming bytes are cached separately, never confused
+with a canonical image modified after initial intake-byte dedup. Bulk photos
+stay silent and do not consume a pending replacement. Replacement may stage an
+unbooked receipt; metadata/reading review and same-paper canonical reuse remain
+explicit, not automatic ledger changes. Final source includes bot-only handoff
+updates after backend release; deployed backend API is unchanged.
+
+Final tool transport uses a SEPARATE finances_drive MCP server (drive_mcp.py),
+not Vista's stdio connection. Separate failure/circuit-breaker sessions; only
+chopper_drive is advertised/executable, no database tool passthrough. Both paths
+bind actual Telegram sender and enforce sync-only cron access before RPC.
+Telegram toolset/config changed for finance only; saved credentials untouched.
+Actual Hermes session 20261013_033554_14dd3c successfully used the separate
+mcp__finances_drive__chopper_drive connection. The receipt monitor also watches
+durable pendingDriveSync IDs, so an empty OCR queue cannot suppress sync retries.

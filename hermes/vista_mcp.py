@@ -448,14 +448,14 @@ for _definition in TOOLS:
 
 TOOLS.append(_tool('vista_receipt_form', 'Read live Vista receipt categorisation card and show its real line category/brand, funding, method, Save/Cancel buttons in the original receipt chat. Use after editing a reading or when the owner asks to categorise. No posting; native Confirm Save is required.', {'receipt_id': {'type':'string'}, 'show_buttons': {'type':'boolean'}}, ['receipt_id']))
 
-TOOLS.append(_tool('chopper_drive', 'OWNER direct Google Drive connection, independent of Vista proxy, scoped to Finances. status/list/get/read/folder/edit manage files by actual Google file ID. preview operation=replace/trash/restore sends owner-native confirmation; the model CANNOT confirm. Replacement requires inspected local_path under profile cache and archives old bytes, preserving the file ID. Never swap a different purchase into booked evidence. Trashing booked evidence is permitted only on explicit owner confirmation; accounting stays unchanged. pending/sync recover separate durable Vista notifications, never repeat the Drive mutation. Root/shortcuts/outside Finances are blocked. Native Google document content needs its document editor.', {
-    'action': {'type':'string','enum':['status','list','get','read','folder','write','edit','preview','pending','sync']},
-    'file_id': {'type':'string','description':'Actual Google Drive file ID; not an R-reference or receipt UUID'},
+DIRECT_DRIVE_TOOL = _tool('chopper_drive', 'OWNER independent Finances Google Drive connection with its own MCP session/circuit breaker, not the Vista proxy. status/list/get/read/folder/write/edit manage actual Google IDs. await_image prepares the next owner photo as a replacement (15 min); cancel_image clears it. preview operation=replace/trash/restore sends owner-native confirmation; model CANNOT confirm. Replacement requires inspected cached local_path, archives old bytes, preserves file ID. Never swap another purchase into booked evidence. Owner-confirmed Trash may remove booked evidence; accounting stays unchanged. pending/sync recover separate Vista notifications without repeating file mutations. Root/shortcuts/outside Finances blocked. Native Google document content needs its editor.', {
+    'action': {'type':'string','enum':['status','list','get','read','folder','write','edit','await_image','cancel_image','preview','pending','sync']},
+    'file_id': {'type':'string','description':'Actual Google Drive file ID; not an R-reference or receipt UUID. await_image stores this target for the next owner photo (15 min), without changing files.'},
     'parent_id': {'type':'string'}, 'page_token': {'type':'string'}, 'trashed': {'type':'boolean'},
     'name': {'type':'string'}, 'description': {'type':'string'},
     'operation': {'type':'string','enum':['replace','trash','restore']},
     'local_path': {'type':'string'}, 'mime_type': {'type':'string'}, 'text': {'type':'string'}, 'reason': {'type':'string'}, 'show_buttons': {'type':'boolean'},
-}, ['action']))
+}, ['action'])
 
 TOOLS.append(_tool('vista_receipt_annotate', 'Maintain a SEPARATE annotated Drive scan showing posted items by brand and crossed-out scrapped items. Never changes receipt text, amounts, originals or accounting. Inspect the actual cropped scan with vision before supplying normalized scan regions per ZERO-BASED line index. Use reading_hash from vista_receipt_form. Omit regions to retry upload only. Unknown positions stay unmarked, not guessed.', {'receipt_id':{'type':'string'},'reading_hash':{'type':'string'},'regions':{'type':'array','items':{'type':'object','properties':{k:{'type':'integer' if k=='index' else 'number'} for k in ('index','x','y','width','height')},'required':['index','x','y','width','height']}}}, ['receipt_id']))
 

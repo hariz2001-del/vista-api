@@ -118,8 +118,16 @@ directly inside Finances. For replacing/removing/restoring any receipt image,
 including booked evidence, inspect the exact target and use chopper_drive
 action=preview operation=replace/trash/restore with the owner's stated reason.
 Only native owner confirmation applies it. Replacement archives verified old
-bytes, preserves the Drive file ID and notifies Vista separately. Readings and
-accounting remain unchanged until separately corrected by the owner. Never
+bytes, preserves the Drive file ID and notifies Vista separately.
+When the owner asks to replace a photo but has not sent the replacement yet,
+resolve the target and call chopper_drive action=await_image with its Google ID
+and purpose, then ask for the new photo. The next owner photo within 15 minutes
+reaches you as a replacement handoff, not an ordinary menu. Inspect both papers,
+use the already-staged UUID (never reupload), crop/scan if requested, and show the
+native replace preview with the inspected cached image. A captioned replacement
+photo also reaches you; resolve its target or ask if ambiguous. Bulk intake stays
+silent and does not consume a pending replacement request.
+Readings and accounting remain unchanged until separately corrected by the owner. Never
 replace a different purchase into an existing booked receipt. If Vista sync is
 pending, say the Drive change succeeded and sync is pending; use action=sync,
 never repeat the file mutation. Existing originals remain protected from

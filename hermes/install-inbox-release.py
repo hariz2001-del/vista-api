@@ -3,12 +3,16 @@ import sys,shutil
 from pathlib import Path
 stage=Path(sys.argv[1]).resolve();home=Path('/home/ubuntu/.hermes/profiles/sarangbooks')
 if stage.parent!=Path('/tmp') or not stage.name.startswith('chopper-release.'):raise SystemExit('Unexpected staging directory.')
-files=('vista_mcp.py','chopper_drive.py','receipt_form.py','receipt_inbox.py','receipt_maintenance.py','telegram_receipts.py','vista_actor_guard.py','receipt-worker-prompt.txt','install-telegram-receipts.py','update-receipt-worker.py','verify-live-inbox.py','verify-live-receipt-card.py','verify-actor-transport.py','verify-live-bulk.py')
+files=('vista_mcp.py','drive_mcp.py','chopper_drive.py','install-direct-drive.py','install-vista-actor-guard.py','receipt_form.py','receipt_inbox.py','receipt_maintenance.py','telegram_receipts.py','vista_actor_guard.py','receipt-worker-prompt.txt','install-telegram-receipts.py','update-receipt-worker.py','verify-live-inbox.py','verify-live-receipt-card.py','verify-actor-transport.py','verify-live-bulk.py')
 for name in files:
     path=stage/name
     if not path.is_file():raise SystemExit('Incomplete release.')
     if name.endswith('.py'):compile(path.read_text(),str(path),'exec')
 targets=[(stage/name,home/'integrations'/name) for name in files]+[(stage/'SOUL.md',home/'SOUL.md'),(stage/'SKILL.md',home/'skills/productivity/sarang-bookkeeping/SKILL.md')]
+monitor=stage/'receipt-queue-monitor.py'
+if not monitor.is_file():raise SystemExit('Direct Drive retry monitor missing.')
+compile(monitor.read_text(),str(monitor),'exec')
+targets.append((monitor,home/'scripts/receipt-queue-monitor.py'))
 for source,target in targets:
     backup=target.with_name(target.name+'.before-inbox-v1')
     if target.exists() and not backup.exists():shutil.copy2(target,backup)

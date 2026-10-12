@@ -33,7 +33,7 @@ def business_context(adapter, event):
         'rather than vista_sales with omitted dates (which is a seven-day report). Show the '
         'actual sales date and as-of time; explain any overnight trading-day cutoff. '
         'CURRENT BUSINESS CAPABILITIES: '
-        'Chopper has an independent direct Google Drive connection through chopper_drive, scoped to Finances, owner-only. '
+        'Chopper has an independent direct Google Drive connection through mcp__finances_drive__chopper_drive, scoped to Finances, owner-only. '
         'Use chopper_drive for Drive browsing, folders, uploads, rename/move, and previewed replacement/Trash/restore. '
         'Those Google file operations do not go through Vista. Receipt image changes notify Vista separately; '
         'pending sync does not mean the Drive action failed and must never cause repeating replacement/deletion. '
@@ -84,6 +84,32 @@ async def photo(adapter, message, event, data):
         }, str(message.from_user.id))
         receipt = result['receipt']; rid = receipt['id']
         if result.get('bulk'):return True # Silent intake; durable worker does OCR/colour scan/Drive.
+        form_module()
+        import chopper_drive
+        # A user-requested replacement photo must reach the agent instead of
+        # being swallowed by the ordinary automatic receipt menu.
+        if hasattr(m, 'PROFILE'):
+            intent = await asyncio.to_thread(chopper_drive.photo_intent, m, str(message.from_user.id), getattr(message, 'caption', '') or '')
+            if intent:
+                import json
+                from hashlib import sha256
+                directory = m.PROFILE / 'cache' / 'receipt-replacements'
+                directory.mkdir(parents=True, exist_ok=True)
+                extension = {'image/png':'png','image/webp':'webp'}.get(mime.lower(), 'jpg')
+                incoming = directory / (rid + '-' + sha256(data).hexdigest()[:12] + '.' + extension)
+                incoming.write_bytes(data)
+                context = ('REPLACEMENT PHOTO HANDOFF: this photo is registered in Vista under full receipt UUID ' + rid + '. '
+                    'The EXACT incoming photo is cached at ' + str(incoming) + '. '
+                    'If upload deduplicated to an existing UUID, its current Drive image may be different after a previous replacement: '
+                    'inspect the incoming cached photo, never substitute that existing Drive image as the new input. '
+                    'If duplicate input cannot be cropped safely using the available tools, explain and ask rather than scanning a different source. '
+                    'Do not reupload it or book a new expense. Owner replacement intent: ' + json.dumps(intent) + '. '
+                    'Fetch/inspect the staged photo with this UUID, make a real colour crop if requested, then use '
+                    'chopper_drive action=preview operation=replace for the exact Google target and inspected cached image. '
+                    'Show native owner confirmation; no replacement is authorised until that click. Preserve accounting. '
+                    'If the image is a different purchase, stop and clarify rather than swapping booked evidence.')
+                event.channel_prompt = '\n\n'.join(x for x in [getattr(event, 'channel_prompt', '') or '', context] if x)
+                return False # Existing authenticated photo routing delivers the image/caption to Hermes.
         if result.get('autoStash'):
             warning=' Same photo already saved; flagged in the inbox for reviewing prior allocations.' if result.get('duplicate') else ''
             await adapter._bot.send_message(chat_id=message.chat.id,text=f"📥 {receipt['ref']} saved safely.{warning} Reading, cropped scan, Drive storage and cross-check processing continue in the background; no new expense posted.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Finish batch / Review inbox',callback_data='vi:mode:off')]]))

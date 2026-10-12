@@ -1,9 +1,10 @@
 """Bind Vista calls to trusted Hermes session identity, not model arguments."""
 from pathlib import Path
 BRIDGE='/home/ubuntu/.hermes/profiles/sarangbooks/integrations/vista_mcp.py'
+DRIVE_BRIDGE='/home/ubuntu/.hermes/profiles/sarangbooks/integrations/drive_mcp.py'
 WORKER_TOOLS=frozenset(('vista_receipt_queue','vista_get_receipt','vista_save_reading','vista_receipt_duplicates','vista_find_matches','vista_scan_receipt','vista_drive_sync','vista_receipt_notify','vista_current_time','vista_options','vista_drive_status','vista_receipt_form','vista_receipt_annotate','vista_receipt_checks'))
 def bind(config,tool_name,args,session=None):
-    if BRIDGE not in config.get('args',[]):return args
+    if not any(path in config.get('args',[]) for path in (BRIDGE,DRIVE_BRIDGE)):return args
     if session is None:
         from gateway.session_context import get_session_env
         session=get_session_env

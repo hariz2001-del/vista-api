@@ -3,6 +3,12 @@ import asyncio
 import hashlib
 import json
 import tempfile
+import subprocess
+import sys
+import os
+import io
+import runpy
+from contextlib import redirect_stdout
 import types
 import unittest
 from pathlib import Path
@@ -171,6 +177,57 @@ class DirectDriveTests(unittest.TestCase):
         with self.client.db() as db:db.execute("UPDATE operations SET state='running' WHERE id=?",(first,))
         with self.assertRaisesRegex(ValueError,'Another operation'):self.client.confirm(second)
         self.assertEqual(self.client.writes,[])
+
+    def test_awaiting_photo_is_owner_bound_durable_single_use_and_caption_overrides(self):
+        with patch.object(drive,'Drive',return_value=self.client):
+            drive.run(self.bridge,'304348232',{'action':'await_image','file_id':'source-image','reason':'Clearer same receipt'})
+            intent=drive.photo_intent(self.bridge,'304348232')
+            self.assertEqual(intent['target_file_id'],'source-image')
+            self.assertIsNone(drive.photo_intent(self.bridge,'304348232'))
+            drive.run(self.bridge,'304348232',{'action':'await_image','file_id':'source-image','reason':'Same paper'})
+            self.assertEqual(drive.photo_intent(self.bridge,'304348232','replace R-ABCDEF')['caption'],'replace R-ABCDEF')
+        self.assertEqual(self.client.writes,[])
+
+    def test_expired_photo_wait_cannot_capture_a_later_receipt(self):
+        with patch.object(drive,'Drive',return_value=self.client):
+            drive.run(self.bridge,'304348232',{'action':'await_image','file_id':'source-image','reason':'Same paper'})
+            with self.client.db() as db:db.execute('UPDATE awaiting_images SET made=0')
+            self.assertIsNone(drive.photo_intent(self.bridge,'304348232'))
+            drive.run(self.bridge,'304348232',{'action':'await_image','file_id':'source-image','reason':'Same paper'})
+            drive.run(self.bridge,'304348232',{'action':'cancel_image'})
+            self.assertIsNone(drive.photo_intent(self.bridge,'304348232'))
+
+    def test_separate_mcp_exposes_only_drive_and_rejects_database_calls(self):
+        root=Path(__file__).resolve().parent
+        messages=[{'jsonrpc':'2.0','id':1,'method':'tools/list'}, {'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'vista_post','arguments':{}}}]
+        proc=subprocess.run([sys.executable,str(root/'drive_mcp.py')],input='\n'.join(json.dumps(x) for x in messages)+'\n',capture_output=True,text=True,encoding='utf-8',env={**os.environ,'PYTHONUTF8':'1'},check=True)
+        replies=[json.loads(line) for line in proc.stdout.splitlines()]
+        self.assertEqual([t['name'] for t in replies[0]['result']['tools']],['chopper_drive'])
+        self.assertTrue(replies[1]['result']['isError'])
+        proc=subprocess.run([sys.executable,str(root/'vista_mcp.py')],input=json.dumps(messages[0])+'\n',capture_output=True,text=True,encoding='utf-8',env={**os.environ,'PYTHONUTF8':'1'},check=True)
+        self.assertNotIn('chopper_drive',[t['name'] for t in json.loads(proc.stdout)['result']['tools']])
+
+    def test_separate_mcp_transport_binds_actor_and_worker_permissions(self):
+        config={'args':[guard.DRIVE_BRIDGE]}
+        session=lambda k: {'HERMES_SESSION_PLATFORM':'telegram','HERMES_SESSION_USER_ID':'partner'}.get(k)
+        with self.assertRaises(PermissionError):guard.bind(config,'chopper_drive',{'action':'edit','telegram_user_id':'304348232'},session)
+        session=lambda k: {'HERMES_CRON_SESSION':'1'}.get(k)
+        with self.assertRaises(PermissionError):guard.bind(config,'chopper_drive',{'action':'preview'},session)
+        self.assertEqual(guard.bind(config,'chopper_drive',{'action':'sync'},session)['telegram_user_id'],'304348232')
+
+    def test_monitor_wakes_for_pending_sync_when_ocr_queue_is_empty(self):
+        integrations=self.profile/'integrations';integrations.mkdir()
+        (integrations/'vista_mcp.py').write_text("def _setting(name): return '304348232'\ndef _call(*a,**kw): return {'jobs': []}\n")
+        with self.client.db() as db:
+            db.execute('INSERT INTO operations VALUES (?,?,?,?,?,?)',('pending-test','304348232',0,'drive_done','{}','{}'))
+        real_path=Path
+        factory=lambda value: self.profile if str(value)=='/home/ubuntu/.hermes/profiles/sarangbooks' else real_path(value)
+        output=io.StringIO()
+        with patch('pathlib.Path',side_effect=factory),redirect_stdout(output):
+            runpy.run_path(str(real_path(__file__).resolve().parent/'receipt-queue-monitor.py'))
+        result=json.loads(output.getvalue())
+        self.assertEqual(result['eligible'],[])
+        self.assertEqual(result['pendingDriveSync'],['pending-test'])
 
 
 if __name__=='__main__':unittest.main()
