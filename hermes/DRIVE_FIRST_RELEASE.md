@@ -46,6 +46,12 @@ No replacement agent framework, separate Telegram bots or extra provider keys.
   register `1X1bWKqX_EA6olMku2YrvGsGsDoPGWZH0`.
 - No database schema migration required.
 
+Scan runtime dependencies are pinned in requirements-scan.txt, installed in
+`cache/scan-runtime`. Use that venv's Python for chopper_scan.py, not the gateway
+interpreter. New Hermes installations also require the existing gateway/MCP
+dependencies; install-drive-first.py wires an already configured profile, it
+does not provision Google OAuth or model credentials.
+
 ## Existing receipts and authorised cleanup
 
 All 32 former ReceiptDocuments were adopted before removing Vista drafts.
@@ -61,6 +67,8 @@ fields, preview only), 19 NEEDS_REVIEW, 0 PROCESSING. All 32 rows matched the
 Drive register. Review cards can display both the attempted scan and retained
 original. For example, a stapler covers the bottom of one source receipt;
 flattening cannot reconstruct that hidden text. No flag was silently cleared.
+Uncertain sources are retained/restored in Processing rather than old date
+folders, using `migrate-drive-first.py <backup> --retain-review-originals`.
 
 Exact backup (private, not committed):
 `C:/Users/User/Documents/DEV/Vista/backups/chopper-drive-first-1791928778367.json`

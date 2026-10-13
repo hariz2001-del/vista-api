@@ -67,6 +67,15 @@ if __name__=='__main__':
     for row in snapshot['receipts']:
         r=adopt(row,snapshot['businessId']);print(json.dumps({'adopted':r['id'],'state':r['state']}),flush=True)
     cr.sync_register(m)
+    if '--retain-review-originals' in sys.argv:
+        d=cr.service(m);folders=cr.layout(d)
+        for r in cr.pending('304348232'):
+            v=r['data']
+            if v.get('scanVerified') or not v.get('sourceFile'):continue
+            source=d.scoped(v['sourceFile'],allow_trash=True)
+            if source.get('trashed'):d.request('/files/'+source['id'],'PATCH',{'trashed':False})
+            cr.move(d,source['id'],folders['Processing'],'CHR-'+r['id']+'__original-review.jpg')
+        print('Uncertain originals retained in Processing, not old dated folders.',flush=True)
     if '--verify' in sys.argv:
         from concurrent.futures import ThreadPoolExecutor
         rows=[r for r in cr.pending('304348232') if r['state']=='VERIFYING']

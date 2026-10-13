@@ -1,0 +1,4 @@
+# Private Chopper scan runtime, separate from Hermes provider/runtime packages.
+Pillow==12.3.0
+opencv-python-headless==5.0.0.93
+numpy==2.5.4
