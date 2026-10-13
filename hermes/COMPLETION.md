@@ -291,3 +291,32 @@ Telegram toolset/config changed for finance only; saved credentials untouched.
 Actual Hermes session 20261013_033554_14dd3c successfully used the separate
 mcp__finances_drive__chopper_drive connection. The receipt monitor also watches
 durable pendingDriveSync IDs, so an empty OCR queue cannot suppress sync retries.
+## Hermes-native Chopper workers — 14 October 2026
+
+The owner requested GPT-6 Luna workers under Chopper, using the existing Hermes
+architecture. sarangbooks now exposes native `delegate_task`, pinned to Luna on
+the existing openai-codex provider, capped at two concurrent leaf children and
+12 turns each. No additional Telegram bot/profile/provider credentials were
+created. Parent and both children were verified in persisted sessions during a
+synthetic read-only live smoke test (parent 20261014_015447_ac2b72).
+
+Roles are Receipt Reader and Vista Submission Reviewer, returning results to
+Chopper. The actual writer remains the existing native confirmed submission
+path. No model-backed child receives financial authority: `vista_actor_guard.py`
+checks Hermes's native delegated-child context and rejects child Vista/Drive
+calls before RPC even with inherited owner identity. Narrow child toolsets do
+not automatically inherit MCP toolsets. No nested delegation, dangerous-command
+auto-approval or alternate-model fallbacks are enabled.
+
+57 local Python tests pass; 6 config tests pass on the host; installed Hermes
+transport verification with mocked RPC passes. Gateway reloaded and is active.
+This proves native delegation/model configuration and the transport boundary,
+not real-image accuracy, improved receipt latency or a completed writer rollout.
+
+At that worker-layer checkpoint, Drive-first intake and cleanup were pending.
+They were subsequently implemented and deployed on 14 October. See
+[DRIVE_FIRST_RELEASE.md](DRIVE_FIRST_RELEASE.md) for the live architecture,
+deployment, 32-receipt migration, exact backed-up cleanup, functional checks and
+remaining real owner acceptance boundaries. The earlier worker-only statement
+must not be read as current status.
+

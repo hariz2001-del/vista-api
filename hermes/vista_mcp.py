@@ -459,6 +459,8 @@ DIRECT_DRIVE_TOOL = _tool('chopper_drive', 'OWNER independent Finances Google Dr
 
 TOOLS.append(_tool('vista_receipt_annotate', 'Maintain a SEPARATE annotated Drive scan showing posted items by brand and crossed-out scrapped items. Never changes receipt text, amounts, originals or accounting. Inspect the actual cropped scan with vision before supplying normalized scan regions per ZERO-BASED line index. Use reading_hash from vista_receipt_form. Omit regions to retry upload only. Unknown positions stay unmarked, not guessed.', {'receipt_id':{'type':'string'},'reading_hash':{'type':'string'},'regions':{'type':'array','items':{'type':'object','properties':{k:{'type':'integer' if k=='index' else 'number'} for k in ('index','x','y','width','height')},'required':['index','x','y','width','height']}}}, ['receipt_id']))
 
+TOOLS.append(_tool('chopper_receipts','Chopper Drive-first pending receipt register: list/get/edit reading only. No financial submission or confirmation through the model. Native Telegram buttons choose live Vista fields, preview and confirm.',{'action':{'type':'string','enum':['list','get','edit']},'receipt_id':{'type':'string'},'reading':{'type':'object'}},['action']))
+
 def _receipt_card_send(rid, view, user):
     import receipt_form
     context=_call('GET',f'/agent/receipts/{rid}/telegram-context',telegram_user=user)
@@ -509,8 +511,17 @@ def _bulk_notify(user,receipt_id=None):
     _call('POST','/agent/inbox/bulk/delivered',{'id':delivery['id'],'leaseToken':delivery['leaseToken'],'messageId':sent['result']['message_id']},user)
     return {'sent':True,'message_id':sent['result']['message_id'],'total':delivery['result']['total']}
 
+LEGACY_RECEIPT_WRITES=frozenset(('vista_upload_receipt','vista_post','vista_preview','vista_link','vista_skip','vista_reject','vista_set_extraction','vista_receipt_form','vista_receipt_inbox','vista_save_reading','vista_scan_receipt','vista_drive_sync','vista_reuse_receipt','vista_receipt_annotate','vista_receipt_notify','vista_receipt_queue'))
+if (PROFILE/'drive-first.enabled').exists():
+    TOOLS=[tool for tool in TOOLS if tool['name'] not in LEGACY_RECEIPT_WRITES]
+
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name == 'chopper_receipts':
+        import chopper_receipts
+        return chopper_receipts.tool(sys.modules[__name__],user or _default_user(),args)
+    if (PROFILE/'drive-first.enabled').exists() and name in LEGACY_RECEIPT_WRITES:
+        raise VistaError('Drive-first receipts are owned by Chopper. Use chopper_receipts list/get/edit and native configuration/confirmation buttons; no Vista staging or legacy posting.')
     if name == 'chopper_drive':
         import chopper_drive
         return chopper_drive.run(sys.modules[__name__], user or _default_user(), args)

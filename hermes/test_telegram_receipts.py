@@ -35,6 +35,10 @@ class Bridge:
         self.calls.append((method,path,body,user))
         return {'duplicate':self.duplicate, 'bulk':getattr(self,'bulk',False),'autoStash':getattr(self,'auto_stash',False), 'duplicateReason':'identical image bytes', 'receipt':{'id':'11111111-1111-4111-8111-111111111111','ref':'R-111111','status':'UPLOADED','expenses':[]}}
 class ReceiptTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        # These exercise the retained rollback path independently of a host's
+        # live cutover flag. Drive-first contracts have their own test module.
+        p=patch('chopper_receipts.enabled',return_value=False);p.start();self.addCleanup(p.stop)
     async def test_replacement_photo_reaches_agent_with_exact_input_not_duplicate_stored_image(self):
         with tempfile.TemporaryDirectory() as folder:
             a=Adapter();b=Bridge(duplicate=True);b.PROFILE=Path(folder);m.bridge=lambda:b

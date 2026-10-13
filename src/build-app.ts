@@ -14,6 +14,7 @@ import { agentReceiptInboxRoutes } from './routes/agent-receipt-inbox.ts'
 import { collectAgentMaintenance } from './routes/agent-maintenance.ts'
 import {agentPreferencesRoutes} from './routes/agent-preferences.ts'
 import { agentRoutes } from './routes/agent.ts'
+import { agentSealedReceiptRoutes } from './routes/agent-sealed-receipts.ts'
 import { agentDriveRoutes } from './routes/agent-drive.ts'
 import { collectAgentOperations } from './agent-operations.ts'
 import { agentReportRoutes } from './routes/agent-reports.ts'
@@ -158,6 +159,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(teamStaffRoutes)
   await app.register(stockRoutes)
   await app.register(agentRoutes)
+  await app.register(agentSealedReceiptRoutes)
   await app.register(agentReadRoutes)
   await app.register(agentBusinessRoutes)
   await app.register(agentReceiptFormRoutes)

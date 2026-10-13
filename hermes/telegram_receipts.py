@@ -72,6 +72,9 @@ def bridge():
 
 async def photo(adapter, message, event, data):
     if not enabled(adapter): return False
+    form_module()
+    import chopper_receipts
+    if chopper_receipts.enabled(): return await chopper_receipts.photo(adapter,message,event,data,bridge())
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     m = bridge()
     try:
@@ -145,6 +148,10 @@ async def photo(adapter, message, event, data):
 
 async def callback(adapter, query, data):
     if not enabled(adapter): return False
+    if data.startswith('cr:'):
+        form_module()
+        import chopper_receipts
+        return await chopper_receipts.callback(adapter,query,data,bridge())
     if data.startswith('dg:'):
         form_module()
         import chopper_drive
@@ -204,6 +211,12 @@ async def callback(adapter, query, data):
 async def text_command(adapter,event):
     if not enabled(adapter):return False
     form_module()
+    import chopper_receipts
+    if chopper_receipts.enabled():
+        try: return await chopper_receipts.command(adapter,event,bridge())
+        except Exception as e:
+            await adapter._bot.send_message(chat_id=getattr(event.source,'chat_id',None) or event.source.user_id,text='Receipt request needs review: '+str(e)[:250])
+            return True
     import receipt_inbox
     return await receipt_inbox.command(adapter,event,bridge())
 
