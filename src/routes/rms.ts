@@ -8,6 +8,7 @@ import { badRequest, conflict, notFound } from '../errors.ts'
 import { itemsTotalSen, lineTotalSen } from '../domain/expense-items.ts'
 import { serialisePromotion } from './promotions.ts'
 import { shiftTakings } from './shifts.ts'
+import { rmsRevision } from '../rms-revision.ts'
 
 /**
  * The owner dashboard: its read model and its write actions. Owner accounts only.
@@ -342,7 +343,24 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
    * a single stall that is small. The dashboard polls this, which is how a sale
    * rung at the counter appears on the owner's screen within seconds.
    */
-  app.get('/rms/snapshot', { preHandler: requireOwner }, async (request) => {
+  app.get('/rms/state', { preHandler: requireOwner }, async (request, reply) => {
+    reply.header('Cache-Control', 'private, no-store')
+    const { db, businessId } = request
+    const [revision, businessDate, terminal, sessions] = await Promise.all([
+      rmsRevision(db, businessId), businessToday(db, businessId),
+      db.terminalStatus.findUnique({ where: { businessId } }),
+      db.session.findMany({ where: { scope: 'COUNTER', revokedAt: null },
+        orderBy: { createdAt: 'asc' }, select: { id: true, createdAt: true, lastUsedAt: true } }),
+    ])
+    return { revision, businessDate,
+      terminal: { lastSeenAt: terminal?.lastSeenAt?.toISOString() ?? null,
+        consecutiveSyncFailures: terminal?.consecutiveSyncFailures ?? 0, unsentSaleCount: 0 },
+      counterSessions: sessions.map(s => ({ id: s.id, signedInAt: s.createdAt.toISOString(), lastUsedAt: s.lastUsedAt.toISOString() })),
+    }
+  })
+
+  app.get('/rms/snapshot', { preHandler: requireOwner }, async (request, reply) => {
+    reply.header('Cache-Control', 'private, no-store')
     const { db, businessId } = request
     const [
       settings,
