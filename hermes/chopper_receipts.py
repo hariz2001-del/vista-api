@@ -245,7 +245,7 @@ async def card(adapter,m,r,chat):
         await adapter._bot.send_message(chat_id=chat,text=text[:3900]+'\nScanning is still running. Configuration opens after scan verification.',reply_markup=markup([[button('Refresh',prefix+'open'),button('Inbox','cr:list:show')]]))
         return
     if r['state']=='NEEDS_REVIEW':
-        await adapter._bot.send_message(chat_id=chat,text=text[:3700]+'\n'+v_error(r)+'\nOriginal remains safe.',reply_markup=markup([[button('Edit reading / corners',prefix+'edit'),button('Retry scan',prefix+'retry')],[button('Inbox','cr:list:show')]]))
+        await adapter._bot.send_message(chat_id=chat,text=text[:3700]+'\n'+v_error(r)+'\nOriginal remains safe.',reply_markup=markup([[button('Edit reading / corners',prefix+'edit'),button('Retry scan',prefix+'retry')],[button('View scan',prefix+'scan'),button('View original',prefix+'original')],[button('Inbox','cr:list:show')]]))
         return
     rows=[[button('Category',prefix+'pick:category'),button('Brand',prefix+'pick:brandId')],[button('Funding',prefix+'pick:paidBy'),button('Payment',prefix+'pick:paymentMethod')],[button('Split items',prefix+'split'),button('Shared split %',prefix+'pick:foodSplitPct')],[button('Preview save',prefix+'preview'),button('View scan',prefix+'scan')],[button('Edit reading',prefix+'edit'),button('Stash / End',prefix+'stash')]]
     if not r['data'].get('scanVerified'):rows.append([button('Verify scan again',prefix+'verify')])
@@ -289,9 +289,16 @@ async def callback(adapter,query,data,m):
         if p[2]=='open':await card(adapter,m,r,chat)
         elif p[2]=='stash':await adapter._bot.send_message(chat_id=chat,text='Review ended. This receipt and its choices remain in the Drive pending register. Nothing new posted.')
         elif p[2]=='scan':
-            path=v.get('scanPath')
+            path=v.get('scanPath') or str(ROOT/(r['id']+'.scan.jpg'))
             if not path or not Path(path).exists():raise ValueError('Scan is still processing')
             with open(path,'rb') as f:await adapter._bot.send_photo(chat_id=chat,photo=f,caption='Stored colour scan · CHR-'+r['id'][:8])
+        elif p[2]=='original':
+            from io import BytesIO
+            def original():
+                d=service(m);d.scoped(v['sourceFile'],allow_trash=True)
+                return d.request('/files/'+v['sourceFile']+'?alt=media',raw=True)
+            image=BytesIO(await asyncio.to_thread(original));image.name='original.jpg'
+            await adapter._bot.send_photo(chat_id=chat,photo=image,caption='Retained original for review · CHR-'+r['id'][:8]+'. No entry posted.')
         elif p[2]=='edit':
             settings(actor,editing=r['id']);await adapter._bot.send_message(chat_id=chat,text='Reply with corrected receipt JSON: vendor, date (YYYY-MM-DD), receiptNo, totalSen, lines (name, quantityMilli, unitPriceSen, amountSen), flags. This changes reading only, not accounts. /cancel cancels.')
         elif p[2]=='retry':

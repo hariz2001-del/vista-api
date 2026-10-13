@@ -56,6 +56,11 @@ allocation overlay. That exact overlay was moved to recoverable Trash after
 verified readback of its clean canonical scan. Existing scans are verified;
 failed ones are reprocessed from their originals or marked NEEDS_REVIEW.
 Use verify-drive-first.py for current counts rather than assuming all passed.
+At completed backlog verification: 12 UNCONFIGURED, 1 CONFIGURED (restored
+fields, preview only), 19 NEEDS_REVIEW, 0 PROCESSING. All 32 rows matched the
+Drive register. Review cards can display both the attempted scan and retained
+original. For example, a stapler covers the bottom of one source receipt;
+flattening cannot reconstruct that hidden text. No flag was silently cleared.
 
 Exact backup (private, not committed):
 `C:/Users/User/Documents/DEV/Vista/backups/chopper-drive-first-1791928778367.json`
