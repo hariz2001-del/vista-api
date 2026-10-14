@@ -26,7 +26,8 @@ async function main() {
   const live = process.argv[2] ?? ''
   if (!/^[0-9a-f-]{36}$/.test(live)) throw new Error('Pass the live business id (DRIVE_BUSINESS_ID).')
   const liveUsers = await prisma.agentUser.findMany({ where: { businessId: live, telegramUserId: { in: TELEGRAM } } })
-  if (liveUsers.length !== TELEGRAM.length) throw new Error(`Live business has ${liveUsers.length} of the ${TELEGRAM.length} Telegram users`)
+  // Only roles the live business actually grants are copied; a missing user stays without access.
+  const missing = TELEGRAM.filter(t => !liveUsers.some(u => u.telegramUserId === t)).map(String)
 
   const saved = existsSync(SECRETS) ? JSON.parse(readFileSync(SECRETS, 'utf8')) : {}
   const result = await prisma.$transaction(async tx => {
@@ -68,7 +69,7 @@ async function main() {
   })
   mkdirSync(join(homedir(), '.vista-secrets'), { recursive: true })
   writeFileSync(SECRETS, JSON.stringify(result, null, 2), { mode: 0o600 })
-  console.log(JSON.stringify({ businessId: result.businessId, roles: result.roles, secretsFile: SECRETS }))
+  console.log(JSON.stringify({ businessId: result.businessId, roles: result.roles, notInLiveBusiness: missing, secretsFile: SECRETS }))
 }
 
 main().finally(() => prisma.$disconnect())
