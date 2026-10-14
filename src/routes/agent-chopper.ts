@@ -7,6 +7,7 @@ import type { Tx } from '../db.ts'
 import { env } from '../env.ts'
 import { badRequest, conflict, forbidden, notFound } from '../errors.ts'
 import { readFromDrive, withinFinances, type DriveFile } from '../integrations/drive.ts'
+import { itemKey } from '../receipt-learning.ts'
 import { createExpense, expenseBody, previewExpense } from './rms.ts'
 
 /**
@@ -185,6 +186,40 @@ export async function agentChopperRoutes(app: FastifyInstance) {
       const receiptKey = doc ? keyOf(doc) : null
       return { expenseId: e.id, receiptKey, date: e.businessDate.toISOString().slice(0, 10), amountSen: e.amountSen, vendor: e.vendor ?? doc?.vendor ?? null, description: e.description, reasons, sameReceiptKey: Boolean(q.receiptKey && receiptKey === q.receiptKey) }
     })
+  })
+
+  /**
+   * Brand and category guesses from confirmed Vista expenses, no AI: each line by
+   * its item name (80% agreement, as the RMS receipt form does), then the receipt
+   * as a whole, falling back to what this vendor was booked as before.
+   */
+  app.post('/agent/chopper/suggest', read, async request => {
+    const body = z.object({ vendor: z.string().trim().max(120).nullish(), lines: z.array(z.object({ name: z.string().max(200) })).max(100).default([]) }).parse(request.body)
+    const [items, byVendor] = await Promise.all([
+      request.db.expenseItem.findMany({ orderBy: { expense: { createdAt: 'desc' } }, take: 3000, select: { name: true, expense: { select: { id: true, brandId: true, category: true } } } }),
+      body.vendor ? request.db.expense.findMany({ where: { vendor: { equals: body.vendor, mode: 'insensitive' } }, orderBy: { createdAt: 'desc' }, take: 20, select: { brandId: true, category: true } }) : [],
+    ])
+    const pairKey = (e: { brandId: string | null; category: string }) => `${e.category}|${e.brandId ?? ''}`
+    const best = (rows: Array<{ brandId: string | null; category: string }>, minimum: number) => {
+      if (!rows.length) return null
+      const counts = new Map<string, number>()
+      for (const row of rows) counts.set(pairKey(row), (counts.get(pairKey(row)) ?? 0) + 1)
+      const [key, count] = [...counts].sort((a, b) => b[1] - a[1])[0]!
+      if (count / rows.length < minimum) return null
+      const [category, brandId] = key.split('|')
+      return { category: category!, brandId: brandId || null, examples: count, confidence: Math.round(count / rows.length * 100) / 100 }
+    }
+    const lines = body.lines.map((line, index) => {
+      const seen = new Map<string, { brandId: string | null; category: string }>()
+      for (const item of items) if (itemKey(item.name) === itemKey(line.name) && !seen.has(item.expense.id) && seen.size < 12) seen.set(item.expense.id, item.expense)
+      const guess = best([...seen.values()], 0.8)
+      return guess ? { index, ...guess, source: 'item history' } : { index, category: null, brandId: null, examples: 0, confidence: 0, source: null }
+    })
+    const known = lines.filter(l => l.category)
+    const fromLines = known.length ? best(known.map(l => ({ category: l.category!, brandId: l.brandId })), 0.5) : null
+    const fromVendor = best(byVendor, 0.6)
+    const overall = fromLines ? { ...fromLines, source: 'item history' } : fromVendor ? { ...fromVendor, source: 'vendor history' } : null
+    return { overall, lines }
   })
 
   app.post('/agent/chopper/link/preview', write, async request => {

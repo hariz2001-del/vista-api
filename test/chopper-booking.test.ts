@@ -91,6 +91,13 @@ it('books a split receipt in parts, flags real duplicates, and files without tou
   expect(dupes.statusCode, dupes.body).toBe(200)
   expect(dupes.json()).toHaveLength(2)
   for (const d of dupes.json()) expect(d).toMatchObject({ receiptKey: 'R-AAAAAA', sameReceiptKey: true, reasons: expect.arrayContaining(['invoice', 'image']) })
+  const guess = await app.inject({ method: 'POST', url: '/agent/chopper/suggest', headers: viewer, payload: { vendor: '99 Speed Mart', lines: [{ name: 'FRIES' }, { name: 'Something new' }] } })
+  expect(guess.statusCode, guess.body).toBe(200)
+  expect(guess.json().lines[0]).toMatchObject({ category: 'RAW_MATERIALS', brandId: brand.id, source: 'item history' })
+  expect(guess.json().lines[1]).toMatchObject({ category: null })
+  expect(guess.json().overall).toMatchObject({ category: 'RAW_MATERIALS', brandId: brand.id })
+  const byVendor = await app.inject({ method: 'POST', url: '/agent/chopper/suggest', headers: viewer, payload: { vendor: '99 speed mart', lines: [{ name: 'Never seen' }] } })
+  expect(byVendor.json().overall).toMatchObject({ category: 'RAW_MATERIALS', brandId: brand.id, source: 'vendor history' })
   const otherKey = await post(booking('R-BBBBBB', 'scan-file-3', [entry(brand.id, 1795)]))
   expect(otherKey.json().error).toBe('agent:DUPLICATE_INVOICE')
 
