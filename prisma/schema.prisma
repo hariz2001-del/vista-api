@@ -451,6 +451,7 @@ model Order {
 
   /// `#042`. Unique within a business and business date.
   queueNumber  String  @map("queue_number")
+  pagerNumber  String? @map("pager_number") @db.VarChar(4)
   /// The `#OFF-01` the kitchen was actually told, when this sale was rung up
   /// offline. Kept after syncing: it is the only way to trace a disputed order
   /// back to what the customer was called.
@@ -691,6 +692,7 @@ model AccountSettings {
   outletName            String   @map("outlet_name")
   /// Partner settlement: two brands, each owned by a partner, with a monthly
   /// payout between them. Off for a new business; a solo shop never sees it.
+  pagerEnabled          Boolean  @default(false) @map("pager_enabled")
   settlementEnabled     Boolean  @default(false) @map("settlement_enabled")
   /// When one trading day ends and the next begins, 0–12 (hour of the morning,
   /// Malaysia time). A 1am sale with the default 5 counts for the night before.

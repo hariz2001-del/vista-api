@@ -34,6 +34,7 @@ const checkoutBody = z.object({
   business_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   origin: z.enum(['ONLINE', 'OFFLINE_SYNC']).default('ONLINE'),
   offline_label: z.string().max(32).nullish(),
+  pager_number: z.string().regex(/^[0-9]{1,4}$/).nullish(),
   /** What the cashier was shown. Checked against the server's own figure. */
   claimed_total_sen: z.number().int().min(0),
   cart_discount_sen: z.number().int().min(0).default(0),
@@ -86,6 +87,7 @@ function serialise(order: NonNullable<Awaited<ReturnType<typeof loadExisting>>>,
   return {
     order_id: order.id,
     queue_number: order.queueNumber,
+    pager_number: order.pagerNumber,
     offline_label: order.offlineLabel,
     business_date: order.businessDate.toISOString().slice(0, 10),
     total_amount_sen: order.totalAmountSen,
@@ -288,6 +290,7 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string, businessI
       businessDate,
       queueNumber,
       offlineLabel: body.offline_label ?? null,
+      pagerNumber: body.pager_number ?? null,
       clientTxnId: body.client_txn_id,
       origin: body.origin,
       grossSen: recorded.grossSen,

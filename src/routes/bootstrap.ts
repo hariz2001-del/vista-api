@@ -79,6 +79,7 @@ export async function bootstrapRoutes(app: FastifyInstance): Promise<void> {
             outlet_name: settings.outletName,
             // The counter works out its own business date offline, so it needs the hour.
             day_rollover_hour: settings.dayRolloverHour,
+            pager_enabled: settings.pagerEnabled,
           }
         : null,
       open_shift: openShift

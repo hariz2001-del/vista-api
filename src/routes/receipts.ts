@@ -46,6 +46,7 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
         shift_id: order.shiftId,
         business_date: order.businessDate.toISOString().slice(0, 10),
         queue_number: order.queueNumber,
+        pager_number: order.pagerNumber,
         offline_label: order.offlineLabel,
         total_amount_sen: order.totalAmountSen,
         menu_price_sen: order.menuPriceSen,

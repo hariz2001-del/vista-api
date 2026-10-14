@@ -294,3 +294,19 @@ describe('new items with their own option groups', () => {
     expect(await prisma.product.count({ where: { name: 'Broken' } })).toBe(0)
   })
 })
+
+describe('order pager setting', () => {
+  it('defaults off, persists the toggle and supplies it to the counter', async () => {
+    const b = await makeBusiness(app, 'Pager Shop')
+    const settings = { businessName: 'Pager Shop', outletName: 'Counter',
+      sharedOverheadFoodPct: 70, hostCommissionPct: 30, capitalAssetFoodPct: 50 }
+    expect((await call(b.counterToken, 'GET', '/bootstrap')).json().account.pager_enabled).toBe(false)
+    expect((await call(b.ownerToken, 'PUT', '/rms/settings', { ...settings, pagerEnabled: true })).statusCode).toBe(200)
+    expect((await call(b.counterToken, 'GET', '/bootstrap')).json().account.pager_enabled).toBe(true)
+    expect((await call(b.ownerToken, 'GET', '/rms/snapshot')).json().settings.pagerEnabled).toBe(true)
+    await call(b.ownerToken, 'PUT', '/rms/settings', settings)
+    expect((await call(b.counterToken, 'GET', '/bootstrap')).json().account.pager_enabled).toBe(true)
+    await call(b.ownerToken, 'PUT', '/rms/settings', { ...settings, pagerEnabled: false })
+    expect((await call(b.counterToken, 'GET', '/bootstrap')).json().account.pager_enabled).toBe(false)
+  })
+})

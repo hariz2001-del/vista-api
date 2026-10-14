@@ -37,7 +37,7 @@ beforeEach(async () => {
 
 type CheckoutRequest = ReturnType<typeof checkoutPayload>
 
-async function checkout(payload: CheckoutRequest) {
+async function checkout(payload: CheckoutRequest & { pager_number?: string | null }) {
   return app.inject({ method: 'POST', url: '/checkout', headers: authed(token), payload })
 }
 
@@ -431,6 +431,36 @@ describe('checkout — auth', () => {
     })
 
     expect(response.statusCode).toBe(401)
+    expect(await prisma.order.count()).toBe(0)
+  })
+})
+
+describe('order pagers', () => {
+  it('persists the pager on checkout, idempotent replay and receipts', async () => {
+    const product = await productByName('Nasi Lemak Ayam')
+    const payload = {
+      ...checkoutPayload({ shiftId, businessDate, clientTxnId: randomUUID(), claimedTotalSen: 1200,
+        items: [{ product_id: product.id, quantity: 1 }] }),
+      pager_number: '007',
+    }
+    const saved = await checkout(payload)
+    expect(saved.statusCode, saved.body).toBe(200)
+    expect(saved.json()).toMatchObject({ pager_number: '007', replayed: false })
+    const replay = await checkout({ ...payload, pager_number: '8' })
+    expect(replay.json()).toMatchObject({ pager_number: '007', replayed: true })
+    const receipts = await app.inject({ method: 'GET', url: `/receipts?business_date=${businessDate}`, headers: authed(token) })
+    expect(receipts.json().orders).toEqual(expect.arrayContaining([expect.objectContaining({ pager_number: '007' })]))
+    expect(await prisma.order.count()).toBe(1)
+  })
+
+  it('rejects invalid pager numbers before recording a sale', async () => {
+    const product = await productByName('Nasi Lemak Ayam')
+    for (const pager_number of ['', '12345', '1.2', 'abc']) {
+      const response = await checkout({ ...checkoutPayload({ shiftId, businessDate,
+        clientTxnId: randomUUID(), claimedTotalSen: 1200,
+        items: [{ product_id: product.id, quantity: 1 }] }), pager_number } as CheckoutRequest)
+      expect(response.statusCode, response.body).toBe(400)
+    }
     expect(await prisma.order.count()).toBe(0)
   })
 })
