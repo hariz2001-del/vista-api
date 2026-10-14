@@ -189,6 +189,7 @@ async function main(): Promise<void> {
   await prisma.stockCount.deleteMany()
   await prisma.stockItem.deleteMany()
   await prisma.partner.deleteMany()
+  await prisma.chopperSubmission.deleteMany()
   await prisma.agentAction.deleteMany()
   await prisma.receiptImage.deleteMany()
   await prisma.expense.deleteMany()

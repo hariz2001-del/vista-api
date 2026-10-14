@@ -19,6 +19,7 @@ export const DEMO = {
 export async function resetTransactional(): Promise<void> {
   await resetTeam()
   // Sarang AI: expenses point at receipts, so they go first (below) — receipts after.
+  await prisma.chopperSubmission.deleteMany()
   await prisma.agentAction.deleteMany()
   await prisma.receiptJob.deleteMany()
   await prisma.reconciliationCase.deleteMany()

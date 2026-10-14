@@ -6,6 +6,7 @@ import { env } from '../env.ts'
 import { conflict, forbidden } from '../errors.ts'
 import { readFromDrive, withinFinances } from '../integrations/drive.ts'
 import { createExpense, expenseBody, previewExpense } from './rms.ts'
+import { chopperPreview, chopperSubmit } from './agent-chopper.ts'
 
 const draft = z.object({
   receiptId: z.string().uuid(), submissionId: z.string().uuid(),
@@ -33,6 +34,8 @@ export async function agentSealedReceiptRoutes(app: FastifyInstance) {
   const guard = { preHandler: requireAgent('BOOKKEEPER') }
   app.get('/agent/chopper/context', guard, async request => ({ businessId: request.businessId, agentUserId: request.agentUser!.id, role: request.agentUser!.role }))
   app.post('/agent/chopper/preview', guard, async request => {
+    // Keyed by Chopper's receipt key: the Drive-first booking flow. Otherwise the original UUID shape.
+    if ((request.body as any)?.receiptKey !== undefined) return chopperPreview(request)
     const body = draft.parse(request.body)
     await evidence(request, body)
     const entries = []
@@ -41,6 +44,7 @@ export async function agentSealedReceiptRoutes(app: FastifyInstance) {
     return { entries, amountSen: body.entries.reduce((n, e) => n + e.amountSen, 0), previewToken: `${until}.${signature(request, body, until)}`, persistsDraft: false }
   })
   app.post('/agent/chopper/submit', guard, async request => {
+    if ((request.body as any)?.payload?.receiptKey !== undefined) return chopperSubmit(request)
     const { payload, previewToken } = z.object({ payload: draft, previewToken: z.string() }).parse(request.body)
     // Readback recovery precedes expiry checks. A lost response must never post twice.
     const prior = await request.db.agentAction.findFirst({ where: { action: 'chopper.receipt.sealed', entityId: payload.submissionId } })
@@ -56,8 +60,8 @@ export async function agentSealedReceiptRoutes(app: FastifyInstance) {
     return request.db.$transaction(async tx => {
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${request.businessId + ':chopper:' + payload.receiptId}))::text`
       if (payload.receiptNo?.trim()) {
-        const identity = [request.businessId, payload.vendor.trim().toLowerCase(), payload.receiptNo.trim().toLowerCase(), payload.receiptDate, payload.totalSen].join(':')
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${identity}))::text`
+        const businessIdentity = [request.businessId, payload.vendor.trim().toLowerCase(), payload.receiptNo.trim().toLowerCase(), payload.receiptDate, payload.totalSen].join(':')
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${businessIdentity}))::text`
         const duplicate = await tx.receiptDocument.findFirst({ where: {
           id: { not: payload.receiptId }, vendor: { equals: payload.vendor.trim(), mode: 'insensitive' },
           receiptNo: { equals: payload.receiptNo.trim(), mode: 'insensitive' },

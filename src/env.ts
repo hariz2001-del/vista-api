@@ -44,6 +44,8 @@ const schema = z.object({
     return link?.[1] ?? value
   }).optional(),
   DRIVE_BUSINESS_ID: z.string().uuid().optional(),
+  /** A test business that may read the same Finances folder, so Chopper can test without live expenses. */
+  DRIVE_TEST_BUSINESS_ID: z.string().uuid().optional(),
 })
 
 const parsed = schema.safeParse(process.env)

@@ -148,6 +148,7 @@ model Business {
   agentActions   AgentAction[]
   receiptJobs    ReceiptJob[]
   reconciliationCases ReconciliationCase[]
+  chopperSubmissions ChopperSubmission[]
   productRecipes ProductRecipe[]
 
   @@map("businesses")
@@ -1770,6 +1771,11 @@ model ReceiptDocument {
   /// Fields the reader was unsure of, e.g. ["total", "date"].
   reviewFlags       String[]      @default([]) @map("review_flags")
   notes             String?
+  /// Chopper's handle, "R-" + 6 hex. Null for receipts made before Chopper chose its own keys.
+  receiptKey        String?       @map("receipt_key")
+  /// Where Chopper filed the scan, e.g. Finances/Receipts/Booked/2026/10/W2. The file ID stays the link.
+  fileName          String?       @map("file_name")
+  drivePath         String?       @map("drive_path")
   uploadedById      String?       @map("uploaded_by_id")
   resolvedAt        DateTime?     @map("resolved_at")
   createdAt         DateTime      @default(now()) @map("created_at")
@@ -1784,8 +1790,31 @@ model ReceiptDocument {
   @@unique([businessId, id])
   @@unique([businessId, sha256])
   @@unique([businessId, telegramChatId, telegramMessageId])
+  @@unique([businessId, receiptKey])
   @@index([businessId, status, createdAt])
   @@map("receipt_documents")
+}
+
+/// One confirmed Chopper booking or link. The unique submission ID makes a
+/// retry return the stored result instead of writing again.
+model ChopperSubmission {
+  id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
+  submissionId String   @map("submission_id")
+  /// "submit" (new expenses) or "link" (existing expenses attached to a scan).
+  kind         String
+  receiptKey   String   @map("receipt_key")
+  /// sha256 of the confirmed payload; the same ID with another payload is refused.
+  digest       String
+  result       Json
+  agentUserId  String   @map("agent_user_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@unique([businessId, submissionId])
+  @@index([businessId, receiptKey])
+  @@map("chopper_submissions")
 }
 
 /// The photo itself, kept here only until it is safely in Google Drive.

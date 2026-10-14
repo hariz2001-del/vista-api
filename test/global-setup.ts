@@ -39,6 +39,7 @@ export default async function setup(): Promise<void> {
   const cleanup = new PrismaClient({ datasourceUrl: url })
   try {
     await cleanup.receiptJob.deleteMany()
+    await cleanup.chopperSubmission.deleteMany()
     await cleanup.reconciliationCase.deleteMany()
     await cleanup.productRecipe.deleteMany()
   } finally { await cleanup.$disconnect() }
