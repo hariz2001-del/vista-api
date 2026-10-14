@@ -195,10 +195,17 @@ export async function agentChopperRoutes(app: FastifyInstance) {
    */
   app.post('/agent/chopper/suggest', read, async request => {
     const body = z.object({ vendor: z.string().trim().max(120).nullish(), lines: z.array(z.object({ name: z.string().max(200) })).max(100).default([]) }).parse(request.body)
-    const [items, byVendor] = await Promise.all([
+    const [items, recent] = await Promise.all([
       request.db.expenseItem.findMany({ orderBy: { expense: { createdAt: 'desc' } }, take: 3000, select: { name: true, expense: { select: { id: true, brandId: true, category: true } } } }),
-      body.vendor ? request.db.expense.findMany({ where: { vendor: { equals: body.vendor, mode: 'insensitive' } }, orderBy: { createdAt: 'desc' }, take: 20, select: { brandId: true, category: true } }) : [],
+      body.vendor ? request.db.expense.findMany({ where: { vendor: { not: null } }, orderBy: { createdAt: 'desc' }, take: 500, select: { vendor: true, brandId: true, category: true } }) : [],
     ])
+    // Receipts print the same shop and item differently ("MR D.I.Y." vs "MR D.I.Y. (KUCHAI) SDN. BHD.",
+    // an item with or without its SKU): the same once normalised, or one a prefix of the other.
+    const alike = (a: string, b: string, min: number) => {
+      const [x, y] = [itemKey(a), itemKey(b)].sort((p, q) => p.length - q.length)
+      return x === y || (x!.length >= min && y!.startsWith(x! + ' '))
+    }
+    const byVendor = body.vendor ? recent.filter(e => alike(e.vendor!, body.vendor!, 3)).slice(0, 20) : []
     const pairKey = (e: { brandId: string | null; category: string }) => `${e.category}|${e.brandId ?? ''}`
     const best = (rows: Array<{ brandId: string | null; category: string }>, minimum: number) => {
       if (!rows.length) return null
@@ -211,7 +218,7 @@ export async function agentChopperRoutes(app: FastifyInstance) {
     }
     const lines = body.lines.map((line, index) => {
       const seen = new Map<string, { brandId: string | null; category: string }>()
-      for (const item of items) if (itemKey(item.name) === itemKey(line.name) && !seen.has(item.expense.id) && seen.size < 12) seen.set(item.expense.id, item.expense)
+      for (const item of items) if (alike(item.name, line.name, 10) && !seen.has(item.expense.id) && seen.size < 12) seen.set(item.expense.id, item.expense)
       const guess = best([...seen.values()], 0.8)
       return guess ? { index, ...guess, source: 'item history' } : { index, category: null, brandId: null, examples: 0, confidence: 0, source: null }
     })

@@ -98,6 +98,11 @@ it('books a split receipt in parts, flags real duplicates, and files without tou
   expect(guess.json().overall).toMatchObject({ category: 'RAW_MATERIALS', brandId: brand.id })
   const byVendor = await app.inject({ method: 'POST', url: '/agent/chopper/suggest', headers: viewer, payload: { vendor: '99 speed mart', lines: [{ name: 'Never seen' }] } })
   expect(byVendor.json().overall).toMatchObject({ category: 'RAW_MATERIALS', brandId: brand.id, source: 'vendor history' })
+  // Printed differently on another receipt: shop with its full company name, item with a SKU.
+  const loose = await app.inject({ method: 'POST', url: '/agent/chopper/suggest', headers: viewer, payload: { vendor: '99 SPEED MART SDN. BHD.', lines: [{ name: 'Sauce Chilli' }] } })
+  expect(loose.json().overall).toMatchObject({ category: 'RAW_MATERIALS', brandId: brand.id, source: 'vendor history' })
+  const sku = await app.inject({ method: 'POST', url: '/agent/chopper/suggest', headers: viewer, payload: { lines: [{ name: 'Test item A' }] } })
+  expect(sku.json().lines[0].category).toBeNull()
   const otherKey = await post(booking('R-BBBBBB', 'scan-file-3', [entry(brand.id, 1795)]))
   expect(otherKey.json().error).toBe('agent:DUPLICATE_INVOICE')
 
