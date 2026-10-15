@@ -65,14 +65,14 @@ type ResolvedLine = {
   menuModifierTotalSen: number
 }
 
-async function loadExisting(client: Tx, clientTxnId: string) {
+export async function loadExisting(client: Tx, clientTxnId: string) {
   return client.saleCorrection.findUnique({
     where: { clientTxnId },
     include: { brandDeltas: true },
   })
 }
 
-function serialise(
+export function serialise(
   correction: NonNullable<Awaited<ReturnType<typeof loadExisting>>>,
   replayed: boolean,
 ) {
@@ -357,21 +357,49 @@ async function runCorrection(tx: Tx, body: CorrectionBody, userId: string, busin
     )
   }
 
+  const correction = await recordCorrection(tx, {
+    businessId, order, shift, userId, clientTxnId: body.client_txn_id, kind: body.kind, reason: body.reason,
+    label: body.kind === 'CANCEL' ? 'Cancel' : 'Exchange', deltaSen, brandDeltas,
+    replacementItems, replacementCartDiscountSen, replacementTotalSen, replacementMenuPriceSen,
+  })
+  return serialise(correction, false)
+}
+
+export type LockedShift = { id: string; status: string; system_net_sales_sen: number | null }
+
+/** The correction row, its cash-book lines, and the shift total when it is already closed. */
+export async function recordCorrection(tx: Tx, input: {
+  businessId: string
+  order: { id: string; shiftId: string; businessDate: Date; queueNumber: string }
+  shift: LockedShift
+  userId: string
+  clientTxnId: string
+  kind: 'CANCEL' | 'EXCHANGE'
+  reason: string
+  label: string
+  deltaSen: number
+  brandDeltas: Array<{ brandId: string; deltaSen: number }>
+  replacementItems: Prisma.InputJsonValue | Prisma.NullTypes.DbNull
+  replacementCartDiscountSen: number | null
+  replacementTotalSen: number | null
+  replacementMenuPriceSen: number | null
+}) {
+  const { businessId, order, shift, deltaSen, brandDeltas } = input
   const correction = await tx.saleCorrection.create({
     data: {
       businessId,
-      clientTxnId: body.client_txn_id,
+      clientTxnId: input.clientTxnId,
       originalOrderId: order.id,
       shiftId: order.shiftId,
       businessDate: order.businessDate,
-      kind: body.kind,
-      reason: body.reason,
+      kind: input.kind,
+      reason: input.reason,
       deltaSen,
-      replacementItems,
-      replacementCartDiscountSen,
-      replacementTotalSen,
-      replacementMenuPriceSen,
-      createdById: userId,
+      replacementItems: input.replacementItems,
+      replacementCartDiscountSen: input.replacementCartDiscountSen,
+      replacementTotalSen: input.replacementTotalSen,
+      replacementMenuPriceSen: input.replacementMenuPriceSen,
+      createdById: input.userId,
       brandDeltas: { create: brandDeltas },
     },
     include: { brandDeltas: true },
@@ -385,7 +413,7 @@ async function runCorrection(tx: Tx, body: CorrectionBody, userId: string, busin
         direction: delta.deltaSen > 0 ? 'MONEY_IN' : 'MONEY_OUT',
         amountSen: Math.abs(delta.deltaSen),
         category: delta.deltaSen > 0 ? 'REVENUE' : 'REFUND',
-        description: `${body.kind === 'CANCEL' ? 'Cancel' : 'Exchange'} ${order.queueNumber}: ${body.reason}`,
+        description: `${input.label} ${order.queueNumber}: ${input.reason}`,
         brandId: delta.brandId,
         orderId: order.id,
         shiftId: order.shiftId,
@@ -407,6 +435,5 @@ async function runCorrection(tx: Tx, body: CorrectionBody, userId: string, busin
       },
     })
   }
-
-  return serialise(correction, false)
+  return correction
 }

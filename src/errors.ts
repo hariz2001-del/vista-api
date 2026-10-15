@@ -50,6 +50,8 @@ export const MESSAGES: Record<string, string> = {
   'correction:SHIFT_NOT_OPEN': 'That shift is already closed.',
   'correction:PERIOD_LOCKED': 'That sale belongs to a month that has already been settled.',
   'correction:ALREADY_CANCELLED': 'That sale has already been fully cancelled.',
+  'correction:REFUND_TOO_MANY': 'That is more than are left on the receipt. Reopen it and try again.',
+  'correction:UNKNOWN_LINE': 'That item is no longer on the receipt. Reopen it and try again.',
   'correction:DELTA_MISMATCH':
     'The amount to collect or return has changed. Reopen the sale and try again.',
   'correction:TOTAL_MISMATCH':

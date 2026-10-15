@@ -16,6 +16,7 @@ import {agentPreferencesRoutes} from './routes/agent-preferences.ts'
 import { agentRoutes } from './routes/agent.ts'
 import { agentSealedReceiptRoutes } from './routes/agent-sealed-receipts.ts'
 import { agentChopperRoutes } from './routes/agent-chopper.ts'
+import { rmsCorrectionRoutes } from './routes/rms-corrections.ts'
 import { agentDriveRoutes } from './routes/agent-drive.ts'
 import { collectAgentOperations } from './agent-operations.ts'
 import { agentReportRoutes } from './routes/agent-reports.ts'
@@ -149,6 +150,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(checkoutRoutes)
   await app.register(receiptRoutes)
   await app.register(correctionRoutes)
+  await app.register(rmsCorrectionRoutes)
   await app.register(terminalRoutes)
   await app.register(rmsRoutes)
   await app.register(menuRoutes)
