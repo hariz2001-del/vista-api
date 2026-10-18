@@ -4,6 +4,8 @@ import { requireOwner, requireUser } from '../auth.ts'
 import type { Tx } from '../db.ts'
 import { businessDateToUtc, businessToday } from '../domain/business-date.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
+import { sendFile, type MadeFile } from '../documents/send.ts'
+import { stockChecklistPdf } from '../documents/stock-pdf.ts'
 
 /**
  * Closing stock: a quick estimate the counter fills in at the end of the day.
@@ -166,6 +168,45 @@ async function staffForCount(db: Tx) {
 async function branchName(db: Tx, businessId: string): Promise<string> {
   const settings = await db.accountSettings.findUnique({ where: { businessId } })
   return settings?.outletName || settings?.businessName || 'Main'
+}
+
+const KL = 'Asia/Kuala_Lumpur'
+
+/** A sent count as Vista's closing stock PDF, laid out as the RMS shows it. */
+export async function stockCountFile(db: Tx, id: string): Promise<MadeFile> {
+  const count = await db.stockCount.findUnique({ where: { id }, include: { lines: { orderBy: { position: 'asc' } } } })
+  if (!count) throw notFound('stock:COUNT_NOT_FOUND')
+  const date = isoDate(count.businessDate)
+  const bytes = await stockChecklistPdf(
+    count.lines.map((line) => ({ ...line, brand: line.brandName, balance: line.balance as never })),
+    {
+      businessName: count.branchName,
+      filled: {
+        date: new Intl.DateTimeFormat('en-MY', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(`${date}T12:00:00Z`)),
+        countedBy: count.staffName,
+        sentAt: new Intl.DateTimeFormat('en-MY', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: KL }).format(count.submittedAt),
+        remarks: count.remarks,
+      },
+    },
+  )
+  return { filename: `closing-stock-${date}.pdf`, mimeType: 'application/pdf', bytes }
+}
+
+/** The newest count sent, or null when none has been. */
+export async function latestStockCountId(db: Tx): Promise<string | null> {
+  const count = await db.stockCount.findFirst({ orderBy: [{ businessDate: 'desc' }, { submittedAt: 'desc' }], select: { id: true } })
+  return count?.id ?? null
+}
+
+/** The active list as a blank sheet to fill in by hand. */
+export async function stockChecklistFile(db: Tx, businessId: string): Promise<MadeFile> {
+  const [{ brands, items }, branch] = await Promise.all([orderedItems(db, { isActive: true }), branchName(db, businessId)])
+  const brandName = new Map(brands.map((brand) => [brand.id, brand.name]))
+  const bytes = await stockChecklistPdf(
+    items.map((item) => ({ ...item, brand: brandName.get(item.brandId) ?? '' })),
+    { businessName: branch, filled: null },
+  )
+  return { filename: 'closing-stock-checklist.pdf', mimeType: 'application/pdf', bytes }
 }
 
 export async function stockRoutes(app: FastifyInstance): Promise<void> {
@@ -355,6 +396,15 @@ export async function stockRoutes(app: FastifyInstance): Promise<void> {
       })),
     }
   })
+
+  /** Vista's PDFs: the blank checklist, and a sent count. */
+  app.get('/rms/stock/checklist/pdf', owner, async (request, reply) =>
+    sendFile(reply, await stockChecklistFile(request.db, request.businessId)),
+  )
+
+  app.get<{ Params: { id: string } }>('/rms/stock/counts/:id/pdf', owner, async (request, reply) =>
+    sendFile(reply, await stockCountFile(request.db, ID.parse(request.params.id))),
+  )
 
   app.get<{ Params: { id: string } }>('/rms/stock/counts/:id', owner, async (request) => {
     const id = ID.parse(request.params.id)

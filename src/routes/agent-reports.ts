@@ -2,15 +2,28 @@ import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { requireAgent } from '../auth.ts'
 import { DomainError } from '../errors.ts'
+import { baseline, textPath } from '../documents/text.ts'
+import type { MadeFile } from '../documents/send.ts'
+import { latestStockCountId, stockChecklistFile, stockCountFile } from './stock.ts'
+import { rosterFile } from './team-roster.ts'
 
 type Report = { title: string; subtitle: string; columns: string[]; rows: string[][] }
 const rm = (sen: number) => `RM ${(sen / 100).toFixed(2)}`
-const esc = (value: string) => value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[char]!)
 const query = z.object({
   kind: z.enum(['stock-checklist', 'stock-count', 'roster', 'expenses', 'sales', 'audit']),
   format: z.enum(['pdf', 'png']).default('pdf'), id: z.string().uuid().optional(),
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 })
+
+/** This week's roster, or the newest one before it, or the next one coming. */
+async function currentWeekId(request: FastifyRequest): Promise<string | null> {
+  const today = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10)
+  const day = new Date(`${today}T00:00:00Z`)
+  const before = await request.db.rosterWeek.findFirst({ where: { weekStart: { lte: day } }, orderBy: { weekStart: 'desc' }, select: { id: true } })
+  if (before) return before.id
+  const after = await request.db.rosterWeek.findFirst({ orderBy: { weekStart: 'asc' }, select: { id: true } })
+  return after?.id ?? null
+}
 
 export async function agentReportRoutes(app: FastifyInstance) {
   async function read(request: FastifyRequest, path: string): Promise<Record<string, any>> {
@@ -26,26 +39,22 @@ export async function agentReportRoutes(app: FastifyInstance) {
     const settings = await request.db.accountSettings.findUnique({ where: { businessId: request.businessId } })
     const business = settings?.businessName ?? 'Vista'
     const range = new URLSearchParams({ ...(args.from ? { from: args.from } : {}), ...(args.to ? { to: args.to } : {}) })
-    let report: Report
+    // Stock and roster: Vista's own files, the same bytes the RMS downloads.
+    const made = (file: MadeFile, rows: number | null = null) =>
+      ({ filename: file.filename, mimeType: file.mimeType, contentBase64: file.bytes.toString('base64'), rows, madeBy: 'Vista' })
+    if (args.kind === 'stock-count') {
+      const id = args.id ?? (await latestStockCountId(request.db))
+      if (!id) throw new DomainError('stock:COUNT_NOT_FOUND', 404, 'No closing stock count has been sent yet.')
+      return made(await stockCountFile(request.db, id))
+    }
+    if (args.kind === 'stock-checklist') return made(await stockChecklistFile(request.db, request.businessId))
     if (args.kind === 'roster') {
-      if (!args.id) throw new DomainError('validation:INVALID_REQUEST', 400, 'Choose a roster week ID first.')
-      const data = await read(request, `/agent/team/weeks/${args.id}/export`)
-      report = { title: 'Staff roster', subtitle: `${business} · ${data.label} · ${data.isPublished ? 'Published' : 'Draft'}`, columns: ['Date', 'Time', 'Shift', 'Staff'], rows: data.days.flatMap((day: any) => day.shifts.length ? day.shifts.map((shift: any) => [day.label, `${shift.startTime}–${shift.endTime}`, shift.label ?? '', shift.staff.join(', ') || 'Unfilled']) : [[day.label, '', 'No shifts', '']]) }
-    } else if (args.kind === 'stock-count' || args.kind === 'stock-checklist') {
-      let items: any[]
-      let subtitle = business
-      if (args.kind === 'stock-count') {
-        if (!args.id) throw new DomainError('validation:INVALID_REQUEST', 400, 'Choose a stock count ID first.')
-        const { count } = await read(request, `/agent/stock/counts/${args.id}`)
-        items = count.lines
-        subtitle += ` · ${count.businessDate} · ${count.staffName}${count.remarks ? ` · ${count.remarks}` : ''}`
-      } else {
-        const data = await read(request, '/agent/stock/sheet')
-        items = data.items.map((item: any) => ({ ...item, brandName: data.brands.find((b: any) => b.id === item.brandId)?.name ?? '' }))
-      }
-      const balance: Record<string, string> = { EMPTY: '0%', QUARTER: '25%', LESS_THAN_HALF: '25%', HALF: '50%', THREE_QUARTERS: '75%', MORE_THAN_HALF: '75%', FULL: '100%' }
-      report = { title: args.kind === 'stock-count' ? 'Closing stock count' : 'Closing stock checklist', subtitle, columns: ['Brand / category', 'Item', 'Unopened', 'Opened balance'], rows: items.map((item) => [ `${item.brandName} / ${item.category}${item.subcategory ? ` / ${item.subcategory}` : ''}`, `${item.name}${item.unitLabel ? ` (${item.unitLabel})` : ''}`, item.trackUnopened ? item.unopenedMilli == null ? '____' : String(item.unopenedMilli / 1000) : '-', item.trackBalance ? balance[item.balance] ?? '____' : '-' ]) }
-    } else {
+      const id = args.id ?? (await currentWeekId(request))
+      if (!id) throw new DomainError('team:WEEK_NOT_FOUND', 404, 'There is no roster week yet.')
+      return made(await rosterFile(request.db, request.businessId, id, args.format))
+    }
+    let report: Report
+    {
       const data = await read(request, `/agent/${args.kind}?${range}`)
       const subtitle = `${business} · ${data.from} to ${data.to}`
       if (args.kind === 'expenses') report = { title: 'Expenses', subtitle, columns: ['Date', 'Description / vendor', 'Category', 'Amount', 'Brand'], rows: data.expenses.map((row: any) => [row.date, [row.description, row.vendor].filter(Boolean).join(' / '), row.category, rm(row.amountSen), row.brand]) }
@@ -68,17 +77,20 @@ export async function agentReportRoutes(app: FastifyInstance) {
       const { default: sharp } = await import('sharp')
       const width = 1600, colWidth = (width - 64) / report.columns.length
       const rows = [report.columns, ...report.rows]
-      let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${140 + rows.length * 66}"><rect width="100%" height="100%" fill="#faf8f1"/><g font-family="DejaVu Sans,sans-serif" fill="#18352a"><text x="32" y="42" font-size="28" font-weight="bold">${esc(report.title)}</text><text x="32" y="78" font-size="18">${esc(report.subtitle).slice(0, 500)}</text>`
+      // Text as outlines: the hosting has no fonts, so SVG text drew as empty boxes.
+      const ink = '#18352a'
+      let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${140 + rows.length * 66}"><rect width="100%" height="100%" fill="#faf8f1"/>`
+      svg += textPath(report.title, 32, 42, { size: 28, weight: 700, fill: ink }) + textPath(report.subtitle.slice(0, 140), 32, 78, { size: 18, weight: 400, fill: ink })
       rows.forEach((row, index) => {
         const y = 106 + index * 66
         svg += `<rect x="24" y="${y}" width="1552" height="64" fill="${index === 0 ? '#dbe8de' : index % 2 ? '#ffffff' : '#f0eee5'}"/>`
         row.forEach((cell, column) => {
           const limit = Math.floor(colWidth / 10)
           const chunks = cell.length > limit ? [cell.slice(0, limit), cell.slice(limit, limit * 2 - 1) + (cell.length > limit * 2 ? '…' : '')] : [cell]
-          chunks.forEach((line, n) => { svg += `<text x="${32 + column * colWidth}" y="${y + 25 + n * 22}" font-size="17">${esc(line)}</text>` })
+          chunks.forEach((line, n) => { svg += textPath(line, 32 + column * colWidth, baseline(y + 8 + n * 22, 22, 17), { size: 17, weight: index === 0 ? 700 : 400, fill: ink }) })
         })
       })
-      svg += '</g></svg>'
+      svg += '</svg>'
       bytes = await sharp(Buffer.from(svg)).png().toBuffer()
     }
     if (bytes.length > 3 * 1024 * 1024) throw new DomainError('agent:REPORT_TOO_LARGE', 400, 'Choose a shorter report or PDF output; the generated image is too large.')

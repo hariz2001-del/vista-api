@@ -16,6 +16,8 @@ import {
   weekdayOf,
 } from '../domain/team-time.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
+import { rosterPdf, rosterPng } from '../documents/roster-image.ts'
+import { sendFile, type MadeFile } from '../documents/send.ts'
 import { actorOf, audit } from '../team/audit.ts'
 import { fillCoverage, offerNext, openCoverage, replacementQueue } from '../team/coverage.ts'
 import {
@@ -278,6 +280,14 @@ function serialiseWeek(week: LoadedWeek | Awaited<ReturnType<Tx['rosterWeek']['f
  * The roster as it may be shared: days, times and names. Built from scratch,
  * not from the management view, so nothing confidential can ride along.
  */
+/** The week's roster as Vista's picture (png) or printable page (pdf). */
+export async function rosterFile(db: Tx, businessId: string, weekId: string, format: 'png' | 'pdf'): Promise<MadeFile> {
+  const data = await exportRoster(db, businessId, weekId)
+  return format === 'png'
+    ? { filename: `roster-${data.weekStart}.png`, mimeType: 'image/png', bytes: await rosterPng(data) }
+    : { filename: `roster-${data.weekStart}.pdf`, mimeType: 'application/pdf', bytes: await rosterPdf(data) }
+}
+
 export async function exportRoster(tx: Tx, businessId: string, weekId: string) {
   const week = await tx.rosterWeek.findUnique({
     where: { id: weekId },
@@ -754,6 +764,13 @@ export async function teamRosterRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { id: string } }>('/rms/team/weeks/:id/export', roster, async (request) => {
     const id = ID.parse(request.params.id)
     return request.db.$transaction((tx) => exportRoster(tx, request.businessId, id))
+  })
+
+  /** The roster picture for WhatsApp, and the same on an A4 page to print. */
+  app.get<{ Params: { id: string; format: string } }>('/rms/team/weeks/:id/export/:format', roster, async (request, reply) => {
+    const id = ID.parse(request.params.id)
+    const format = z.enum(['png', 'pdf']).parse(request.params.format)
+    return sendFile(reply, await rosterFile(request.db, request.businessId, id, format))
   })
 
   // -------------------------------------------------------------------------
