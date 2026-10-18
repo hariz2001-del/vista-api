@@ -287,7 +287,7 @@ export async function writeDriveFile(input: { parentId?: string; fileId?: string
     const existing = await withinFinances(input.fileId)
     if (existing.appProperties?.vistaReceiptId && !['scan', 'allocation'].includes(existing.appProperties.vistaVariant ?? '')) throw new Error('Receipt originals are preserved. Create a separate file or update an existing derived scan/annotation instead.')
     if (existing.mimeType.startsWith('application/vnd.google-apps.')) throw new Error('Use a regular file for content replacement; native Google documents are not supported here.')
-    await drive(`${UPLOAD}/files/${encodeURIComponent(input.fileId)}?uploadType=media&fields=id`, { method: 'PATCH', headers: { 'Content-Type': input.mimeType }, body: input.bytes })
+    await drive(`${UPLOAD}/files/${encodeURIComponent(input.fileId)}?uploadType=media&fields=id`, { method: 'PATCH', headers: { 'Content-Type': input.mimeType }, body: new Uint8Array(input.bytes) })
     return editDriveFile(input.fileId, { name: input.name })
   }
   const parent = await withinFinances(input.parentId ?? env.DRIVE_FINANCES_FOLDER_ID!)
