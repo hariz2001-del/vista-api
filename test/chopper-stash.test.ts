@@ -146,3 +146,58 @@ it('edits and deletes an expense by changing its own cash line, never adding one
   lines = await cash(business.businessId)
   expect(lines.map(l => [l.amountSen, l.expenseId])).toEqual([[5100, old.json().id]])
 })
+
+it('corrects a part-booked receipt: booked and unsorted lines follow, the cash book changes in place', async () => {
+  const { business, owner, bot, drinks } = await setup()
+  await app.inject({ method: 'POST', url: '/agent/chopper/record', headers: bot, payload: { receiptKey: 'R-FEED01', receipt: receipt('R-FEED01', 'stash-scan-1'), lines: LINES } })
+  await app.inject({ method: 'PUT', url: '/agent/chopper/stash', headers: bot, payload: { receipts: [stashItem('R-FEED01', 'stash-scan-1')] } })
+  const booked = await app.inject({ method: 'POST', url: '/rms/stash/R-FEED01/book', headers: owner, payload: { submissionId: randomUUID(), lines: [0, 1], expectedSen: 8130, brandId: drinks.id, category: 'RAW_MATERIALS', paidBy: 'STALL_FUNDS', paymentMethod: null, foodSplitPct: 0 } })
+  expect(booked.statusCode, booked.body).toBe(200)
+
+  // Milo was RM 41.90, not 42.90; and a line was missed.
+  const lines = LINES.map(({ name, quantityMilli, unitPriceSen }) => ({ name, quantityMilli, unitPriceSen }))
+  lines[1] = { ...lines[1]!, unitPriceSen: 4190 }
+  lines.push({ name: 'Plastik', quantityMilli: 1000, unitPriceSen: 300 })
+  const edit = await app.inject({ method: 'PUT', url: '/rms/stash/R-FEED01/reading', headers: owner, payload: { vendor: 'Mega Mart Sri Muda', date: '2026-10-17', receiptNo: 'MM-1', totalSen: TOTAL - 100 + 300, lines } })
+  expect(edit.statusCode, edit.body).toBe(200)
+  expect(edit.json().addsUp).toBe(true)
+
+  const expenses = await prisma.expense.findMany({ where: { businessId: business.businessId }, include: { items: true }, orderBy: { createdAt: 'asc' } })
+  const drinksRow = expenses.find(e => !e.uncategorised)!, pending = expenses.find(e => e.uncategorised)!
+  expect(drinksRow).toMatchObject({ amountSen: 8030, vendor: 'Mega Mart Sri Muda', receiptNo: 'MM-1' })
+  expect(drinksRow.businessDate.toISOString().slice(0, 10)).toBe('2026-10-17')
+  expect(pending.amountSen).toBe(1700 + 2040 + 300)
+  expect(pending.items.map(i => i.sortOrder).sort()).toEqual([2, 3, 4])
+  const cashLines = await cash(business.businessId)
+  expect(cashLines.every(l => l.direction === 'MONEY_OUT')).toBe(true)
+  expect(cashLines.reduce((n, l) => n + l.amountSen, 0)).toBe(TOTAL - 100 + 300)
+
+  // The RMS shows it with the correction; Chopper is told the new reading.
+  const detail = (await app.inject({ method: 'GET', url: '/rms/stash/R-FEED01', headers: owner })).json()
+  expect(detail.lines).toHaveLength(5)
+  expect(detail.lines[4]).toMatchObject({ name: 'Plastik', decision: 'pending' })
+  const events = (await app.inject({ method: 'GET', url: '/agent/chopper/stash/events', headers: bot })).json().events
+  expect(events[0].events.some((e: any) => e.type === 'reading')).toBe(true)
+  // Chopper's older copy does not undo it before Chopper takes it in.
+  await app.inject({ method: 'PUT', url: '/agent/chopper/stash', headers: bot, payload: { receipts: [stashItem('R-FEED01', 'stash-scan-1', ['posted', 'posted', 'pending', 'pending'])] } })
+  expect((await app.inject({ method: 'GET', url: '/rms/stash/R-FEED01', headers: owner })).json().lines).toHaveLength(5)
+})
+
+it('re-categorises a booked part of a receipt and moves its cash line in place', async () => {
+  const { business, owner, bot, food, drinks } = await setup()
+  await app.inject({ method: 'POST', url: '/agent/chopper/record', headers: bot, payload: { receiptKey: 'R-FEED02', receipt: receipt('R-FEED02', 'stash-scan-2'), lines: LINES } })
+  await app.inject({ method: 'PUT', url: '/agent/chopper/stash', headers: bot, payload: { receipts: [stashItem('R-FEED02', 'stash-scan-2')] } })
+  await app.inject({ method: 'POST', url: '/rms/stash/R-FEED02/book', headers: owner, payload: { submissionId: randomUUID(), lines: [0, 1, 2, 3], expectedSen: TOTAL, brandId: food.id, category: 'RAW_MATERIALS', paidBy: 'STALL_FUNDS', paymentMethod: null, foodSplitPct: 100 } })
+  const detail = (await app.inject({ method: 'GET', url: '/rms/stash/R-FEED02', headers: owner })).json()
+  expect(detail.sorted).toBe(true)
+  const id = detail.expenses[0].id
+  const fix = await app.inject({ method: 'PATCH', url: `/rms/stash/R-FEED02/expenses/${id}`, headers: owner, payload: { brandId: drinks.id, category: 'PACKAGING', paidBy: 'STALL_FUNDS', paymentMethod: 'CASH', foodSplitPct: 0 } })
+  expect(fix.statusCode, fix.body).toBe(200)
+  const e = await prisma.expense.findUniqueOrThrow({ where: { id }, include: { items: true } })
+  expect(e).toMatchObject({ brandId: drinks.id, category: 'PACKAGING', paymentMethod: 'CASH', amountSen: TOTAL })
+  expect(e.items.map(i => i.sortOrder).sort()).toEqual([0, 1, 2, 3])
+  const lines = await cash(business.businessId)
+  expect(lines.map(l => [l.direction, l.amountSen, l.brandId])).toEqual([['MONEY_OUT', TOTAL, drinks.id]])
+  const sorted = (await app.inject({ method: 'GET', url: '/rms/stash?sorted=1', headers: owner })).json()
+  expect(sorted.receipts.map((r: any) => r.receiptKey)).toContain('R-FEED02')
+})

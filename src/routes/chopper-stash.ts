@@ -11,7 +11,8 @@ import {
   DATE, FILE_ID, KEY, SHA, bookReceipt, digest, isUniqueViolation, keyOf, normalise, receiptByKey, stored, suggestFor, verifyScan,
   type Booking, type StashData,
 } from './agent-chopper.ts'
-import { expenseBody } from './rms.ts'
+import { allocate, createExpense, expenseBody, settlementEnabled, syncCashLine } from './rms.ts'
+import { lineTotalSen } from '../domain/expense-items.ts'
 
 /**
  * Chopper's stash, shared with the RMS.
@@ -60,9 +61,15 @@ const addsUp = (r: StashItem['reading']) => Boolean(r && r.totalSen != null && r
 
 /** Merge what Chopper sent with what the RMS did that Chopper has not applied yet: a sorted line stays sorted. */
 function merge(incoming: StashItem, current: StashData | null, unacked: boolean): StashData {
-  const decisions = [...incoming.decisions]
+  // A reading corrected in the RMS stands until Chopper has taken it in.
+  const keepReading = Boolean(unacked && current?.readingEditedAt && current.reading)
+  const decisions = keepReading ? [...(current!.decisions ?? [])] : [...incoming.decisions]
   if (current?.decisions && unacked) current.decisions.forEach((d, i) => { if (d !== 'pending' && i < decisions.length) decisions[i] = d })
-  return { ...incoming, decisions, allocations: current?.allocations ?? [], events: current?.events ?? [] } as StashData
+  return {
+    ...incoming,
+    ...(keepReading ? { reading: current!.reading, readingEditedAt: current!.readingEditedAt } : {}),
+    decisions, allocations: current?.allocations ?? [], events: current?.events ?? [],
+  } as StashData
 }
 
 /** The not-categorised expense follows a corrected reading while nothing is sorted. */
@@ -101,8 +108,8 @@ function summary(row: { receiptKey: string; data: unknown; createdAt: Date; upda
   }
 }
 
-async function stashRow(db: Tx, key: string) {
-  const row = await db.chopperStash.findFirst({ where: { receiptKey: key, status: 'OPEN' } })
+async function stashRow(db: Tx, key: string, anyStatus = false) {
+  const row = await db.chopperStash.findFirst({ where: { receiptKey: key, ...(anyStatus ? {} : { status: 'OPEN' }) } })
   if (!row) throw notFound('agent:STASH_NOT_FOUND')
   return row
 }
@@ -218,18 +225,23 @@ export async function chopperStashRoutes(app: FastifyInstance) {
   // ── RMS ────────────────────────────────────────────────────────────────────
 
   app.get('/rms/stash', owner, async (request) => {
-    const rows = await request.db.chopperStash.findMany({ where: { status: 'OPEN' }, orderBy: { createdAt: 'desc' }, take: 300 })
-    const list = rows.map(summary).filter(r => r.lineCount === 0 || r.pendingSen > 0 || r.state === 'NEEDS_REVIEW' || r.state === 'PROCESSING')
-    return { receipts: list, count: list.length }
+    const { sorted } = z.object({ sorted: z.enum(['1']).optional() }).parse(request.query)
+    const open = await request.db.chopperStash.findMany({ where: { status: 'OPEN' }, orderBy: { createdAt: 'desc' }, take: 300 })
+    const toSort = open.map(summary).filter(r => r.lineCount === 0 || r.pendingSen > 0 || r.state === 'NEEDS_REVIEW' || r.state === 'PROCESSING')
+    if (!sorted) return { receipts: toSort, count: toSort.length }
+    const all = await request.db.chopperStash.findMany({ orderBy: { updatedAt: 'desc' }, take: 150 })
+    const list = all.map(summary).filter(r => r.lineCount > 0 && r.pendingSen === 0 && r.bookedSen > 0)
+    return { receipts: list, count: toSort.length }
   })
 
   app.get<{ Params: { key: string } }>('/rms/stash/:key', owner, async (request) => {
     const key = KEY.parse(request.params.key)
-    const row = await stashRow(request.db, key)
+    const row = await stashRow(request.db, key, true)
     const d = row.data as StashData & StashItem
     const lines = d.reading?.lines ?? []
     const receipt = await receiptByKey(request.db, key)
-    const expenses = receipt ? await request.db.expense.findMany({ where: { receiptDocumentId: receipt.id }, select: { id: true, amountSen: true, brandId: true, category: true, uncategorised: true, description: true }, orderBy: { createdAt: 'asc' } }) : []
+    const expenses = receipt ? (await request.db.expense.findMany({ where: { receiptDocumentId: receipt.id }, include: { items: { select: { sortOrder: true } } }, orderBy: { createdAt: 'asc' } }))
+      .map(e => ({ id: e.id, amountSen: e.amountSen, brandId: e.brandId, category: e.category, uncategorised: e.uncategorised, description: e.description, paidBy: e.paidBy, paymentMethod: e.paymentMethod, foodSplitPct: e.foodSplitPct, isLocked: e.isLocked, lines: e.items.map(i => i.sortOrder) })) : []
     const pendingNames = lines.filter((_, i) => (d.decisions ?? [])[i] === 'pending').map(l => ({ name: l.name }))
     const suggestion = pendingNames.length ? await suggestFor(request.db, { vendor: d.reading?.vendor, lines: pendingNames }) : null
     return {
@@ -237,6 +249,7 @@ export async function chopperStashRoutes(app: FastifyInstance) {
       lines: lines.map((l, i) => ({ index: i, ...l, decision: (d.decisions ?? [])[i] ?? 'pending' })),
       allocations: d.allocations ?? [],
       expenses,
+      sorted: row.status !== 'OPEN' || (d.decisions ?? []).every(x => x !== 'pending'),
       guess: suggestion?.overall ?? null,
       hasOriginal: Boolean(d.originalFileId),
       revision: row.vistaRevision,
@@ -247,7 +260,7 @@ export async function chopperStashRoutes(app: FastifyInstance) {
   app.get<{ Params: { key: string } }>('/rms/stash/:key/scan', owner, async (request, reply) => {
     const key = KEY.parse(request.params.key)
     const original = z.object({ original: z.enum(['1', 'true']).optional() }).parse(request.query).original !== undefined
-    const row = await stashRow(request.db, key)
+    const row = await stashRow(request.db, key, true)
     const d = row.data as StashItem
     const id = original ? d.originalFileId : d.fileId
     if (!id) throw notFound('agent:RECEIPT_IMAGE_MISSING')
@@ -315,6 +328,70 @@ export async function chopperStashRoutes(app: FastifyInstance) {
       return scrapLines(tx, request.businessId, key, body.lines, amountSen, 'rms')
     })
   })
+
+  /** Re-categorise one booked part of a receipt: brand, category, who paid, how. Its lines stay as they are. */
+  app.patch<{ Params: { key: string; id: string } }>('/rms/stash/:key/expenses/:id', owner, async (request) => {
+    const key = KEY.parse(request.params.key)
+    const id = z.string().uuid().parse(request.params.id)
+    const body = z.object({
+      brandId: z.string().uuid().nullable(),
+      category: expenseBody.shape.category,
+      paidBy: expenseBody.shape.paidBy,
+      paymentMethod: PAYMENT.nullable(),
+      foodSplitPct: z.number().int().min(0).max(100),
+    }).parse(request.body)
+    return request.db.$transaction(async (tx) => {
+      const receipt = await receiptByKey(tx, key)
+      const e = receipt ? await tx.expense.findFirst({ where: { id, receiptDocumentId: receipt.id } }) : null
+      if (!e) throw notFound('rms:EXPENSE_NOT_FOUND')
+      if (e.uncategorised) throw badRequest('validation:INVALID_REQUEST', 'sort it with Book first')
+      if (e.isLocked) throw conflict('rms:PERIOD_LOCKED')
+      if (e.paidBy !== 'STALL_FUNDS' && e.isSettled && body.paidBy !== e.paidBy) throw conflict('rms:EXPENSE_REIMBURSED')
+      const withSettlement = await settlementEnabled(tx, request.businessId)
+      if (!withSettlement && body.paidBy !== 'STALL_FUNDS') throw badRequest('rms:SETTLEMENT_OFF')
+      const allocation = await allocate(tx, { brandId: body.brandId, amountSen: e.amountSen, foodSplitPct: body.foodSplitPct } as never, withSettlement)
+      const updated = await tx.expense.update({ where: { id }, data: {
+        brandId: body.brandId, category: body.category, paidBy: body.paidBy, paymentMethod: body.paymentMethod, ...allocation,
+        isSettled: body.paidBy === 'STALL_FUNDS' || (e.isSettled && body.paidBy === e.paidBy),
+      } })
+      await syncCashLine(tx, request.businessId, e, updated)
+      return { ok: true }
+    })
+  })
+
+  /**
+   * Correct a receipt's reading from the RMS: its title (shop, date, number,
+   * total) and its lines. Booked lines change their expense in place; unsorted
+   * ones change the not-categorised expense. Lines are corrected or added, never
+   * removed ("Leave out" does that), so line numbers hold.
+   */
+  app.put<{ Params: { key: string } }>('/rms/stash/:key/reading', owner, async (request) => {
+    const key = KEY.parse(request.params.key)
+    const body = z.object({
+      vendor: z.string().trim().min(1).max(120),
+      date: DATE,
+      receiptNo: z.string().trim().max(60).nullish().transform(v => v || null),
+      totalSen: z.number().int().positive().max(100_000_000),
+      lines: z.array(z.object({ name: z.string().trim().min(1).max(120), quantityMilli: z.number().int().positive().max(100_000_000), unitPriceSen: z.number().int().min(-10_000_000).max(100_000_000) })).min(1).max(200),
+    }).parse(request.body)
+    return request.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${request.businessId + ':chopper:' + key}))::text`
+      const row = await stashRow(tx, key, true)
+      const data = row.data as StashData & StashItem
+      const before = data.reading?.lines ?? []
+      if (body.lines.length < before.length) throw badRequest('validation:INVALID_REQUEST', 'lines can be corrected or added, not removed')
+      const lines: ReadLine[] = body.lines.map(l => ({ ...l, amountSen: lineTotalSen(l.quantityMilli, l.unitPriceSen) }))
+      const decisions = [...(data.decisions ?? [])]
+      while (decisions.length < lines.length) decisions.push('pending')
+      const receipt = await receiptByKey(tx, key)
+      if (receipt) await carryReading(tx, request.businessId, request.user.id, receipt.id, key, body, lines, decisions)
+      const reading = { ...(data.reading ?? {}), vendor: body.vendor, date: body.date, receiptNo: body.receiptNo, totalSen: body.totalSen, lines, flags: data.reading?.flags ?? [] }
+      const events = [...(data.events ?? []), { type: 'reading', reading, decisions }]
+      const warning = lineSum(lines) === body.totalSen ? null : `The lines add up to RM ${(lineSum(lines) / 100).toFixed(2)} but the total is RM ${(body.totalSen / 100).toFixed(2)}.`
+      await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({ ...data, reading, decisions, events, warning, readingEditedAt: new Date().toISOString() }), vistaRevision: { increment: 1 } } })
+      return { ok: true, addsUp: warning === null }
+    }, { timeout: 30_000 })
+  })
 }
 
 /** Scrap lines: off the stash, and off the not-categorised expense. Lines already sorted are left alone. */
@@ -337,4 +414,44 @@ async function scrapLines(tx: Tx, businessId: string, key: string, lines: number
     await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({ ...data, decisions, events }), ...(from === 'rms' ? { vistaRevision: { increment: 1 } } : {}) } })
   }
   return { ok: true, scrapped: fresh }
+}
+
+/** A corrected reading, carried into the receipt's expenses: booked lines in place, unsorted ones on the not-categorised expense. */
+async function carryReading(tx: Tx, businessId: string, userId: string, receiptDocumentId: string, key: string,
+  head: { vendor: string; date: string; receiptNo: string | null; totalSen: number }, lines: ReadLine[], decisions: string[]) {
+  const expenses = await tx.expense.findMany({ where: { receiptDocumentId }, include: { items: { orderBy: { sortOrder: 'asc' } } } })
+  const withSettlement = await settlementEnabled(tx, businessId)
+  for (const e of expenses) {
+    if (e.isLocked) continue
+    // Only expenses whose lines are the receipt's own numbered lines can follow them.
+    const own = e.uncategorised
+      ? lines.map((_, i) => i).filter(i => decisions[i] === 'pending')
+      : e.items.length && e.items.every(item => item.sortOrder < lines.length && decisions[item.sortOrder] === 'posted') ? e.items.map(item => item.sortOrder) : null
+    const items = own ? own.map(i => lines[i]!) : null
+    const amountSen = items ? lineSum(items) : e.amountSen
+    if (items && items.length === 0) {
+      await syncCashLine(tx, businessId, e, null)
+      await tx.expense.delete({ where: { id: e.id } })
+      continue
+    }
+    const allocation = await allocate(tx, { brandId: e.brandId, amountSen, foodSplitPct: e.foodSplitPct } as never, withSettlement)
+    const updated = await tx.expense.update({ where: { id: e.id }, data: {
+      businessDate: new Date(head.date + 'T00:00:00Z'), vendor: head.vendor, receiptNo: head.receiptNo, amountSen, ...allocation,
+      ...(e.uncategorised && items ? { description: ('Not categorised · ' + items.map(l => l.name).join('; ')).slice(0, 200) } : {}),
+      ...(items ? { items: { deleteMany: {}, create: items.map((l, n) => ({ name: l.name, quantityMilli: l.quantityMilli, unitPriceSen: l.unitPriceSen, totalSen: l.amountSen, sortOrder: own![n]! })) } } : {}),
+    } })
+    await syncCashLine(tx, businessId, e, updated)
+  }
+  // A line added to a receipt in the books, with no not-categorised expense to carry it: a new one.
+  const pendingIdx = lines.map((_, i) => i).filter(i => decisions[i] === 'pending')
+  if (expenses.length && !expenses.some(e => e.uncategorised) && pendingIdx.length) {
+    const pending = pendingIdx.map(i => lines[i]!)
+    await createExpense(tx, businessId, userId, {
+      businessDate: head.date, amountSen: lineSum(pending), category: 'RAW_MATERIALS', paidBy: 'STALL_FUNDS', brandId: null, foodSplitPct: 50,
+      description: ('Not categorised · ' + pending.map(l => l.name).join('; ')).slice(0, 200), receiptNo: head.receiptNo, vendor: head.vendor,
+      receiptTime: null, paymentMethod: null, notes: `Added in the RMS · ${key}`,
+      items: pending.map(l => ({ name: l.name, quantityMilli: l.quantityMilli, unit: null, unitPriceSen: l.unitPriceSen })),
+    } as never, { receiptDocumentId, uncategorised: true, lineNumbers: pendingIdx })
+  }
+  await tx.receiptDocument.update({ where: { id: receiptDocumentId }, data: { vendor: head.vendor, receiptDate: new Date(head.date + 'T00:00:00Z'), receiptNo: head.receiptNo, totalSen: head.totalSen } })
 }
