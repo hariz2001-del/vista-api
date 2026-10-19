@@ -150,6 +150,7 @@ model Business {
   reconciliationCases ReconciliationCase[]
   chopperSubmissions ChopperSubmission[]
   chopperStash       ChopperStash[]
+  chopperChat        ChopperChatMessage[]
   productRecipes ProductRecipe[]
 
   @@map("businesses")
@@ -1850,6 +1851,31 @@ model ChopperStash {
   @@unique([businessId, receiptKey])
   @@index([businessId, status])
   @@map("chopper_stash")
+}
+
+/// The RMS's chat with Chopper. Owner messages wait here until Chopper's relay
+/// on the VPS claims them, asks Hermes, and posts the reply (with any file).
+model ChopperChatMessage {
+  id         BigInt   @id @default(autoincrement())
+  businessId String   @map("business_id")
+  /// "owner" or "chopper".
+  role       String
+  text       String
+  /// owner messages: PENDING → WORKING → ANSWERED or FAILED. Chopper's: DONE.
+  status     String   @default("PENDING")
+  /// A file Chopper sent with its answer (a report PDF, a roster picture).
+  fileName   String?  @map("file_name")
+  fileMime   String?  @map("file_mime")
+  fileBytes  Bytes?   @map("file_bytes")
+  replyTo    BigInt?  @map("reply_to")
+  claimedAt  DateTime? @map("claimed_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, id])
+  @@index([status, createdAt])
+  @@map("chopper_chat_messages")
 }
 
 /// The photo itself, kept here only until it is safely in Google Drive.

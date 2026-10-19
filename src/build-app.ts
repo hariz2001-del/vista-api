@@ -21,6 +21,7 @@ import { agentDriveRoutes } from './routes/agent-drive.ts'
 import { collectAgentOperations } from './agent-operations.ts'
 import { agentReportRoutes } from './routes/agent-reports.ts'
 import { chopperStashRoutes } from './routes/chopper-stash.ts'
+import { chopperChatRoutes } from './routes/chopper-chat.ts'
 import { expenseReceiptRoutes } from './routes/expense-receipts.ts'
 import { authRoutes } from './routes/auth.ts'
 import { bootstrapRoutes } from './routes/bootstrap.ts'
@@ -175,6 +176,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(agentDriveRoutes)
   await app.register(agentReportRoutes)
   await app.register(chopperStashRoutes)
+  await app.register(chopperChatRoutes)
   await app.register(expenseReceiptRoutes)
 
   return app

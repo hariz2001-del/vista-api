@@ -78,6 +78,8 @@ export const MESSAGES: Record<string, string> = {
   'rms:PARTNER_NOT_FOUND': 'That partner no longer exists.',
   'rms:UNCATEGORISED_EXPENSES': 'Some receipts in that range are not categorised yet. Sort them under Expenses › Stash first.',
   'agent:LINES_ALREADY_SORTED': 'Some of those lines were booked or scrapped already. Reopen the receipt to see where it stands.',
+  'agent:CHAT_FILE_NOT_FOUND': 'That file is no longer available.',
+  'agent:CHAT_MESSAGE_NOT_FOUND': 'That message no longer exists.',
   'agent:STASH_NOT_FOUND': 'That receipt is not in the stash any more.',
   'agent:STASH_CHANGED': 'This receipt changed since you opened it. Reload it and try again.',
   'agent:SCAN_NOT_READY': 'Chopper is still checking this scan. Try again in a moment.',
