@@ -221,7 +221,7 @@ def record_in_vista(m,r):
     try:result=m._call('POST','/agent/chopper/record',body,r['actor'])
     except Exception as e:
         # Already in Vista under another receipt: a person decides, from the card or the RMS.
-        if getattr(e,'status_code',None)==409:v['recordBlocked']=str(e)[:200];r=save(r);sync_soon(m);return r
+        if getattr(e,'status_code',None)==409 and 'DUPLICATE' in str(e):v['recordBlocked']=str(e)[:200];r=save(r);sync_soon(m);return r
         raise
     v['recorded']={'expenseId':result.get('expenseId')};r=save(r);sync_soon(m);return r
 
