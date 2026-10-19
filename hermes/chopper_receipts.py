@@ -272,9 +272,22 @@ def _apply_vista_event(m,ev):
     r=get(ev['receiptKey']);v=r['data']
     if r['state'] in ('SUBMITTING','FILING','PROCESSING','RECEIVING'):return 'wait'
     new={'posted':[],'scrapped':[]}
+    # A reading corrected in the RMS: its title and lines replace Chopper's (lines are only ever added).
+    edits=[e for e in ev.get('events',[]) if e.get('type')=='reading' and e.get('reading')]
+    if edits:
+        fixed=edits[-1]['reading'];rd=v.get('reading') or {}
+        for k in ('vendor','date','receiptNo','totalSen'):rd[k]=fixed.get(k)
+        old=rd.get('lines',[]);rd['lines']=[{**(old[i] if i<len(old) else {}),**l} for i,l in enumerate(fixed.get('lines',[]))]
+        v['reading']=rd
+        while len(v.setdefault('decisions',[]))<len(rd['lines']):v['decisions'].append('pending')
+        v['warning']=None if adds_up(rd) else "The items add up to "+rm(sum(l.get('amountSen',0) for l in rd['lines']))+" but the total is "+rm(rd.get('totalSen') or 0)+"."
+        new['edited']=True
     for i,d in enumerate(ev.get('decisions',[])):
-        if i<len(v.get('decisions',[])) and v['decisions'][i]=='pending' and d in new:v['decisions'][i]=d;new[d].append(i)
-    if not new['posted'] and not new['scrapped']:return None
+        if i<len(v.get('decisions',[])) and v['decisions'][i]=='pending' and d in ('posted','scrapped'):v['decisions'][i]=d;new[d].append(i)
+    if not new['posted'] and not new['scrapped']:
+        if not new.get('edited'):return None
+        if r['state']=='CONFIGURED':invalidate(r)
+        save(r);sync_soon(m);return new
     for e in ev.get('events',[]):
         if e.get('type')=='booked' and set(e.get('indices') or [])&set(new['posted']):
             v.setdefault('submissions',[]).append({'submissionId':e.get('submissionId'),'state':'accepted','selected':e.get('indices',[]),'result':e.get('result'),'source':'rms'})
@@ -291,6 +304,7 @@ def rms_note(r,new):
     amount=lambda ix:rm(sum(lines[i]['amountSen'] for i in ix))
     left=[i for i,x in enumerate(v.get('decisions',[])) if x=='pending']
     text=rest+'\n'+key+'\n'
+    if new.get('edited'):text+='\n✎ Reading corrected in Vista.'
     if new['posted']:text+='\n✓ Sorted in Vista: '+nums(new['posted'])+' · '+amount(new['posted'])
     if new['scrapped']:text+='\n✗ Left out in Vista: '+nums(new['scrapped'])+' · '+amount(new['scrapped'])
     if left:text+='\n◻ Still to sort: '+nums(left)+' · '+amount(left)
