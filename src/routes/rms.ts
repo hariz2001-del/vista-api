@@ -38,7 +38,7 @@ const DEFAULT_SETTINGS = {
 }
 
 /** Is partner settlement switched on for this business? Off unless it says so. */
-async function settlementEnabled(client: Tx, businessId: string): Promise<boolean> {
+export async function settlementEnabled(client: Tx, businessId: string): Promise<boolean> {
   const settings = await client.accountSettings.findUnique({ where: { businessId } })
   return settings?.settlementEnabled ?? false
 }
@@ -49,7 +49,7 @@ function isoDate(value: Date): string {
 }
 
 /** Parse a business date, so an impossible one (30 Feb) is a 400, not a 500. */
-function toDate(value: string): Date {
+export function toDate(value: string): Date {
   try {
     return businessDateToUtc(value)
   } catch {
@@ -58,7 +58,7 @@ function toDate(value: string): Date {
 }
 
 /** No new money row may land inside a period both partners have already settled. */
-async function assertNotLocked(client: Tx, businessDate: string): Promise<void> {
+export async function assertNotLocked(client: Tx, businessDate: string): Promise<void> {
   const date = toDate(businessDate)
   const closure = await client.periodClosure.findFirst({
     where: { startDate: { lte: date }, endDate: { gte: date } },
@@ -67,7 +67,7 @@ async function assertNotLocked(client: Tx, businessDate: string): Promise<void> 
 }
 
 /** Equipment is real money out but not a cost of trading. */
-function ledgerCategoryFor(category: string): 'CAPITAL_ASSET' | 'OPERATING_EXPENSE' {
+export function ledgerCategoryFor(category: string): 'CAPITAL_ASSET' | 'OPERATING_EXPENSE' {
   return category === 'CAPITAL_ASSET' ? 'CAPITAL_ASSET' : 'OPERATING_EXPENSE'
 }
 
@@ -139,15 +139,15 @@ function assertItemsAddUp(body: ExpenseBody): void {
   }
 }
 
-/** The receipt lines as stored, each total computed here. */
-function itemRows(items: ExpenseBody['items']) {
+/** The receipt lines as stored, each total computed here. `order` keeps a receipt's own line numbers. */
+export function itemRows(items: ExpenseBody['items'], order?: number[]) {
   return items.map((item, index) => ({
     name: item.name,
     quantityMilli: item.quantityMilli,
     unit: item.unit,
     unitPriceSen: item.unitPriceSen,
     totalSen: lineTotalSen(item.quantityMilli, item.unitPriceSen),
-    sortOrder: index,
+    sortOrder: order?.[index] ?? index,
   }))
 }
 
@@ -155,7 +155,7 @@ function itemRows(items: ExpenseBody['items']) {
  * The food/drinks split, snapshotted on the row. Without partner settlement
  * the cost sits whole on the first side, which nothing reads until it is on.
  */
-async function allocate(tx: Tx, body: ExpenseBody, withSettlement: boolean) {
+export async function allocate(tx: Tx, body: ExpenseBody, withSettlement: boolean) {
   const brands = await tx.brand.findMany({ orderBy: { sortOrder: 'asc' } })
   const foodBrand = brands[0]
   if (body.brandId !== null && !brands.some((brand) => brand.id === body.brandId)) {
@@ -190,7 +190,7 @@ export async function createExpense(
   businessId: string,
   createdById: string,
   body: ExpenseBody,
-  links: { receiptDocumentId?: string | null } = {},
+  links: { receiptDocumentId?: string | null; uncategorised?: boolean; lineNumbers?: number[] } = {},
 ): Promise<{ id: string }> {
   assertItemsAddUp(body)
   await assertNotLocked(tx, body.businessDate)
@@ -220,9 +220,10 @@ export async function createExpense(
       isSettled: body.paidBy === 'STALL_FUNDS',
       createdById,
       receiptDocumentId: links.receiptDocumentId ?? null,
+      uncategorised: links.uncategorised ?? false,
       // Nested through the composite key, so a line can only ever belong to
       // an expense of the same business.
-      items: { create: itemRows(body.items) },
+      items: { create: itemRows(body.items, links.lineNumbers) },
     },
   })
 
@@ -236,6 +237,8 @@ export async function createExpense(
         category: ledgerCategoryFor(body.category),
         description: body.description,
         brandId: body.brandId,
+        // Linked, so editing the expense amends this line rather than adding another.
+        expenseId: expense.id,
       },
     })
   }
@@ -268,36 +271,50 @@ async function loadEditableExpense(tx: Tx, id: string) {
   return expense
 }
 
+type CashSide = {
+  id: string
+  businessDate: Date
+  amountSen: number
+  category: string
+  paidBy: string
+  brandId: string | null
+  description: string
+}
+
 /**
- * Take back the cash-book line an expense paid from stall funds wrote. The
- * book is append-only, so this is a MONEY_IN on the same day rather than a
- * deleted row: the balance is as if it never left, and the history shows why.
+ * Keep an expense's cash-book line as the expense now reads: edited in place,
+ * removed when the expense goes or stops being paid from stall funds, written
+ * when it starts to be. The owner asked that a correction change the line, not
+ * add a reversing one. Expenses logged before lines were linked find theirs by
+ * an exact match of what it was written with.
  */
-async function reverseLedgerFor(
-  tx: Tx,
-  businessId: string,
-  expense: {
-    businessDate: Date
-    amountSen: number
-    category: string
-    paidBy: string
-    brandId: string | null
-    description: string
-  },
-  why: string,
-): Promise<void> {
-  if (expense.paidBy !== 'STALL_FUNDS') return
-  await tx.ledgerEntry.create({
-    data: {
-      businessId,
-      businessDate: expense.businessDate,
-      direction: 'MONEY_IN',
-      amountSen: expense.amountSen,
-      category: ledgerCategoryFor(expense.category),
-      description: `${why} · ${expense.description}`,
-      brandId: expense.brandId,
-    },
-  })
+export async function syncCashLine(tx: Tx, businessId: string, before: CashSide, after: CashSide | null): Promise<void> {
+  let line = await tx.ledgerEntry.findFirst({ where: { expenseId: before.id } })
+  if (!line && before.paidBy === 'STALL_FUNDS') {
+    line = await tx.ledgerEntry.findFirst({
+      where: {
+        expenseId: null, direction: 'MONEY_OUT', businessDate: before.businessDate, amountSen: before.amountSen,
+        description: before.description, brandId: before.brandId, category: ledgerCategoryFor(before.category),
+        orderId: null, shiftId: null, correctionId: null,
+      },
+      orderBy: { id: 'asc' },
+    })
+  }
+  const wanted = after && after.paidBy === 'STALL_FUNDS' && after.amountSen > 0
+  if (!wanted) {
+    if (line) await tx.ledgerEntry.delete({ where: { id: line.id } })
+    return
+  }
+  const data = {
+    businessDate: after.businessDate,
+    amountSen: after.amountSen,
+    category: ledgerCategoryFor(after.category),
+    description: after.description,
+    brandId: after.brandId,
+    expenseId: after.id,
+  }
+  if (line) await tx.ledgerEntry.update({ where: { id: line.id }, data })
+  else await tx.ledgerEntry.create({ data: { businessId, direction: 'MONEY_OUT', ...data } })
 }
 
 const adjustmentBody = z.object({
@@ -570,6 +587,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         description: expense.description,
         receiptUrl: expense.receiptDocument?.scanDriveUrl ?? expense.receiptDocument?.driveUrl ?? expense.receiptUrl,
         receiptDocumentId: expense.receiptDocumentId,
+        uncategorised: expense.uncategorised,
         receiptNo: expense.receiptNo,
         vendor: expense.vendor,
         receiptTime: expense.receiptTime,
@@ -689,29 +707,15 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
           },
         })
 
-        const cashMoved =
-          old.paidBy !== body.paidBy ||
-          old.amountSen !== body.amountSen ||
-          isoDate(old.businessDate) !== body.businessDate ||
-          ledgerCategoryFor(old.category) !== ledgerCategoryFor(body.category) ||
-          old.brandId !== body.brandId
-
-        if (cashMoved) {
-          await reverseLedgerFor(tx, businessId, old, 'Corrected')
-          if (body.paidBy === 'STALL_FUNDS') {
-            await tx.ledgerEntry.create({
-              data: {
-                businessId,
-                businessDate,
-                direction: 'MONEY_OUT',
-                amountSen: body.amountSen,
-                category: ledgerCategoryFor(body.category),
-                description: body.description,
-                brandId: body.brandId,
-              },
-            })
-          }
-        }
+        await syncCashLine(tx, businessId, old, {
+          id,
+          businessDate,
+          amountSen: body.amountSen,
+          category: body.category,
+          paidBy: body.paidBy,
+          brandId: body.brandId,
+          description: body.description,
+        })
 
         return { id }
       })
@@ -736,7 +740,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
           throw conflict('rms:EXPENSE_REIMBURSED')
         }
 
-        await reverseLedgerFor(tx, businessId, expense, 'Deleted')
+        await syncCashLine(tx, businessId, expense, null)
         await tx.expense.delete({ where: { id } })
         return { id }
       })
@@ -1020,6 +1024,10 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         where: { startDate: { lte: end }, endDate: { gte: start } },
       })
       if (overlap) throw conflict('rms:PERIOD_OVERLAPS')
+
+      // A receipt Chopper recorded but nobody has sorted would be settled on a placeholder.
+      const unsorted = await tx.expense.count({ where: { uncategorised: true, businessDate: inWindow } })
+      if (unsorted > 0) throw conflict('rms:UNCATEGORISED_EXPENSES', `${unsorted} not categorised`)
 
       const openShifts = await tx.shift.count({
         where: { status: 'OPEN', businessDate: inWindow },

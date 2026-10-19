@@ -149,6 +149,7 @@ model Business {
   receiptJobs    ReceiptJob[]
   reconciliationCases ReconciliationCase[]
   chopperSubmissions ChopperSubmission[]
+  chopperStash       ChopperStash[]
   productRecipes ProductRecipe[]
 
   @@map("businesses")
@@ -662,6 +663,9 @@ model LedgerEntry {
   /// the owner can trace any adjustment back to the close that caused it.
   shiftId      String? @map("shift_id")
   correctionId String? @map("correction_id")
+  /// Set only on the cash line of an expense still not categorised: that line is
+  /// provisional and is amended in place as the receipt is sorted.
+  expenseId    String? @map("expense_id")
 
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -675,6 +679,7 @@ model LedgerEntry {
   @@index([orderId])
   @@index([shiftId])
   @@index([correctionId])
+  @@index([expenseId])
   @@map("ledger_entries")
 }
 
@@ -778,6 +783,9 @@ model Expense {
   notes           String?
   /// For a partner-paid expense: has the stall reimbursed them yet?
   isSettled       Boolean         @default(false) @map("is_settled")
+  /// Recorded by Chopper the moment it read the receipt, before anyone chose its
+  /// brand and category. Its category is a placeholder until it is sorted.
+  uncategorised   Boolean         @default(false)
   /// Set once the containing period has been closed and settled.
   isLocked        Boolean         @default(false) @map("is_locked")
   createdById     String          @map("created_by_id")
@@ -1815,6 +1823,33 @@ model ChopperSubmission {
   @@unique([businessId, submissionId])
   @@index([businessId, receiptKey])
   @@map("chopper_submissions")
+}
+
+/// Chopper's stash, mirrored so the RMS can sort receipts too. Chopper still
+/// owns the scan and the filing; this row is what both sides agree on. Lines
+/// are booked through the same exactly-once path as Telegram, from either side.
+model ChopperStash {
+  id            String   @id @default(uuid())
+  businessId    String   @map("business_id")
+  receiptKey    String   @map("receipt_key")
+  /// Telegram user who sent it, so Chopper can tell them when it is booked in the RMS.
+  telegramUser  String   @map("telegram_user")
+  /// OPEN while any line is unsorted; DONE once Chopper drops it from its stash.
+  status        String   @default("OPEN")
+  /// Reading, line decisions, scan file, warnings: as Chopper last sent them,
+  /// with the RMS's own changes merged in.
+  data          Json
+  /// Bumped by every change made in the RMS; Chopper acknowledges it once applied.
+  vistaRevision Int      @default(0) @map("vista_revision")
+  ackedRevision Int      @default(0) @map("acked_revision")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, receiptKey])
+  @@index([businessId, status])
+  @@map("chopper_stash")
 }
 
 /// The photo itself, kept here only until it is safely in Google Drive.

@@ -259,7 +259,7 @@ describe('rms — correcting and deleting an expense', () => {
     )
   }
 
-  it('re-splits a corrected amount and moves the cash book by reversing, never rewriting', async () => {
+  it('re-splits a corrected amount and changes its own cash line, adding none', async () => {
     await asOwner('POST', '/rms/expenses', rent)
     const { id } = (await snapshot()).expenses[0]!
 
@@ -269,18 +269,14 @@ describe('rms — correcting and deleting an expense', () => {
     let books = await snapshot()
     expect(books.expenses).toHaveLength(1)
     expect(books.expenses[0]).toMatchObject({ amountSen: 4200, foodAmountSen: 2940, drinksAmountSen: 1260 })
-    expect(books.ledger).toEqual([
-      expect.objectContaining({ direction: 'MONEY_OUT', amountSen: 5000 }),
-      expect.objectContaining({ direction: 'MONEY_IN', amountSen: 5000, description: 'Corrected · Stall rent' }),
-      expect.objectContaining({ direction: 'MONEY_OUT', amountSen: 4200 }),
-    ])
+    expect(books.ledger).toEqual([expect.objectContaining({ direction: 'MONEY_OUT', amountSen: 4200, description: 'Stall rent' })])
     expect(cashOut(books.ledger)).toBe(4200)
 
-    // A remark or a vendor moves no money, so it writes nothing to the book.
+    // A remark moves no money, so the book reads as before.
     await asOwner('PUT', `/rms/expenses/${id}`, { ...rent, amountSen: 4200, notes: 'March' })
     books = await snapshot()
     expect(books.expenses[0]?.notes).toBe('March')
-    expect(books.ledger).toHaveLength(3)
+    expect(books.ledger).toHaveLength(1)
   })
 
   it('replaces the receipt lines, and still refuses lines that do not add up', async () => {
@@ -309,7 +305,7 @@ describe('rms — correcting and deleting an expense', () => {
     ])
   })
 
-  it('deletes a stall-funded expense and puts its money back in the cash book', async () => {
+  it('deletes a stall-funded expense and its cash line with it', async () => {
     await asOwner('POST', '/rms/expenses', rent)
     const { id } = (await snapshot()).expenses[0]!
 
@@ -318,9 +314,8 @@ describe('rms — correcting and deleting an expense', () => {
 
     const books = await snapshot()
     expect(books.expenses).toHaveLength(0)
-    expect(books.ledger).toContainEqual(
-      expect.objectContaining({ direction: 'MONEY_IN', amountSen: 5000, description: 'Deleted · Stall rent' }),
-    )
+    // Its line goes with it, rather than a reversing one being added.
+    expect(books.ledger).toHaveLength(0)
     expect(cashOut(books.ledger)).toBe(0)
 
     const again = await asOwner('DELETE', `/rms/expenses/${id}`)

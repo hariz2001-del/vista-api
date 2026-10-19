@@ -9,6 +9,7 @@ import { badRequest, conflict, forbidden, notFound } from '../errors.ts'
 import { readFromDrive, withinFinances, type DriveFile } from '../integrations/drive.ts'
 import { itemKey } from '../receipt-learning.ts'
 import { createExpense, expenseBody, previewExpense } from './rms.ts'
+import { carve, pendingExpense } from '../chopper/sorting.ts'
 
 /**
  * Chopper's booking API, keyed by its own receipt key ("R-5AE50F"). Chopper owns
@@ -16,10 +17,10 @@ import { createExpense, expenseBody, previewExpense } from './rms.ts'
  * scan lives. Preview writes nothing; submit and link run once per submission ID.
  */
 
-const KEY = z.string().regex(/^R-[0-9A-F]{6}$/)
-const SHA = z.string().regex(/^[a-f0-9]{64}$/)
-const FILE_ID = z.string().regex(/^[A-Za-z0-9_-]{5,200}$/)
-const DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+export const KEY = z.string().regex(/^R-[0-9A-F]{6}$/)
+export const SHA = z.string().regex(/^[a-f0-9]{64}$/)
+export const FILE_ID = z.string().regex(/^[A-Za-z0-9_-]{5,200}$/)
+export const DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 const fileLink = { driveFileId: FILE_ID, fileName: z.string().trim().min(1).max(250), drivePath: z.string().trim().min(1).max(500) }
 
 export const chopperBooking = z.object({
@@ -34,23 +35,25 @@ export const chopperBooking = z.object({
     sha256: SHA,
     ...fileLink,
   }),
+  /** The receipt lines this booking covers, by index: checked against the stash so no line is booked twice. */
+  lines: z.array(z.number().int().min(0).max(199)).max(200).optional(),
 })
-type Booking = z.infer<typeof chopperBooking>
+export type Booking = z.infer<typeof chopperBooking>
 const linkBody = z.object({ receiptKey: KEY, expenseIds: z.array(z.string().uuid()).min(1).max(50), sha256: SHA, ...fileLink })
 type LinkBody = z.infer<typeof linkBody>
 
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+export const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const sign = (parts: unknown[]) => createHmac('sha256', env.JWT_SECRET).update(JSON.stringify(['chopper', ...parts])).digest('hex')
 const sameHex = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b))
 const PREVIEW_MS = 30 * 60_000
 
 /** What would be saved, exactly: receipt vendor/number fill entries that left them out. */
-function normalise(body: Booking): Booking {
+export function normalise(body: Booking): Booking {
   return { ...body, entries: body.entries.map(e => ({ ...e, vendor: e.vendor ?? body.receipt.vendor, receiptNo: e.receiptNo ?? body.receipt.receiptNo })) }
 }
 
 /** The Drive scan must be in Finances and be the exact bytes Chopper read. */
-async function verifyScan(request: FastifyRequest, fileId: string, sha256: string): Promise<DriveFile> {
+export async function verifyScan(request: FastifyRequest, fileId: string, sha256: string): Promise<DriveFile> {
   if (request.businessId !== env.DRIVE_BUSINESS_ID && request.businessId !== env.DRIVE_TEST_BUSINESS_ID) throw forbidden('agent:DRIVE_NOT_BOUND')
   let file: DriveFile
   try { file = await withinFinances(fileId) } catch { throw conflict('agent:SCAN_CHANGED', 'scan not found in Finances, or trashed') }
@@ -60,24 +63,24 @@ async function verifyScan(request: FastifyRequest, fileId: string, sha256: strin
 }
 
 /** By Chopper's key; receipts from before Chopper chose keys answer to "R-" + their ID's first 6 hex. */
-async function receiptByKey(db: Tx, key: string) {
-  const own = await db.receiptDocument.findFirst({ where: { receiptKey: key }, include: { expenses: { select: { id: true, amountSen: true } } } })
+export async function receiptByKey(db: Tx, key: string) {
+  const own = await db.receiptDocument.findFirst({ where: { receiptKey: key }, include: { expenses: { select: { id: true, amountSen: true, uncategorised: true } } } })
   if (own) return own
-  const legacy = await db.receiptDocument.findMany({ where: { receiptKey: null, id: { startsWith: key.slice(2).toLowerCase() } }, include: { expenses: { select: { id: true, amountSen: true } } }, take: 2 })
+  const legacy = await db.receiptDocument.findMany({ where: { receiptKey: null, id: { startsWith: key.slice(2).toLowerCase() } }, include: { expenses: { select: { id: true, amountSen: true, uncategorised: true } } }, take: 2 })
   return legacy.length === 1 ? legacy[0]! : null
 }
-const keyOf = (r: { id: string; receiptKey: string | null }) => r.receiptKey ?? `R-${r.id.slice(0, 6).toUpperCase()}`
+export const keyOf = (r: { id: string; receiptKey: string | null }) => r.receiptKey ?? `R-${r.id.slice(0, 6).toUpperCase()}`
 const linkOf = (r: { id: string; receiptKey: string | null; scanDriveFileId: string | null; driveFileId: string | null; fileName: string | null; drivePath: string | null; sha256: string }) =>
   ({ receiptKey: keyOf(r), driveFileId: r.scanDriveFileId ?? r.driveFileId, fileName: r.fileName, drivePath: r.drivePath, sha256: r.sha256 })
 
 /** A stored submission answers a retry; the same ID with another payload is refused. */
-async function stored(db: Tx, submissionId: string, hash: string) {
+export async function stored(db: Tx, submissionId: string, hash: string) {
   const prior = await db.chopperSubmission.findFirst({ where: { submissionId } })
   if (!prior) return null
   if (prior.digest !== hash) throw conflict('agent:SUBMISSION_CHANGED')
   return { ...(prior.result as object), alreadySubmitted: true }
 }
-const isUniqueViolation = (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
+export const isUniqueViolation = (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
 
 export async function chopperPreview(request: FastifyRequest) {
   const body = normalise(chopperBooking.parse(request.body))
@@ -85,7 +88,7 @@ export async function chopperPreview(request: FastifyRequest) {
   await verifyScan(request, body.receipt.driveFileId, body.receipt.sha256)
   const existing = await receiptByKey(request.db, body.receiptKey)
   if (existing && existing.sha256 !== body.receipt.sha256) throw conflict('agent:DUPLICATE_EVIDENCE', 'this receipt key is booked with a different scan')
-  const booked = existing?.expenses.reduce((n, e) => n + e.amountSen, 0) ?? 0
+  const booked = existing?.expenses.filter(e => !e.uncategorised).reduce((n, e) => n + e.amountSen, 0) ?? 0
   if (booked + body.entries.reduce((n, e) => n + e.amountSen, 0) > body.receipt.totalSen) throw conflict('agent:TOTAL_MISMATCH')
   const entries = []
   for (const entry of body.entries) entries.push({ ...entry, ...await previewExpense(request.db, request.businessId, entry) })
@@ -105,51 +108,91 @@ export async function chopperSubmit(request: FastifyRequest) {
   if (previewHash !== hash) throw conflict('agent:PREVIEW_MISMATCH')
   if (until < Date.now()) throw conflict('agent:PREVIEW_STALE')
   const file = await verifyScan(request, payload.receipt.driveFileId, payload.receipt.sha256)
-  const r = payload.receipt
   try {
-    return await request.db.$transaction(async tx => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${request.businessId + ':chopper:' + payload.receiptKey}))::text`
-      const again = await stored(tx, submissionId, hash)
-      if (again) return again
-      if (r.receiptNo) {
-        const twin = await tx.receiptDocument.findFirst({ where: {
-          OR: [{ receiptKey: { not: payload.receiptKey } }, { receiptKey: null }],
-          vendor: { equals: r.vendor, mode: 'insensitive' }, receiptNo: { equals: r.receiptNo, mode: 'insensitive' },
-          receiptDate: new Date(r.date + 'T00:00:00Z'), totalSen: r.totalSen, expenses: { some: {} },
-        } })
-        if (twin && keyOf(twin) !== payload.receiptKey) throw conflict('agent:DUPLICATE_INVOICE', keyOf(twin))
-      }
-      let receipt = await receiptByKey(tx, payload.receiptKey)
-      if (receipt && receipt.sha256 !== r.sha256) throw conflict('agent:DUPLICATE_EVIDENCE', 'this receipt key is booked with a different scan')
-      if (!receipt) {
-        const sameImage = await tx.receiptDocument.findFirst({ where: { sha256: r.sha256 } })
-        if (sameImage) throw conflict('agent:DUPLICATE_EVIDENCE', keyOf(sameImage))
-        await tx.receiptDocument.create({ data: {
-          id: randomUUID(), businessId: request.businessId, receiptKey: payload.receiptKey, status: 'POSTED', sha256: r.sha256,
-          mimeType: file.mimeType, driveFileId: file.id, driveUrl: file.webViewLink ?? null, scanDriveFileId: file.id, scanDriveUrl: file.webViewLink ?? null,
-          fileName: r.fileName, drivePath: r.drivePath, vendor: r.vendor, receiptDate: new Date(r.date + 'T00:00:00Z'), receiptNo: r.receiptNo, totalSen: r.totalSen,
-          uploadedById: request.agentUser!.id, resolvedAt: new Date(),
-          extracted: { _chopper: { sealed: true, key: payload.receiptKey }, _inbox: { originalRetired: true } },
-        } })
-        receipt = (await receiptByKey(tx, payload.receiptKey))!
-      }
-      const booked = receipt.expenses.reduce((n, e) => n + e.amountSen, 0)
-      if (booked + payload.entries.reduce((n, e) => n + e.amountSen, 0) > r.totalSen) throw conflict('agent:TOTAL_MISMATCH')
-      const owner = await tx.user.findFirst({ where: { role: 'OWNER', isActive: true }, orderBy: { createdAt: 'asc' } })
-      if (!owner) throw conflict('agent:NO_OWNER')
-      const expenseIds: string[] = []
-      for (const entry of payload.entries) expenseIds.push((await createExpense(tx, request.businessId, owner.id, entry, { receiptDocumentId: receipt.id })).id)
-      const result = { status: 'accepted', submissionId, receiptKey: payload.receiptKey, expenseIds, receipt: linkOf(receipt) }
-      await tx.chopperSubmission.create({ data: { businessId: request.businessId, submissionId, kind: 'submit', receiptKey: payload.receiptKey, digest: hash, result, agentUserId: request.agentUser!.id } })
-      await tx.agentAction.create({ data: { businessId: request.businessId, agentUserId: request.agentUser!.id, action: 'chopper.receipt.booked', entityType: 'receipt', entityId: receipt.id, detail: result } })
-      return result
-    })
+    return await request.db.$transaction(tx => bookReceipt(tx, { businessId: request.businessId, agentUserId: request.agentUser!.id, kind: 'submit' }, payload, file, hash))
   } catch (error) {
     // Two identical submits racing: the unique (business, submissionId) lets one in; the other reads its result.
     if (isUniqueViolation(error)) { const won = await stored(request.db, submissionId, hash); if (won) return won }
     throw error
   }
 }
+
+export type Booker = { businessId: string; agentUserId: string | null; kind: 'submit' | 'rms'; userId?: string }
+
+/**
+ * Books a receipt's expenses once, whoever asked: Chopper from Telegram, or the
+ * owner in the RMS. Locked per receipt key; a stored submission answers a retry.
+ */
+export async function bookReceipt(tx: Tx, who: Booker, payload: Booking, file: DriveFile, hash: string) {
+  const r = payload.receipt, submissionId = payload.submissionId
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${who.businessId + ':chopper:' + payload.receiptKey}))::text`
+  const again = await stored(tx, submissionId, hash)
+  if (again) return again
+  if (r.receiptNo) {
+    const twin = await tx.receiptDocument.findFirst({ where: {
+      OR: [{ receiptKey: { not: payload.receiptKey } }, { receiptKey: null }],
+      vendor: { equals: r.vendor, mode: 'insensitive' }, receiptNo: { equals: r.receiptNo, mode: 'insensitive' },
+      receiptDate: new Date(r.date + 'T00:00:00Z'), totalSen: r.totalSen, expenses: { some: {} },
+    } })
+    if (twin && keyOf(twin) !== payload.receiptKey) throw conflict('agent:DUPLICATE_INVOICE', keyOf(twin))
+  }
+  // Lines already booked or scrapped from the other side are refused, not booked twice.
+  const stash = payload.lines ? await tx.chopperStash.findFirst({ where: { receiptKey: payload.receiptKey } }) : null
+  if (stash && payload.lines) {
+    const decisions = ((stash.data as StashData).decisions ?? [])
+    if (payload.lines.some(i => decisions[i] !== 'pending')) throw conflict('agent:LINES_ALREADY_SORTED', 'some of these lines were booked or scrapped already')
+  }
+  let receipt = await receiptByKey(tx, payload.receiptKey)
+  if (receipt && receipt.sha256 !== r.sha256) throw conflict('agent:DUPLICATE_EVIDENCE', 'this receipt key is booked with a different scan')
+  if (!receipt) {
+    const sameImage = await tx.receiptDocument.findFirst({ where: { sha256: r.sha256 } })
+    if (sameImage) throw conflict('agent:DUPLICATE_EVIDENCE', keyOf(sameImage))
+    await tx.receiptDocument.create({ data: {
+      id: randomUUID(), businessId: who.businessId, receiptKey: payload.receiptKey, status: 'POSTED', sha256: r.sha256,
+      mimeType: file.mimeType, driveFileId: file.id, driveUrl: file.webViewLink ?? null, scanDriveFileId: file.id, scanDriveUrl: file.webViewLink ?? null,
+      fileName: r.fileName, drivePath: r.drivePath, vendor: r.vendor, receiptDate: new Date(r.date + 'T00:00:00Z'), receiptNo: r.receiptNo, totalSen: r.totalSen,
+      uploadedById: who.agentUserId, resolvedAt: new Date(),
+      extracted: { _chopper: { sealed: true, key: payload.receiptKey }, _inbox: { originalRetired: true } },
+    } })
+    receipt = (await receiptByKey(tx, payload.receiptKey))!
+  }
+  // The not-categorised expense is the receipt waiting to be sorted, not a booking.
+  const booked = receipt.expenses.filter(e => !e.uncategorised).reduce((n, e) => n + e.amountSen, 0)
+  if (booked + payload.entries.reduce((n, e) => n + e.amountSen, 0) > r.totalSen) throw conflict('agent:TOTAL_MISMATCH')
+  const owner = who.userId ? { id: who.userId } : await tx.user.findFirst({ where: { role: 'OWNER', isActive: true }, orderBy: { createdAt: 'asc' } })
+  if (!owner) throw conflict('agent:NO_OWNER')
+  const expenseIds: string[] = []
+  for (const entry of payload.entries) {
+    const pending = await pendingExpense(tx, receipt.id)
+    const lines = payload.entries.length === 1 ? payload.lines : undefined
+    expenseIds.push((pending
+      ? await carve(tx, { businessId: who.businessId, ownerId: owner.id, receiptDocumentId: receipt.id }, pending, entry, lines)
+      : await createExpense(tx, who.businessId, owner.id, entry, { receiptDocumentId: receipt.id, lineNumbers: lines })).id)
+  }
+  const result = { status: 'accepted', submissionId, receiptKey: payload.receiptKey, expenseIds, receipt: linkOf(receipt), ...(payload.lines ? { lines: payload.lines } : {}) }
+  await tx.chopperSubmission.create({ data: { businessId: who.businessId, submissionId, kind: who.kind, receiptKey: payload.receiptKey, digest: hash, result, agentUserId: who.agentUserId ?? `rms:${owner.id}` } })
+  if (who.agentUserId) await tx.agentAction.create({ data: { businessId: who.businessId, agentUserId: who.agentUserId, action: 'chopper.receipt.booked', entityType: 'receipt', entityId: receipt.id, detail: result } })
+  if (stash && payload.lines) {
+    const data = stash.data as StashData
+    const decisions = [...(data.decisions ?? [])]
+    for (const i of payload.lines) decisions[i] = 'posted'
+    const next = { ...data, decisions, allocations: [...(data.allocations ?? []), { indices: payload.lines, brandId: payload.entries[0]?.brandId ?? null }] }
+    // A booking made in the RMS is news for Chopper; one Chopper made is not.
+    const events = who.kind === 'rms' ? [...(data.events ?? []), { type: 'booked', submissionId, indices: payload.lines, brandId: payload.entries[0]?.brandId ?? null, amountSen: payload.entries.reduce((n, e) => n + e.amountSen, 0), expenseIds, result }] : data.events
+    await tx.chopperStash.update({ where: { id: stash.id }, data: { data: json({ ...next, events }), ...(who.kind === 'rms' ? { vistaRevision: { increment: 1 } } : {}) } })
+  }
+  return result
+}
+
+/** A stash row's data: Chopper's reading and line decisions, plus what the RMS did to it. */
+export type StashData = {
+  reading?: { vendor?: string | null; date?: string | null; receiptNo?: string | null; totalSen?: number | null; paymentMethod?: string | null; flags?: string[]; lines?: Array<{ name: string; quantityMilli: number; unitPriceSen: number; amountSen: number }> }
+  decisions?: Array<'pending' | 'posted' | 'scrapped'>
+  allocations?: Array<{ indices: number[]; brandId: string | null }>
+  events?: Array<Record<string, unknown>>
+  [key: string]: unknown
+}
+const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue
 
 export async function agentChopperRoutes(app: FastifyInstance) {
   const write = { preHandler: requireAgent('BOOKKEEPER') }
@@ -195,38 +238,7 @@ export async function agentChopperRoutes(app: FastifyInstance) {
    */
   app.post('/agent/chopper/suggest', read, async request => {
     const body = z.object({ vendor: z.string().trim().max(120).nullish(), lines: z.array(z.object({ name: z.string().max(200) })).max(100).default([]) }).parse(request.body)
-    const [items, recent] = await Promise.all([
-      request.db.expenseItem.findMany({ orderBy: { expense: { createdAt: 'desc' } }, take: 3000, select: { name: true, expense: { select: { id: true, brandId: true, category: true } } } }),
-      body.vendor ? request.db.expense.findMany({ where: { vendor: { not: null } }, orderBy: { createdAt: 'desc' }, take: 500, select: { vendor: true, brandId: true, category: true } }) : [],
-    ])
-    // Receipts print the same shop and item differently ("MR D.I.Y." vs "MR D.I.Y. (KUCHAI) SDN. BHD.",
-    // an item with or without its SKU): the same once normalised, or one a prefix of the other.
-    const alike = (a: string, b: string, min: number) => {
-      const [x, y] = [itemKey(a), itemKey(b)].sort((p, q) => p.length - q.length)
-      return x === y || (x!.length >= min && y!.startsWith(x! + ' '))
-    }
-    const byVendor = body.vendor ? recent.filter(e => alike(e.vendor!, body.vendor!, 3)).slice(0, 20) : []
-    const pairKey = (e: { brandId: string | null; category: string }) => `${e.category}|${e.brandId ?? ''}`
-    const best = (rows: Array<{ brandId: string | null; category: string }>, minimum: number) => {
-      if (!rows.length) return null
-      const counts = new Map<string, number>()
-      for (const row of rows) counts.set(pairKey(row), (counts.get(pairKey(row)) ?? 0) + 1)
-      const [key, count] = [...counts].sort((a, b) => b[1] - a[1])[0]!
-      if (count / rows.length < minimum) return null
-      const [category, brandId] = key.split('|')
-      return { category: category!, brandId: brandId || null, examples: count, confidence: Math.round(count / rows.length * 100) / 100 }
-    }
-    const lines = body.lines.map((line, index) => {
-      const seen = new Map<string, { brandId: string | null; category: string }>()
-      for (const item of items) if (alike(item.name, line.name, 10) && !seen.has(item.expense.id) && seen.size < 12) seen.set(item.expense.id, item.expense)
-      const guess = best([...seen.values()], 0.8)
-      return guess ? { index, ...guess, source: 'item history' } : { index, category: null, brandId: null, examples: 0, confidence: 0, source: null }
-    })
-    const known = lines.filter(l => l.category)
-    const fromLines = known.length ? best(known.map(l => ({ category: l.category!, brandId: l.brandId })), 0.5) : null
-    const fromVendor = best(byVendor, 0.6)
-    const overall = fromLines ? { ...fromLines, source: 'item history' } : fromVendor ? { ...fromVendor, source: 'vendor history' } : null
-    return { overall, lines }
+    return suggestFor(request.db, body)
   })
 
   app.post('/agent/chopper/link/preview', write, async request => {
@@ -306,4 +318,44 @@ async function linkable(db: Tx, body: LinkBody, receiptId: string | undefined) {
   const taken = rows.find(e => e.receiptDocumentId && e.receiptDocumentId !== receiptId)
   if (taken) throw conflict('agent:EXPENSE_HAS_RECEIPT', taken.id)
   return rows.map(e => ({ expenseId: e.id, date: e.businessDate.toISOString().slice(0, 10), amountSen: e.amountSen, vendor: e.vendor, receiptNo: e.receiptNo, description: e.description }))
+}
+
+/**
+ * Brand and category guesses from confirmed Vista expenses, no AI: each line by
+ * its item name (80% agreement, as the RMS receipt form does), then the receipt
+ * as a whole, falling back to what this vendor was booked as before.
+ */
+export async function suggestFor(db: Tx, body: { vendor?: string | null; lines: Array<{ name: string }> }) {
+    const [items, recent] = await Promise.all([
+    db.expenseItem.findMany({ orderBy: { expense: { createdAt: 'desc' } }, take: 3000, select: { name: true, expense: { select: { id: true, brandId: true, category: true } } } }),
+    body.vendor ? db.expense.findMany({ where: { vendor: { not: null } }, orderBy: { createdAt: 'desc' }, take: 500, select: { vendor: true, brandId: true, category: true } }) : [],
+  ])
+  // Receipts print the same shop and item differently ("MR D.I.Y." vs "MR D.I.Y. (KUCHAI) SDN. BHD.",
+  // an item with or without its SKU): the same once normalised, or one a prefix of the other.
+  const alike = (a: string, b: string, min: number) => {
+    const [x, y] = [itemKey(a), itemKey(b)].sort((p, q) => p.length - q.length)
+    return x === y || (x!.length >= min && y!.startsWith(x! + ' '))
+  }
+  const byVendor = body.vendor ? recent.filter(e => alike(e.vendor!, body.vendor!, 3)).slice(0, 20) : []
+  const pairKey = (e: { brandId: string | null; category: string }) => `${e.category}|${e.brandId ?? ''}`
+  const best = (rows: Array<{ brandId: string | null; category: string }>, minimum: number) => {
+    if (!rows.length) return null
+    const counts = new Map<string, number>()
+    for (const row of rows) counts.set(pairKey(row), (counts.get(pairKey(row)) ?? 0) + 1)
+    const [key, count] = [...counts].sort((a, b) => b[1] - a[1])[0]!
+    if (count / rows.length < minimum) return null
+    const [category, brandId] = key.split('|')
+    return { category: category!, brandId: brandId || null, examples: count, confidence: Math.round(count / rows.length * 100) / 100 }
+  }
+  const lines = body.lines.map((line, index) => {
+    const seen = new Map<string, { brandId: string | null; category: string }>()
+    for (const item of items) if (alike(item.name, line.name, 10) && !seen.has(item.expense.id) && seen.size < 12) seen.set(item.expense.id, item.expense)
+    const guess = best([...seen.values()], 0.8)
+    return guess ? { index, ...guess, source: 'item history' } : { index, category: null, brandId: null, examples: 0, confidence: 0, source: null }
+  })
+  const known = lines.filter(l => l.category)
+  const fromLines = known.length ? best(known.map(l => ({ category: l.category!, brandId: l.brandId })), 0.5) : null
+  const fromVendor = best(byVendor, 0.6)
+  const overall = fromLines ? { ...fromLines, source: 'item history' } : fromVendor ? { ...fromVendor, source: 'vendor history' } : null
+  return { overall, lines }
 }

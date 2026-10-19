@@ -76,6 +76,12 @@ export const MESSAGES: Record<string, string> = {
   'rms:PRODUCT_NOT_FOUND': 'That item is no longer on the menu.',
   'rms:NOTHING_TO_CHANGE': 'Nothing to change.',
   'rms:PARTNER_NOT_FOUND': 'That partner no longer exists.',
+  'rms:UNCATEGORISED_EXPENSES': 'Some receipts in that range are not categorised yet. Sort them under Expenses › Stash first.',
+  'agent:LINES_ALREADY_SORTED': 'Some of those lines were booked or scrapped already. Reopen the receipt to see where it stands.',
+  'agent:STASH_NOT_FOUND': 'That receipt is not in the stash any more.',
+  'agent:STASH_CHANGED': 'This receipt changed since you opened it. Reload it and try again.',
+  'agent:SCAN_NOT_READY': 'Chopper is still checking this scan. Try again in a moment.',
+  'agent:LINES_DO_NOT_ADD_UP': 'The lines do not add up to the total. Fix the reading in Chopper first.',
   'rms:SETTLEMENT_OFF':
     'Partner settlement is switched off for this business. Turn it on in Settings first.',
   'rms:SETTLEMENT_NEEDS_TWO_BRANDS':
