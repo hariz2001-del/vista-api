@@ -201,3 +201,16 @@ it('re-categorises a booked part of a receipt and moves its cash line in place',
   const sorted = (await app.inject({ method: 'GET', url: '/rms/stash?sorted=1', headers: owner })).json()
   expect(sorted.receipts.map((r: any) => r.receiptKey)).toContain('R-FEED02')
 })
+
+it('serves a small preview of a stashed scan for the receipt browser', async () => {
+  const { default: sharp } = await import('sharp')
+  files['stash-scan-1'] = await sharp({ create: { width: 800, height: 1200, channels: 3, background: '#ffffff' } }).jpeg().toBuffer()
+  const { owner, bot } = await setup()
+  await app.inject({ method: 'PUT', url: '/agent/chopper/stash', headers: bot, payload: { receipts: [stashItem('R-AB0001', 'stash-scan-1')] } })
+  const thumb = await app.inject({ method: 'GET', url: '/rms/stash/R-AB0001/thumb', headers: owner })
+  expect(thumb.statusCode, thumb.body).toBe(200)
+  expect(thumb.headers['content-type']).toBe('image/jpeg')
+  const meta = await sharp(thumb.rawPayload).metadata()
+  expect([meta.width, meta.height]).toEqual([360, 480])
+  files['stash-scan-1'] = Buffer.from('stash one')
+})

@@ -105,6 +105,7 @@ function summary(row: { receiptKey: string; data: unknown; createdAt: Date; upda
     lineCount: lines.length, pendingSen, bookedSen, state: d.state,
     problem: d.problem ?? null, warning: d.warning ?? null, duplicate: Boolean(d.duplicates || d.stashDuplicates?.length),
     ready: Boolean(d.scanVerified && r && addsUp(r) && !d.problem), recorded: Boolean(d.recorded), receivedAt: row.createdAt.toISOString(),
+    drivePath: d.drivePath ?? null, sortedAt: row.updatedAt.toISOString(),
   }
 }
 
@@ -257,6 +258,20 @@ export async function chopperStashRoutes(app: FastifyInstance) {
   })
 
   /** The scan Chopper filed (or the original photo), straight from Drive. */
+  /** A small preview of the scan, for the receipt browser. Cached by the browser for an hour. */
+  app.get<{ Params: { key: string } }>('/rms/stash/:key/thumb', owner, async (request, reply) => {
+    const key = KEY.parse(request.params.key)
+    const row = await stashRow(request.db, key, true)
+    const id = (row.data as StashItem).fileId ?? (row.data as StashItem).originalFileId
+    if (!id) throw notFound('agent:RECEIPT_IMAGE_MISSING')
+    let bytes: Buffer
+    try { bytes = await readFromDrive(id) } catch { throw notFound('agent:RECEIPT_IMAGE_MISSING') }
+    if (bytes.subarray(0, 4).toString() === '%PDF') throw notFound('agent:RECEIPT_IMAGE_MISSING', 'a PDF has no preview')
+    const { default: sharp } = await import('sharp')
+    const small = await sharp(bytes).rotate().resize({ width: 360, height: 480, fit: 'cover', position: 'top' }).jpeg({ quality: 72 }).toBuffer()
+    return reply.header('content-type', 'image/jpeg').header('cache-control', 'private, max-age=3600').send(small)
+  })
+
   app.get<{ Params: { key: string } }>('/rms/stash/:key/scan', owner, async (request, reply) => {
     const key = KEY.parse(request.params.key)
     const original = z.object({ original: z.enum(['1', 'true']).optional() }).parse(request.query).original !== undefined
