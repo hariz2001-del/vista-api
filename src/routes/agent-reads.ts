@@ -110,12 +110,16 @@ export async function agentReadRoutes(app: FastifyInstance): Promise<void> {
         [`${second?.name ?? 'second'}Sen`]: rows.reduce((sum, row) => sum + row.drinksAmountSen, 0),
         byCategory,
         withoutReceipt: rows.filter((row) => !row.receiptDocumentId && !row.receiptUrl).length,
+        // Recorded by Chopper on reading, waiting to be sorted (their category is a placeholder).
+        notCategorised: rows.filter((row) => row.uncategorised).length,
+        notCategorisedSen: rows.filter((row) => row.uncategorised).reduce((sum, row) => sum + row.amountSen, 0),
       },
       expenses: rows.map((row) => ({
         id: row.id,
         date: iso(row.businessDate),
         amountSen: row.amountSen,
-        category: row.category,
+        category: row.uncategorised ? 'NOT_CATEGORISED' : row.category,
+        notCategorised: row.uncategorised,
         brand: row.brandId ? (brands.find((brand) => brand.id === row.brandId)?.name ?? '?') : 'Shared',
         firstBrandSharePct: row.foodSplitPct,
         paidBy: row.paidBy,
