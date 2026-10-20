@@ -219,6 +219,8 @@ export async function agentChopperRoutes(app: FastifyInstance) {
     if (byInvoice) or.push({ receiptNo: { equals: q.receiptNo, mode: 'insensitive' } }, { receiptDocument: { receiptNo: { equals: q.receiptNo, mode: 'insensitive' } } })
     if (byDateTotal) or.push({ businessDate: day, amountSen: q.totalSen }, { receiptDocument: { receiptDate: day, totalSen: q.totalSen } })
     if (byImage) or.push({ receiptDocument: { sha256: q.sha256 } })
+    // Keyed in by hand, with no receipt yet: the same amount within a few days is very likely this receipt.
+    if (byDateTotal) or.push({ receiptDocumentId: null, receiptUrl: null, uncategorised: false, amountSen: q.totalSen, businessDate: { gte: new Date(day!.getTime() - 3 * 86_400_000), lte: new Date(day!.getTime() + 3 * 86_400_000) } })
     const rows = await request.db.expense.findMany({ where: { OR: or }, include: { receiptDocument: true }, orderBy: { businessDate: 'desc' }, take: 50 })
     const same = (a?: string | null, b?: string) => Boolean(a && b && a.trim().toLowerCase() === b.trim().toLowerCase())
     return rows.map(e => {
@@ -226,6 +228,7 @@ export async function agentChopperRoutes(app: FastifyInstance) {
       if (byInvoice && (same(e.receiptNo, q.receiptNo) || same(doc?.receiptNo, q.receiptNo))) reasons.push('invoice')
       if (byDateTotal && ((e.businessDate.getTime() === day!.getTime() && e.amountSen === q.totalSen) || (doc?.receiptDate?.getTime() === day!.getTime() && doc?.totalSen === q.totalSen))) reasons.push('date+total')
       if (byImage && doc?.sha256 === q.sha256) reasons.push('image')
+      if (!doc && !e.receiptUrl && byDateTotal && e.amountSen === q.totalSen && !reasons.includes('date+total')) reasons.push('keyed in by hand')
       const receiptKey = doc ? keyOf(doc) : null
       return { expenseId: e.id, receiptKey, date: e.businessDate.toISOString().slice(0, 10), amountSen: e.amountSen, vendor: e.vendor ?? doc?.vendor ?? null, description: e.description, reasons, sameReceiptKey: Boolean(q.receiptKey && receiptKey === q.receiptKey) }
     })

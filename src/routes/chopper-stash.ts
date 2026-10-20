@@ -110,9 +110,51 @@ function summary(row: { receiptKey: string; data: unknown; createdAt: Date; upda
 }
 
 async function stashRow(db: Tx, key: string, anyStatus = false) {
-  const row = await db.chopperStash.findFirst({ where: { receiptKey: key, ...(anyStatus ? {} : { status: 'OPEN' }) } })
+  let row = await db.chopperStash.findFirst({ where: { receiptKey: key, ...(anyStatus ? {} : { status: 'OPEN' }) } })
+  // A sorted receipt is read from the books: Chopper's copy stops once it is sorted (and older ones never had one).
+  if (anyStatus && (!row || (row.status !== 'OPEN' && ((row.data as StashData).decisions ?? []).includes('pending')))) row = (await rowFromBooks(db, key, row)) ?? row
   if (!row) throw notFound('agent:STASH_NOT_FOUND')
   return row
+}
+
+/**
+ * A receipt's lines as the books hold them: each expense's items, numbered as
+ * receipt lines, booked ("posted") or not categorised ("pending"). A lump-sum
+ * expense becomes one line of its own. Line numbers are written back onto the
+ * items so later corrections find them.
+ */
+async function rowFromBooks(db: Tx, key: string, existing: Awaited<ReturnType<Tx['chopperStash']['findFirst']>>) {
+  const doc = await receiptByKey(db, key)
+  if (!doc) return null
+  const expenses = await db.expense.findMany({ where: { receiptDocumentId: doc.id }, include: { items: { orderBy: { sortOrder: 'asc' } } }, orderBy: { createdAt: 'asc' } })
+  if (!expenses.length) return null
+  // Lump sums first become real items, so every line can be corrected like any other.
+  for (const e of expenses) {
+    if (e.items.length) continue
+    e.items.push(await db.expenseItem.create({ data: { businessId: e.businessId, expenseId: e.id, name: e.description.slice(0, 120), quantityMilli: 1000, unitPriceSen: e.amountSen, totalSen: e.amountSen, sortOrder: 10_000 } }))
+  }
+  // Items keep their receipt line number when a receipt is split; renumber only where numbers clash (older bookings).
+  const all = expenses.flatMap(e => e.items.map(item => ({ item, pending: e.uncategorised })))
+  const clash = new Set(all.map(x => x.item.sortOrder)).size !== all.length
+  all.sort((a, b) => clash ? 0 : a.item.sortOrder - b.item.sortOrder)
+  const lines: ReadLine[] = []
+  const decisions: Array<'pending' | 'posted' | 'scrapped'> = []
+  for (const { item, pending } of all) {
+    if (item.sortOrder !== lines.length) await db.expenseItem.update({ where: { id: item.id }, data: { sortOrder: lines.length } })
+    lines.push({ name: item.name, quantityMilli: item.quantityMilli, unitPriceSen: item.unitPriceSen, amountSen: item.totalSen })
+    decisions.push(pending ? 'pending' : 'posted')
+  }
+  const old = (existing?.data ?? {}) as StashData & StashItem
+  const data = {
+    ...old,
+    receiptKey: key, state: 'SUBMITTED', scanVerified: true, recorded: true, duplicates: 0, stashDuplicates: [], fromBooks: true,
+    fileId: doc.scanDriveFileId ?? doc.driveFileId, fileName: doc.fileName, drivePath: doc.drivePath, sha256: doc.sha256,
+    reading: { vendor: doc.vendor ?? expenses[0]!.vendor, date: (doc.receiptDate ?? expenses[0]!.businessDate).toISOString().slice(0, 10), receiptNo: doc.receiptNo ?? expenses[0]!.receiptNo, totalSen: doc.totalSen ?? lineSum(lines), flags: [], lines },
+    decisions,
+  }
+  return existing
+    ? db.chopperStash.update({ where: { id: existing.id }, data: { data: json(data) } })
+    : db.chopperStash.create({ data: { businessId: expenses[0]!.businessId, receiptKey: key, telegramUser: 'rms', status: 'DONE', data: json(data) } })
 }
 
 export async function chopperStashRoutes(app: FastifyInstance) {
@@ -279,8 +321,22 @@ export async function chopperStashRoutes(app: FastifyInstance) {
     const open = await request.db.chopperStash.findMany({ where: { status: 'OPEN' }, orderBy: { createdAt: 'desc' }, take: 300 })
     const toSort = open.map(summary).filter(r => r.lineCount === 0 || r.pendingSen > 0 || r.state === 'NEEDS_REVIEW' || r.state === 'PROCESSING')
     if (!sorted) return { receipts: toSort, count: toSort.length }
-    const all = await request.db.chopperStash.findMany({ orderBy: { updatedAt: 'desc' }, take: 150 })
-    const list = all.map(summary).filter(r => r.lineCount > 0 && r.pendingSen === 0 && r.bookedSen > 0)
+    const docs = await request.db.receiptDocument.findMany({
+      where: { expenses: { some: { uncategorised: false } } },
+      include: { expenses: { select: { amountSen: true, uncategorised: true, vendor: true, businessDate: true, _count: { select: { items: true } } } } },
+      orderBy: [{ receiptDate: 'desc' }, { createdAt: 'desc' }], take: 300,
+    })
+    const list = docs.map(doc => {
+      const booked = doc.expenses.filter(e => !e.uncategorised), waiting = doc.expenses.filter(e => e.uncategorised)
+      return {
+        receiptKey: keyOf(doc), vendor: doc.vendor ?? booked[0]?.vendor ?? null,
+        date: (doc.receiptDate ?? booked[0]?.businessDate)?.toISOString().slice(0, 10) ?? null, receiptNo: doc.receiptNo, totalSen: doc.totalSen,
+        lineCount: doc.expenses.reduce((n, e) => n + Math.max(1, e._count.items), 0),
+        pendingSen: waiting.reduce((n, e) => n + e.amountSen, 0), bookedSen: booked.reduce((n, e) => n + e.amountSen, 0),
+        state: 'SUBMITTED', problem: null, warning: null, duplicate: false, ready: true, recorded: true,
+        receivedAt: doc.createdAt.toISOString(), drivePath: doc.drivePath, sortedAt: doc.updatedAt.toISOString(),
+      }
+    })
     return { receipts: list, count: toSort.length }
   })
 
@@ -576,6 +632,8 @@ export async function findDuplicates(db: Tx, key: string): Promise<Other[]> {
   if (rd?.receiptNo) or.push({ receiptNo: { equals: rd.receiptNo, mode: 'insensitive' } }, { receiptDocument: { receiptNo: { equals: rd.receiptNo, mode: 'insensitive' } } })
   if (day && rd?.totalSen) or.push({ businessDate: day, amountSen: rd.totalSen }, { receiptDocument: { receiptDate: day, totalSen: rd.totalSen } })
   if (d.sha256) or.push({ receiptDocument: { sha256: d.sha256 } })
+  // Keyed in by hand with no receipt: the same amount up to 3 days apart.
+  if (day && rd?.totalSen) or.push({ receiptDocumentId: null, receiptUrl: null, uncategorised: false, amountSen: rd.totalSen, businessDate: { gte: new Date(day.getTime() - 3 * 86_400_000), lte: new Date(day.getTime() + 3 * 86_400_000) } })
   const others = new Map<string, Other>()
   if (or.length) {
     const rows = await db.expense.findMany({ where: { OR: or }, include: { receiptDocument: true }, take: 40, orderBy: { businessDate: 'desc' } })
@@ -588,6 +646,11 @@ export async function findDuplicates(db: Tx, key: string): Promise<Other[]> {
       if (rd?.receiptNo && [e.receiptNo, doc?.receiptNo].some((n) => n && n.toLowerCase() === rd.receiptNo!.toLowerCase())) reasons.push('same receipt number')
       if (day && rd?.totalSen && ((e.businessDate.getTime() === day.getTime() && e.amountSen === rd.totalSen) || (doc?.receiptDate?.getTime() === day.getTime() && doc?.totalSen === rd.totalSen))) reasons.push('same day and total')
       if (d.sha256 && doc?.sha256 === d.sha256) reasons.push('the same photo')
+      if (!doc && day && rd?.totalSen === e.amountSen && !reasons.length) {
+        const apart = Math.round(Math.abs(e.businessDate.getTime() - day.getTime()) / 86_400_000)
+        reasons.push(`same amount, ${apart} day${apart === 1 ? '' : 's'} apart`)
+      }
+      if (!doc && rd?.vendor && e.vendor && e.vendor.toLowerCase().slice(0, 5) === rd.vendor.toLowerCase().slice(0, 5)) reasons.push('same shop')
       const prior = others.get(id)
       if (prior) { prior.expenseIds.push(e.id); continue }
       others.set(id, {

@@ -331,7 +331,8 @@ def vista_card_text(r):
     text=rest+'\n'+key+'\n\n'+'\n'.join(receipt_lines(r))
     if v.get('problem'):text+='\n\n⚠ '+v['problem']
     elif v.get('warning'):text+='\n\n⚠ '+v['warning']
-    if candidates(r) or v.get('stashDuplicates'):text+='\n\nLikely duplicate of a receipt already in Vista — check before sorting.'
+    if keyed_match(r):text+='\n\nMatches an expense keyed in by hand — link this receipt to it?'
+    elif candidates(r) or v.get('stashDuplicates'):text+='\n\nLikely duplicate of a receipt already in Vista — check before sorting.'
     elif v.get('recorded'):text+='\n\nIn Vista as not categorised. Sort it under Expenses › Stash.'
     return text
 
@@ -845,6 +846,11 @@ def candidates(r):
     rows=result if isinstance(result,list) else result.get('candidates',result.get('duplicates',result.get('matches',[])))
     return [x for x in rows if not x.get('sameReceiptKey')]
 
+def keyed_match(r):
+    """Every match is an expense keyed in by hand with no receipt: this photo is probably its receipt."""
+    found=candidates(r)
+    return bool(found) and not r['data'].get('stashDuplicates') and all('keyed in by hand' in (x.get('reasons') or []) for x in found)
+
 def list_line(i,r):
     rd=r['data'].get('reading') or {};date=rd.get('date');date=f'{date[8:10]}/{date[5:7]}/{date[:4]}' if date else '—';amount='—' if rd.get('totalSen') is None else f"RM {rd['totalSen']/100:.2f}"
     return f"{i+1}. {r['id']} — {rd.get('vendor') or 'Reading needs review'} · {date} · {amount}"
@@ -927,7 +933,8 @@ async def card(adapter,m,r,chat,query=None):
     if rd.get('flags'):text+='\nNote: '+'; '.join(str(x) for x in rd['flags'])[:200]
     if v.get('error'):text+='\n⚠ '+v['error']
     elif v.get('warning'):text+='\n⚠ '+v['warning']
-    if candidates(r) or v.get('stashDuplicates'):text+='\nLikely duplicate: review existing entries before booking.'
+    if keyed_match(r):text+='\nMatches an expense keyed in by hand — link this receipt to it?'
+    elif candidates(r) or v.get('stashDuplicates'):text+='\nLikely duplicate: review existing entries before booking.'
     if v.get('recorded') and any(x=='pending' for x in v.get('decisions',[])) and r['state'] not in ('SUBMITTED','FILING'):
         text+='\nIn Vista as not categorised — sort it here, or in the RMS under Expenses › Stash.'
     elif v.get('recordBlocked') and r['state'] not in ('SUBMITTED','FILING'):
@@ -954,7 +961,7 @@ async def card(adapter,m,r,chat,query=None):
         rows=[top,second,[button('Stash for later',prefix+'later')]]
         if partial:rows.append([button('Scrap remaining',prefix+'scrappreview')])
         if r['state']=='NEEDS_REVIEW':rows.append([button('Retry scan',prefix+'retry'),button('View original',prefix+'original')])
-        if candidates(r) or v.get('stashDuplicates'):rows.append([button('⚑ Review duplicate',prefix+'dupreview')])
+        if candidates(r) or v.get('stashDuplicates'):rows.append([button('🔗 Link to keyed-in expense' if keyed_match(r) else '⚑ Review duplicate',prefix+'dupreview')])
         if candidates(r):rows.append([button('Link existing',prefix+'link')])
     await show(adapter,query,chat,text,rows)
 
@@ -1064,6 +1071,13 @@ async def _callback(adapter,query,data,m):
             elif media:await adapter._bot.send_photo(chat_id=chat,photo=media[0].media,caption=media[0].caption)
             where={'booked':'already booked in Vista','stash':'also waiting in the stash','manual':'typed into Vista by hand, with no photo'}[o['kind']]
             replace={'booked':'keeps that booking and swaps in the new photo.','stash':'drops the other photo and keeps the new one.','manual':'attaches the new photo to that expense.'}[o['kind']]
+            if o['kind']=='manual':
+                text=('This looks like the receipt for an expense keyed in by hand ('+', '.join(o.get('reasons') or ['similar'])+').\n\n'
+                      'Receipt: '+list_line(0,r).split('. ',1)[1]+'\n'
+                      'Keyed in: '+(o.get('vendor') or 'Expense')+' · '+(o.get('date') or '')+' · '+rm(o.get('totalSen') or 0)+'\n\n'
+                      'Link keeps that expense as it is and gives it this receipt. Nothing is booked twice.')
+                await adapter._bot.send_message(chat_id=chat,text=text,reply_markup=markup([[button('🔗 Link to it',prefix+'dupreplace')],[button("It's a different one",prefix+'dupkeep'),button('✗ Drop the photo',prefix+'dupcancel')]]))
+                return True
             text=('These look like the same receipt ('+', '.join(o.get('reasons') or ['similar'])+').\n\n'
                   '1 · New: '+list_line(0,r).split('. ',1)[1]+'\n'
                   '2 · '+(o.get('receiptKey') or 'Expense')+' — '+(o.get('vendor') or 'Receipt')+' · '+(o.get('date') or '')+' · '+rm(o.get('totalSen') or 0)+' — '+where+'\n\n'
@@ -1077,8 +1091,8 @@ async def _callback(adapter,query,data,m):
                     res=m._call('POST','/agent/chopper/stash/'+r['id']+'/duplicate',body,actor)
                     return apply_duplicate(m,get(r['id']),action,res)
             r=await asyncio.to_thread(settle)
-            done={'cancel':'✗ Cancelled — the new photo is gone from the stash and the books.','keep':'Kept both. It goes into Vista as not categorised.',
-                  'replace':{'booked':'⇄ Replaced — the booking keeps its categories, with the new photo.','stash':'⇄ Replaced — the other photo is gone; this one goes into Vista.','manual':'⇄ Attached — that expense now has this photo.'}.get(o.get('kind'),'⇄ Replaced.')}[action]
+            done={'cancel':'✗ Cancelled — the new photo is gone from the stash and the books.','keep':'Kept apart. It goes into Vista as not categorised.' if o.get('kind')=='manual' else 'Kept both. It goes into Vista as not categorised.',
+                  'replace':{'booked':'⇄ Replaced — the booking keeps its categories, with the new photo.','stash':'⇄ Replaced — the other photo is gone; this one goes into Vista.','manual':'🔗 Linked — that expense now has this receipt.'}.get(o.get('kind'),'⇄ Replaced.')}[action]
             await adapter._bot.send_message(chat_id=chat,text=r['id']+' — '+done)
         elif p[2]=='edit':
             booked=any(x!='pending' for x in v.get('decisions',[]))

@@ -287,3 +287,52 @@ it('reviews duplicates: keep both, cancel the new one, or replace a stashed, boo
   expect((await dup('R-D00005', { action: 'cancel' })).statusCode).toBe(200)
   expect(await uncategorised()).toBe(0)
 })
+
+it('lists sorted receipts from the books, and opens one even without Chopper’s copy', async () => {
+  const { business, owner, bot, food } = await setup()
+  files['books-a'] = Buffer.from('books a')
+  await app.inject({ method: 'POST', url: '/agent/chopper/record', headers: bot, payload: { receiptKey: 'R-B00001', receipt: receipt('R-B00001', 'books-a'), lines: LINES } })
+  await app.inject({ method: 'PUT', url: '/agent/chopper/stash', headers: bot, payload: { receipts: [stashItem('R-B00001', 'books-a')] } })
+  await app.inject({ method: 'POST', url: '/rms/stash/R-B00001/book', headers: owner, payload: { submissionId: randomUUID(), lines: [0, 1], expectedSen: 8130, brandId: food.id, category: 'RAW_MATERIALS', paidBy: 'STALL_FUNDS', paymentMethod: null, foodSplitPct: 100 } })
+  // Chopper's copy is gone (as for receipts sorted before it existed).
+  await prisma.chopperStash.deleteMany({ where: { businessId: business.businessId } })
+  const sorted = (await app.inject({ method: 'GET', url: '/rms/stash?sorted=1', headers: owner })).json().receipts
+  expect(sorted).toEqual([expect.objectContaining({ receiptKey: 'R-B00001', bookedSen: 8130, pendingSen: TOTAL - 8130 })])
+  const detail = (await app.inject({ method: 'GET', url: '/rms/stash/R-B00001', headers: owner })).json()
+  expect(detail.lines.map((l: any) => [l.name, l.decision])).toEqual([['Susu pekat', 'posted'], ['Milo 1.5kg', 'posted'], ['Sambal paste', 'pending'], ['Roti burger', 'pending']])
+  // And it can be corrected from there.
+  const lines = LINES.map(({ name, quantityMilli, unitPriceSen }) => ({ name, quantityMilli, unitPriceSen }))
+  lines[0] = { ...lines[0]!, unitPriceSen: 300 }
+  const edit = await app.inject({ method: 'PUT', url: '/rms/stash/R-B00001/reading', headers: owner, payload: { vendor: 'Mega Mart', date: '2026-10-18', receiptNo: 'MM-1', totalSen: TOTAL - 240, lines } })
+  expect(edit.statusCode, edit.body).toBe(200)
+  const booked = await prisma.expense.findFirstOrThrow({ where: { businessId: business.businessId, uncategorised: false } })
+  expect(booked.amountSen).toBe(8130 - 240)
+})
+
+it('spots a hand-keyed expense with no receipt a few days apart, for linking', async () => {
+  const { owner, bot, food } = await setup()
+  const typed = await app.inject({ method: 'POST', url: '/rms/expenses', headers: owner, payload: { businessDate: '2026-10-16', amountSen: TOTAL, category: 'RAW_MATERIALS', paidBy: 'STALL_FUNDS', brandId: food.id, foodSplitPct: 100, description: 'Barang Mega Mart', vendor: 'Mega Mart', items: [] } })
+  files['hand-a'] = Buffer.from('hand a')
+  await app.inject({ method: 'PUT', url: '/agent/chopper/stash', headers: bot, payload: { receipts: [stashItem('R-B00002', 'hand-a')] } })
+  const others = (await app.inject({ method: 'GET', url: '/rms/stash/R-B00002/duplicates', headers: owner })).json().others
+  expect(others).toEqual([expect.objectContaining({ kind: 'manual', expenseIds: [typed.json().id], reasons: ['same amount, 2 days apart', 'same shop'] })])
+  const check = (await app.inject({ method: 'GET', url: `/agent/chopper/duplicates?date=2026-10-18&totalSen=${TOTAL}&receiptKey=R-B00002`, headers: bot })).json()
+  expect(check).toEqual([expect.objectContaining({ expenseId: typed.json().id, receiptKey: null, reasons: ['keyed in by hand'] })])
+  const link = await app.inject({ method: 'POST', url: '/rms/stash/R-B00002/duplicate', headers: owner, payload: { action: 'replace', expenseIds: [typed.json().id] } })
+  expect(link.statusCode, link.body).toBe(200)
+  expect((await prisma.expense.findUniqueOrThrow({ where: { id: typed.json().id }, include: { receiptDocument: true } })).receiptDocument?.receiptKey).toBe('R-B00002')
+})
+
+it('splits one receipt into bookings with their own settings, still one receipt', async () => {
+  const { business, owner, bot, food, drinks } = await setup()
+  files['split-a'] = Buffer.from('split a')
+  await app.inject({ method: 'POST', url: '/agent/chopper/record', headers: bot, payload: { receiptKey: 'R-B00003', receipt: receipt('R-B00003', 'split-a'), lines: LINES } })
+  await app.inject({ method: 'PUT', url: '/agent/chopper/stash', headers: bot, payload: { receipts: [stashItem('R-B00003', 'split-a')] } })
+  const one = await app.inject({ method: 'POST', url: '/rms/stash/R-B00003/book', headers: owner, payload: { submissionId: randomUUID(), lines: [0, 1], expectedSen: 8130, brandId: drinks.id, category: 'RAW_MATERIALS', paidBy: 'STALL_FUNDS', paymentMethod: 'CASH', foodSplitPct: 0 } })
+  expect(one.statusCode, one.body).toBe(200)
+  const two = await app.inject({ method: 'POST', url: '/rms/stash/R-B00003/book', headers: owner, payload: { submissionId: randomUUID(), lines: [2, 3], expectedSen: TOTAL - 8130, brandId: food.id, category: 'PACKAGING', paidBy: 'STALL_FUNDS', paymentMethod: null, foodSplitPct: 100 } })
+  expect(two.statusCode, two.body).toBe(200)
+  const expenses = await prisma.expense.findMany({ where: { businessId: business.businessId }, include: { receiptDocument: true }, orderBy: { amountSen: 'desc' } })
+  expect(expenses.map((e) => [e.amountSen, e.brandId, e.category, e.uncategorised])).toEqual([[8130, drinks.id, 'RAW_MATERIALS', false], [TOTAL - 8130, food.id, 'PACKAGING', false]].toSorted((a, b) => (b[0] as number) - (a[0] as number)))
+  expect(new Set(expenses.map((e) => e.receiptDocument?.receiptKey))).toEqual(new Set(['R-B00003']))
+})
