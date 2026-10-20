@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { requireAgent, requireOwner } from '../auth.ts'
@@ -221,6 +221,55 @@ export async function chopperStashRoutes(app: FastifyInstance) {
     const caughtUp = acked === row.vistaRevision
     await request.db.chopperStash.update({ where: { id: row.id }, data: { ackedRevision: acked, ...(caughtUp ? { data: json({ ...(row.data as StashData), events: [] }) } : {}) } })
     return { ok: true, ackedRevision: acked }
+  })
+
+  // ── Duplicates: the same receipt twice, from any channel ───────────────────
+
+  /** What a stashed receipt looks like a duplicate of: booked receipts, hand-typed expenses, or another stashed photo. */
+  app.get<{ Params: { key: string } }>('/rms/stash/:key/duplicates', owner, async (request) => {
+    const key = KEY.parse(request.params.key)
+    return { others: await findDuplicates(request.db, key) }
+  })
+
+  /** The scan behind any receipt Vista knows by key (booked or stashed), for comparing. */
+  app.get<{ Params: { key: string } }>('/rms/receipts/:key/scan', owner, async (request, reply) => {
+    const key = KEY.parse(request.params.key)
+    const doc = await receiptByKey(request.db, key)
+    const stash = doc ? null : await request.db.chopperStash.findFirst({ where: { receiptKey: key } })
+    const fileId = doc?.scanDriveFileId ?? doc?.driveFileId ?? (stash?.data as StashItem | undefined)?.fileId
+    if (!fileId) throw notFound('agent:RECEIPT_IMAGE_MISSING')
+    let bytes: Buffer
+    try { bytes = await readFromDrive(fileId) } catch { throw notFound('agent:RECEIPT_IMAGE_MISSING') }
+    return reply.header('content-type', bytes.subarray(0, 4).toString() === '%PDF' ? 'application/pdf' : 'image/jpeg').header('cache-control', 'private, max-age=600').send(bytes)
+  })
+
+  /** Settle a suspected duplicate from the RMS; Chopper is told, and files or retires the photos. */
+  app.post<{ Params: { key: string } }>('/rms/stash/:key/duplicate', owner, async (request) => {
+    const key = KEY.parse(request.params.key)
+    const body = resolution.parse(request.body)
+    return request.db.$transaction((tx) => resolveDuplicate(tx, request, key, body, 'rms'), { timeout: 30_000 })
+  })
+
+  app.get<{ Params: { key: string } }>('/agent/chopper/stash/:key/duplicates', bookkeeper, async (request) => {
+    const key = KEY.parse(request.params.key)
+    return { others: await findDuplicates(request.db, key) }
+  })
+
+  /** The scan behind a receipt Vista knows, for Chopper to show beside a suspected duplicate. */
+  app.get<{ Params: { key: string } }>('/agent/chopper/receipts/:key/scan', bookkeeper, async (request, reply) => {
+    const key = KEY.parse(request.params.key)
+    const doc = await receiptByKey(request.db, key)
+    const stash = doc ? null : await request.db.chopperStash.findFirst({ where: { receiptKey: key } })
+    const fileId = doc?.scanDriveFileId ?? doc?.driveFileId ?? (stash?.data as StashItem | undefined)?.fileId
+    if (!fileId) throw notFound('agent:RECEIPT_IMAGE_MISSING')
+    return reply.header('content-type', 'application/octet-stream').send(await readFromDrive(fileId))
+  })
+
+  /** The same, from Telegram: Chopper has the photos in hand and does its part itself. */
+  app.post<{ Params: { key: string } }>('/agent/chopper/stash/:key/duplicate', bookkeeper, async (request) => {
+    const key = KEY.parse(request.params.key)
+    const body = resolution.parse(request.body)
+    return request.db.$transaction((tx) => resolveDuplicate(tx, request, key, body, 'chopper'), { timeout: 30_000 })
   })
 
   // ── RMS ────────────────────────────────────────────────────────────────────
@@ -505,4 +554,134 @@ async function carryReading(tx: Tx, businessId: string, userId: string, receiptD
     } as never, { receiptDocumentId, uncategorised: true, lineNumbers: pendingIdx })
   }
   await tx.receiptDocument.update({ where: { id: receiptDocumentId }, data: { vendor: head.vendor, receiptDate: new Date(head.date + 'T00:00:00Z'), receiptNo: head.receiptNo, totalSen: head.totalSen } })
+}
+
+const resolution = z.object({
+  action: z.enum(['cancel', 'replace', 'keep']),
+  /** The receipt it duplicates (booked or stashed), or the hand-typed expenses it belongs to. */
+  otherKey: KEY.nullish(),
+  expenseIds: z.array(z.string().uuid()).max(20).nullish(),
+})
+
+type Other = { kind: 'booked' | 'stash' | 'manual'; receiptKey: string | null; expenseIds: string[]; vendor: string | null; date: string | null; totalSen: number | null; reasons: string[]; hasScan: boolean }
+
+/** Receipts or expenses this stashed receipt looks like: same invoice number, same day and total, or the same image. */
+export async function findDuplicates(db: Tx, key: string): Promise<Other[]> {
+  const row = await db.chopperStash.findFirst({ where: { receiptKey: key } })
+  if (!row) throw notFound('agent:STASH_NOT_FOUND')
+  const d = row.data as StashData & StashItem
+  const rd = d.reading
+  const day = rd?.date ? new Date(rd.date + 'T00:00:00Z') : null
+  const or: Prisma.ExpenseWhereInput[] = []
+  if (rd?.receiptNo) or.push({ receiptNo: { equals: rd.receiptNo, mode: 'insensitive' } }, { receiptDocument: { receiptNo: { equals: rd.receiptNo, mode: 'insensitive' } } })
+  if (day && rd?.totalSen) or.push({ businessDate: day, amountSen: rd.totalSen }, { receiptDocument: { receiptDate: day, totalSen: rd.totalSen } })
+  if (d.sha256) or.push({ receiptDocument: { sha256: d.sha256 } })
+  const others = new Map<string, Other>()
+  if (or.length) {
+    const rows = await db.expense.findMany({ where: { OR: or }, include: { receiptDocument: true }, take: 40, orderBy: { businessDate: 'desc' } })
+    for (const e of rows) {
+      const doc = e.receiptDocument
+      const otherKey = doc ? keyOf(doc) : null
+      if (otherKey === key) continue
+      const id = otherKey ?? `manual:${e.id}`
+      const reasons: string[] = []
+      if (rd?.receiptNo && [e.receiptNo, doc?.receiptNo].some((n) => n && n.toLowerCase() === rd.receiptNo!.toLowerCase())) reasons.push('same receipt number')
+      if (day && rd?.totalSen && ((e.businessDate.getTime() === day.getTime() && e.amountSen === rd.totalSen) || (doc?.receiptDate?.getTime() === day.getTime() && doc?.totalSen === rd.totalSen))) reasons.push('same day and total')
+      if (d.sha256 && doc?.sha256 === d.sha256) reasons.push('the same photo')
+      const prior = others.get(id)
+      if (prior) { prior.expenseIds.push(e.id); continue }
+      others.set(id, {
+        kind: doc ? 'booked' : 'manual', receiptKey: otherKey, expenseIds: [e.id], vendor: e.vendor ?? doc?.vendor ?? null,
+        date: (doc?.receiptDate ?? e.businessDate).toISOString().slice(0, 10), totalSen: doc?.totalSen ?? e.amountSen, reasons,
+        hasScan: Boolean(doc?.scanDriveFileId || doc?.driveFileId),
+      })
+    }
+  }
+  // Another photo of it still in the stash (sent twice, or from two channels).
+  const stashed = await db.chopperStash.findMany({ where: { status: 'OPEN', receiptKey: { not: key } } })
+  for (const other of stashed) {
+    if (others.has(other.receiptKey)) continue
+    const o = other.data as StashData & StashItem
+    const od = o.reading
+    const reasons: string[] = []
+    if (d.sha256 && o.sha256 === d.sha256) reasons.push('the same photo')
+    if (rd?.receiptNo && od?.receiptNo && rd.receiptNo.toLowerCase() === od.receiptNo.toLowerCase() && rd.date === od.date) reasons.push('same receipt number')
+    if (rd?.date && rd.totalSen && od?.date === rd.date && od.totalSen === rd.totalSen && (od.vendor ?? '').toLowerCase().slice(0, 6) === (rd.vendor ?? '').toLowerCase().slice(0, 6)) reasons.push('same shop, day and total')
+    if ((d.stashDuplicates ?? []).includes(other.receiptKey) && !reasons.length) reasons.push('Chopper flagged it')
+    if (!reasons.length) continue
+    others.set(other.receiptKey, { kind: 'stash', receiptKey: other.receiptKey, expenseIds: [], vendor: od?.vendor ?? null, date: od?.date ?? null, totalSen: od?.totalSen ?? null, reasons, hasScan: Boolean(o.fileId) })
+  }
+  return [...others.values()]
+}
+
+/** Every unsorted line of a receipt, left out: its not-categorised expense goes, its stash row says so. */
+async function dropReceipt(tx: Tx, businessId: string, key: string, from: 'rms' | 'chopper') {
+  const row = await tx.chopperStash.findFirst({ where: { receiptKey: key } })
+  const lines = ((row?.data as StashData | undefined)?.decisions ?? []).map((x, i) => (x === 'pending' ? i : -1)).filter((i) => i >= 0)
+  if (lines.length) await scrapLines(tx, businessId, key, lines, 0, from)
+  // A receipt document with no expenses left only gets in the way of the photo's next use.
+  await tx.receiptDocument.deleteMany({ where: { receiptKey: key, expenses: { none: {} } } })
+}
+
+async function resolveDuplicate(tx: Tx, request: FastifyRequest, key: string, body: z.infer<typeof resolution>, from: 'rms' | 'chopper') {
+  const { businessId } = request
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${businessId + ':chopper:' + key}))::text`
+  const row = await stashRow(tx, key, true)
+  const d = row.data as StashData & StashItem
+  let otherKind: Other['kind'] | null = null
+  if (body.action === 'replace') {
+    if (body.otherKey) otherKind = (await receiptByKey(tx, body.otherKey))?.expenses.some((e) => !e.uncategorised) ? 'booked' : 'stash'
+    else if (body.expenseIds?.length) otherKind = 'manual'
+    else throw badRequest('validation:INVALID_REQUEST', 'say which receipt it replaces')
+  }
+  const clean = { duplicates: 0, stashDuplicates: [], duplicateDismissed: true }
+  let result: Record<string, unknown> = { action: body.action }
+
+  if (body.action === 'keep') {
+    await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({ ...d, ...clean }) } })
+  } else if (body.action === 'cancel') {
+    await dropReceipt(tx, businessId, key, from)
+  } else if (otherKind === 'stash') {
+    // The new photo stays; the other stashed one goes.
+    await dropReceipt(tx, businessId, body.otherKey!, from)
+    await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({ ...d, ...clean }) } })
+  } else if (otherKind === 'booked') {
+    // The booking stays; its photo becomes this one.
+    if (!d.fileId || !d.sha256) throw conflict('agent:SCAN_NOT_READY')
+    const file = await verifyScan(request, d.fileId, d.sha256)
+    await dropReceipt(tx, businessId, key, from)
+    const other = (await receiptByKey(tx, body.otherKey!))!
+    await tx.receiptDocument.update({ where: { id: other.id }, data: {
+      sha256: d.sha256, driveFileId: file.id, scanDriveFileId: file.id, driveUrl: file.webViewLink ?? null, scanDriveUrl: file.webViewLink ?? null,
+      extracted: json({ ...((other as { extracted?: object }).extracted ?? {}), _replacedBy: key }),
+    } })
+    result = { ...result, otherKey: body.otherKey, oldFileId: other.scanDriveFileId ?? other.driveFileId, drivePath: other.drivePath, fileName: other.fileName }
+  } else {
+    // A hand-typed expense gets this photo as its receipt.
+    if (!d.fileId || !d.sha256) throw conflict('agent:SCAN_NOT_READY')
+    const file = await verifyScan(request, d.fileId, d.sha256)
+    const expenses = await tx.expense.findMany({ where: { id: { in: body.expenseIds! } } })
+    if (expenses.length !== body.expenseIds!.length || expenses.some((e) => e.receiptDocumentId)) throw conflict('agent:EXPENSE_HAS_RECEIPT')
+    await dropReceipt(tx, businessId, key, from)
+    const doc = await tx.receiptDocument.create({ data: {
+      id: randomUUID(), businessId, receiptKey: key, status: 'LINKED', sha256: d.sha256, mimeType: file.mimeType, driveFileId: file.id, driveUrl: file.webViewLink ?? null,
+      scanDriveFileId: file.id, scanDriveUrl: file.webViewLink ?? null, fileName: d.fileName ?? `${key}.jpg`, drivePath: d.drivePath ?? '', vendor: d.reading?.vendor ?? null,
+      receiptDate: d.reading?.date ? new Date(d.reading.date + 'T00:00:00Z') : null, receiptNo: d.reading?.receiptNo ?? null, totalSen: d.reading?.totalSen ?? null,
+      resolvedAt: new Date(), extracted: { _chopper: { linked: true, key }, _inbox: { originalRetired: true } },
+    } })
+    await tx.expense.updateMany({ where: { id: { in: body.expenseIds! } }, data: { receiptDocumentId: doc.id } })
+    const fresh = (await stashRow(tx, key, true)).data as StashData
+    await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({ ...fresh, decisions: (fresh.decisions ?? []).map(() => 'posted'), linked: true }) } })
+  }
+
+  // The RMS settled it: Chopper hears, and moves or retires the photos.
+  if (from === 'rms') {
+    const now = (await stashRow(tx, key, true))
+    const data = now.data as StashData
+    await tx.chopperStash.update({ where: { id: now.id }, data: {
+      data: json({ ...data, events: [...(data.events ?? []), { type: 'duplicate', ...result, otherKey: body.otherKey ?? null, otherKind }] }),
+      vistaRevision: { increment: 1 },
+    } })
+  }
+  return { ok: true, ...result, otherKind }
 }
