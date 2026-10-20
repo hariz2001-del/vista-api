@@ -1863,6 +1863,13 @@ model ChopperChatMessage {
   text       String
   /// owner messages: PENDING → WORKING → ANSWERED or FAILED. Chopper's: DONE.
   status     String   @default("PENDING")
+  /// "text"; "receipt" (a photo sent in the chat) or "upload" (sent from Expenses)
+  /// for Chopper to read; Chopper's "card" (a receipt it read), "stash" or "batch" lists.
+  kind       String   @default("text")
+  /// A /bulk run: its photos are read quietly and listed together at /endbulk.
+  batch      String?
+  /// The receipt Chopper made of a photo.
+  receiptKey String?  @map("receipt_key")
   /// A file Chopper sent with its answer (a report PDF, a roster picture).
   fileName   String?  @map("file_name")
   fileMime   String?  @map("file_mime")

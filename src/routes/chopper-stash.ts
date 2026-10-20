@@ -285,6 +285,42 @@ export async function chopperStashRoutes(app: FastifyInstance) {
     return reply.header('content-type', mime).header('cache-control', 'private, no-store').send(bytes)
   })
 
+  /**
+   * Put a receipt Chopper held back (a likely duplicate, a total to check) into
+   * the books anyway, as not categorised. The owner looked and decided.
+   */
+  app.post<{ Params: { key: string } }>('/rms/stash/:key/record', owner, async (request) => {
+    const key = KEY.parse(request.params.key)
+    const row = await stashRow(request.db, key, true)
+    const d = row.data as StashData & StashItem
+    const rd = d.reading
+    if (!d.fileId || !d.sha256 || !d.fileName || !d.drivePath) throw conflict('agent:SCAN_NOT_READY')
+    if (!rd?.vendor || !rd.date || !rd.totalSen || rd.totalSen <= 0) throw conflict('agent:LINES_DO_NOT_ADD_UP', 'the shop, date and total are needed — tap Edit to fill them in')
+    const file = await verifyScan(request, d.fileId, d.sha256)
+    const head = { vendor: rd.vendor, date: rd.date, totalSen: rd.totalSen }
+    const lines = (rd.lines ?? []).filter((_, i) => (d.decisions ?? [])[i] !== 'scrapped') as ReadLine[]
+    return request.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${request.businessId + ':chopper:' + key}))::text`
+      let receipt = await receiptByKey(tx, key)
+      if (receipt?.expenses.length) return { recorded: true, alreadyRecorded: true }
+      if (!receipt) {
+        await tx.receiptDocument.create({ data: {
+          id: randomUUID(), businessId: request.businessId, receiptKey: key, status: 'POSTED', sha256: d.sha256!,
+          mimeType: file.mimeType, driveFileId: file.id, driveUrl: file.webViewLink ?? null, scanDriveFileId: file.id, scanDriveUrl: file.webViewLink ?? null,
+          fileName: d.fileName!, drivePath: d.drivePath!, vendor: head.vendor, receiptDate: new Date(head.date + 'T00:00:00Z'), receiptNo: rd.receiptNo ?? null, totalSen: head.totalSen,
+          resolvedAt: new Date(), extracted: { _chopper: { sealed: true, key, recorded: true, byOwner: true }, _inbox: { originalRetired: true } },
+        } })
+        receipt = (await receiptByKey(tx, key))!
+      }
+      await recordUncategorised(tx, {
+        businessId: request.businessId, ownerId: request.user.id, receiptDocumentId: receipt.id, date: head.date, vendor: head.vendor,
+        receiptNo: rd.receiptNo ?? null, totalSen: head.totalSen, lines, paymentMethod: PAYMENT.safeParse(rd.paymentMethod).data ?? null, receiptKey: key,
+      })
+      await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({ ...d, recorded: true }) } })
+      return { recorded: true, alreadyRecorded: false }
+    })
+  })
+
   /** Sort lines into a categorised expense, from the RMS. */
   app.post<{ Params: { key: string } }>('/rms/stash/:key/book', owner, async (request) => {
     const key = KEY.parse(request.params.key)
