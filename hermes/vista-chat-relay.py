@@ -1,8 +1,10 @@
 """Chopper in the Vista RMS: owner messages from Vista go to Hermes, answers go back.
 
-Vista never calls this server. The relay claims one waiting message at a time,
-asks Hermes in one ongoing conversation ("vista-rms"), and posts the answer,
-with any file Chopper made (MEDIA:/path lines), back to Vista.
+Vista never calls this server. The relay claims one waiting message at a time.
+A receipt photo goes straight into Chopper's receipt pipeline (the same as a
+Telegram photo; the worker reads it and posts its card back to Vista). A question
+goes to Hermes in one ongoing conversation ("vista-rms"), and the answer, with any
+file Chopper made (MEDIA:/path lines), goes back to Vista.
 """
 import os, sys, time, base64, mimetypes, re, subprocess
 from pathlib import Path
@@ -10,6 +12,8 @@ sys.path.insert(0, '/home/ubuntu/.hermes/hermes-agent')
 import hermes_bootstrap  # noqa: F401  (sets up Hermes's own imports)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import vista_mcp as m
+import urllib.request
+import chopper_receipts as cr
 
 HERMES = str(Path.home() / '.local/bin/hermes')
 SESSION = 'vista-rms'
@@ -50,6 +54,26 @@ def files_in(answer):
     return re.sub(r'\n{3,}', '\n\n', text).strip(), files
 
 
+def photo_bytes(message_id):
+    base = m._setting("VISTA_API_URL", "https://api.vistahub.my").rstrip("/")
+    request = urllib.request.Request(f"{base}/agent/chopper/chat/{message_id}/file", headers={
+        "Authorization": f"Bearer {m._setting('VISTA_AGENT_KEY')}", "X-Telegram-User": m._default_user()})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read()
+
+
+def take_photo(message):
+    """Into Chopper's pipeline at once: no model call before the read starts."""
+    actor = str(m._default_user())
+    data = photo_bytes(message['id'])
+    chat = 'vista-chat' if message['kind'] == 'receipt' else 'vista-expenses'
+    # Photos from Expenses and in a /bulk run are read quietly (no card of their own).
+    batch = message.get('batch') or ('vista-expenses' if message['kind'] == 'upload' else None)
+    mime = (message.get('file') or {}).get('mime') or 'image/jpeg'
+    r, _ = cr.intake(m, actor, chat, str(message['id']), data, mime, batch=batch or '')
+    m._call('POST', f"/agent/chopper/chat/{message['id']}/received", {'receiptKey': r['id']}, None)
+
+
 def main():
     while True:
         try:
@@ -58,6 +82,14 @@ def main():
             print('claim failed:', e, file=sys.stderr); time.sleep(10); continue
         if not message:
             time.sleep(2); continue
+        if message.get('kind') in ('receipt', 'upload'):
+            try:
+                take_photo(message)
+            except Exception as e:
+                print('photo intake failed:', e, file=sys.stderr)
+                try: m._call('POST', f"/agent/chopper/chat/{message['id']}/received", {'failed': True, 'text': "I couldn't take that photo in. Try sending it again."}, None)
+                except Exception: pass
+            continue
         try:
             text, files = files_in(ask(message['text']))
             body = {'text': text, 'files': files}

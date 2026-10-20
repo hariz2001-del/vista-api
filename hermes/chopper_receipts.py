@@ -271,6 +271,12 @@ def vista_events(m):
 def _apply_vista_event(m,ev):
     r=get(ev['receiptKey']);v=r['data']
     if r['state'] in ('SUBMITTING','FILING','PROCESSING','RECEIVING'):return 'wait'
+    # A duplicate settled in the RMS: Chopper's part of it, then nothing else to apply.
+    settled=[e for e in ev.get('events',[]) if e.get('type')=='duplicate']
+    if settled:
+        if r['state']=='RETIRED':return None
+        e=settled[-1];apply_duplicate(m,r,e.get('action'),e)
+        return {'posted':[],'scrapped':[],'duplicate':e.get('action')}
     new={'posted':[],'scrapped':[]}
     # A reading corrected in the RMS: its title and lines replace Chopper's (lines are only ever added).
     edits=[e for e in ev.get('events',[]) if e.get('type')=='reading' and e.get('reading')]
@@ -305,6 +311,7 @@ def rms_note(r,new):
     left=[i for i,x in enumerate(v.get('decisions',[])) if x=='pending']
     text=rest+'\n'+key+'\n'
     if new.get('edited'):text+='\n✎ Reading corrected in Vista.'
+    if new.get('duplicate'):text+='\n⚑ Duplicate settled in Vista: '+{'cancel':'the new photo was dropped.','replace':'replaced.','keep':'kept both.'}.get(new['duplicate'],'done.')
     if new['posted']:text+='\n✓ Sorted in Vista: '+nums(new['posted'])+' · '+amount(new['posted'])
     if new['scrapped']:text+='\n✗ Left out in Vista: '+nums(new['scrapped'])+' · '+amount(new['scrapped'])
     if left:text+='\n◻ Still to sort: '+nums(left)+' · '+amount(left)
@@ -313,6 +320,74 @@ def rms_note(r,new):
         text+='\n'+('Filed: '+where if where and any(x=='posted' for x in v['decisions']) else 'Nothing left to sort.')
     rows=[[button('Open',f"cr:{r['id']}:open")]] if left else [[button('View scan',f"cr:{r['id']}:scan")]]
     return {'chat':v.get('chat'),'text':text,'rows':rows}
+
+def from_vista(r):
+    """Sent from the Vista RMS (its chat or Expenses), not Telegram: answers go back to Vista."""
+    return str(r['data'].get('chat','')).startswith('vista')
+
+def vista_card_text(r):
+    v=r['data'];rd=v.get('reading') or {}
+    head=list_line(0,r).split('. ',1)[1];key,_,rest=head.partition(' — ')
+    text=rest+'\n'+key+'\n\n'+'\n'.join(receipt_lines(r))
+    if v.get('problem'):text+='\n\n⚠ '+v['problem']
+    elif v.get('warning'):text+='\n\n⚠ '+v['warning']
+    if candidates(r) or v.get('stashDuplicates'):text+='\n\nLikely duplicate of a receipt already in Vista — check before sorting.'
+    elif v.get('recorded'):text+='\n\nIn Vista as not categorised. Sort it under Expenses › Stash.'
+    return text
+
+def vista_card(m,r):
+    """A photo sent in the Vista chat: its card goes back to that chat (photos in /bulk or from Expenses stay quiet)."""
+    v=r['data']
+    if v.get('chat')!='vista-chat':return
+    m._call('POST','/agent/chopper/chat/card',{'replyTo':str(v['message']),'receiptKey':r['id'],'text':vista_card_text(r)[:3900]},r['actor'])
+
+def raw_get(m,path,actor):
+    import urllib.request
+    base=m._setting('VISTA_API_URL','https://api.vistahub.my').rstrip('/')
+    request=urllib.request.Request(base+path,headers={'Authorization':'Bearer '+m._setting('VISTA_AGENT_KEY'),'X-Telegram-User':str(actor or m._default_user())})
+    with urllib.request.urlopen(request,timeout=60) as response:return response.read()
+
+def _trash(d,ids):
+    for fid in [x for x in ids if x]:
+        try:d.request('/files/'+fid,'PATCH',{'trashed':True})
+        except Exception as e:print('Drive trash failed for',fid,e,file=sys.stderr)
+
+def apply_duplicate(m,r,action,res):
+    """Chopper's part of settling a duplicate (Vista has done its part): retire, refile or clear the photos."""
+    v=r['data'];kind=res.get('otherKind');other=res.get('otherKey');d=service(m)
+    original=v.get('sourceFile') if not v.get('sourceRetired') else None
+    def retire(x,keep_scan=False):
+        xv=x['data']
+        _trash(d,([] if keep_scan else [xv.get('fileId'),xv.get('annotationFileId')])+[xv.get('sourceFile') if not xv.get('sourceRetired') else None])
+        xv['decisions']=['scrapped' if s=='pending' else s for s in xv.get('decisions',[])]
+        xv['duplicateSettled']=action;x['state']='RETIRED';return save(x)
+    def clear(x):
+        xv=x['data'];xv.update(duplicates={},stashDuplicates=[],duplicateDismissed=True);xv.pop('recordBlocked',None);xv.pop('dupOther',None);return save(x)
+    if action=='keep':r=clear(r)
+    elif action=='cancel':r=retire(r)
+    elif kind=='stash':
+        if other:
+            try:
+                with receipt_lock(other):retire(get(other))
+            except ValueError:pass
+        r=clear(r)
+    elif kind=='booked':
+        old=res.get('oldFileId');parent=None;name=res.get('fileName') or v.get('fileName')
+        if old:
+            try:parent=(d.meta(old).get('parents') or [None])[0]
+            except Exception:parent=None
+        if parent:move(d,v['fileId'],parent,name)
+        path=res.get('drivePath') or v.get('drivePath')
+        if old and old!=v['fileId']:_trash(d,[old])
+        m._call('POST','/agent/chopper/receipts/'+other+'/filed',{'driveFileId':v['fileId'],'fileName':name,'drivePath':path},r['actor'])
+        try:
+            with receipt_lock(other):
+                o=get(other);o['data'].update(fileId=v['fileId'],scanHash=v.get('scanHash'),fileName=name,drivePath=path);save(o)
+        except ValueError:pass
+        r=retire(r,keep_scan=True)
+    elif kind=='manual':
+        v['linked']=True;v['decisions']=['posted']*len(v.get('decisions',[]));r['state']='FILING';r=save(r);r=_finish_filing(m,r)
+    sync_soon(m);return r
 
 def authorise(m,actor):return m._call('GET','/agent/chopper/context',None,str(actor))
 
@@ -339,7 +414,7 @@ def sync_soon(m):
             except Exception as e:print('stash.jsonl sync failed, will retry on next change:',e,file=sys.stderr)
     threading.Thread(target=run,daemon=True).start()
 
-def intake(m,actor,chat,message,data,mime):
+def intake(m,actor,chat,message,data,mime,batch=None):
     context=authorise_fast(m,actor);source=f'{context["businessId"]}:{chat}:{message}'
     with db() as c:
         old=c.execute('SELECT id FROM receipts WHERE source_key=?',(source,)).fetchone()
@@ -348,7 +423,7 @@ def intake(m,actor,chat,message,data,mime):
         while c.execute('SELECT 1 FROM receipts WHERE id=?',(rid,)).fetchone():rid=key()
         local=ROOT/(rid+'.source');local.write_bytes(data)
         ext={'image/png':'.png','image/webp':'.webp','application/pdf':'.pdf'}.get(mime,'.jpg')
-        value={'chat':str(chat),'message':str(message),'sourcePath':str(local),'sourceName':rid+'_original'+ext,'mime':mime,'batch':settings(actor).get('bulk'),'reading':None,'choices':{},'decisions':[]}
+        value={'chat':str(chat),'message':str(message),'sourcePath':str(local),'sourceName':rid+'_original'+ext,'mime':mime,'batch':batch if batch is not None else settings(actor).get('bulk'),'reading':None,'choices':{},'decisions':[]}
         c.execute('INSERT INTO receipts VALUES(?,?,?,?,?,?,0,?,?)',(rid,str(actor),context['businessId'],source,sha(data),'RECEIVING',json_text(value),time.time()))
     r=get(rid);d=service(m)
     r['data']['sourceFile']=upload(d,layout(d)['Stash'],value['sourceName'],data,mime,rid,'source')['id'];r['state']='PROCESSING';r=save(r);sync_soon(m)
@@ -765,6 +840,7 @@ def markup(rows):
     from telegram import InlineKeyboardMarkup
     return InlineKeyboardMarkup(rows)
 def candidates(r):
+    if r['data'].get('duplicateDismissed'):return []
     result=r['data'].get('duplicates') or {}
     rows=result if isinstance(result,list) else result.get('candidates',result.get('duplicates',result.get('matches',[])))
     return [x for x in rows if not x.get('sameReceiptKey')]
@@ -878,6 +954,7 @@ async def card(adapter,m,r,chat,query=None):
         rows=[top,second,[button('Stash for later',prefix+'later')]]
         if partial:rows.append([button('Scrap remaining',prefix+'scrappreview')])
         if r['state']=='NEEDS_REVIEW':rows.append([button('Retry scan',prefix+'retry'),button('View original',prefix+'original')])
+        if candidates(r) or v.get('stashDuplicates'):rows.append([button('⚑ Review duplicate',prefix+'dupreview')])
         if candidates(r):rows.append([button('Link existing',prefix+'link')])
     await show(adapter,query,chat,text,rows)
 
@@ -915,7 +992,7 @@ async def photo(adapter,message,event,data,m):
 
 # Actions that do real work (Vista, Drive). One at a time per receipt, and the tapped
 # message's buttons are taken away at once so they can't be pressed twice.
-ONE_PRESS=('preview','confirm','scrap','scrappreview','linkconfirm','file','retry')
+ONE_PRESS=('preview','confirm','scrap','scrappreview','linkconfirm','file','retry','dupcancel','dupreplace','dupkeep')
 _busy=set()
 
 async def callback(adapter,query,data,m):
@@ -968,6 +1045,41 @@ async def _callback(adapter,query,data,m):
             if not fid:raise ValueError('Image still processing')
             image=BytesIO(await asyncio.to_thread(lambda:service(m).request('/files/'+fid+'?alt=media',raw=True)));image.name='receipt.jpg'
             await adapter._bot.send_photo(chat_id=chat,photo=image,caption=r['id']+' · '+p[2])
+        elif p[2]=='dupreview':
+            others=(await asyncio.to_thread(m._call,'GET','/agent/chopper/stash/'+r['id']+'/duplicates',None,actor)).get('others',[])
+            if not others:
+                await adapter._bot.send_message(chat_id=chat,text=r['id']+' — no duplicate found any more.');return True
+            o=others[0];v['dupOther']=o;r=await asyncio.to_thread(save,r)
+            from telegram import InputMediaPhoto
+            media=[]
+            if v.get('fileId'):
+                mine=await asyncio.to_thread(lambda:service(m).request('/files/'+v['fileId']+'?alt=media',raw=True))
+                media.append(InputMediaPhoto(media=mine,caption='1 · New photo · '+r['id']))
+            if o.get('receiptKey') and o.get('hasScan'):
+                try:
+                    theirs=await asyncio.to_thread(raw_get,m,'/agent/chopper/receipts/'+o['receiptKey']+'/scan',actor)
+                    media.append(InputMediaPhoto(media=theirs,caption='2 · Already '+('in the stash' if o['kind']=='stash' else 'in Vista')+' · '+o['receiptKey']))
+                except Exception as e:print('duplicate scan fetch failed:',e,file=sys.stderr)
+            if len(media)>1:await adapter._bot.send_media_group(chat_id=chat,media=media)
+            elif media:await adapter._bot.send_photo(chat_id=chat,photo=media[0].media,caption=media[0].caption)
+            where={'booked':'already booked in Vista','stash':'also waiting in the stash','manual':'typed into Vista by hand, with no photo'}[o['kind']]
+            replace={'booked':'keeps that booking and swaps in the new photo.','stash':'drops the other photo and keeps the new one.','manual':'attaches the new photo to that expense.'}[o['kind']]
+            text=('These look like the same receipt ('+', '.join(o.get('reasons') or ['similar'])+').\n\n'
+                  '1 · New: '+list_line(0,r).split('. ',1)[1]+'\n'
+                  '2 · '+(o.get('receiptKey') or 'Expense')+' — '+(o.get('vendor') or 'Receipt')+' · '+(o.get('date') or '')+' · '+rm(o.get('totalSen') or 0)+' — '+where+'\n\n'
+                  'Cancel drops the new one. Replace '+replace+' Keep both if they really are two receipts.')
+            await adapter._bot.send_message(chat_id=chat,text=text,reply_markup=markup([[button('✗ Cancel new',prefix+'dupcancel'),button('⇄ Replace',prefix+'dupreplace')],[button('Keep both',prefix+'dupkeep')]]))
+        elif p[2] in ('dupcancel','dupreplace','dupkeep'):
+            action={'dupcancel':'cancel','dupreplace':'replace','dupkeep':'keep'}[p[2]];o=v.get('dupOther') or {}
+            body={'action':action,'otherKey':o.get('receiptKey'),'expenseIds':o.get('expenseIds') if o.get('kind')=='manual' else None}
+            def settle():
+                with receipt_lock(r['id']):
+                    res=m._call('POST','/agent/chopper/stash/'+r['id']+'/duplicate',body,actor)
+                    return apply_duplicate(m,get(r['id']),action,res)
+            r=await asyncio.to_thread(settle)
+            done={'cancel':'✗ Cancelled — the new photo is gone from the stash and the books.','keep':'Kept both. It goes into Vista as not categorised.',
+                  'replace':{'booked':'⇄ Replaced — the booking keeps its categories, with the new photo.','stash':'⇄ Replaced — the other photo is gone; this one goes into Vista.','manual':'⇄ Attached — that expense now has this photo.'}.get(o.get('kind'),'⇄ Replaced.')}[action]
+            await adapter._bot.send_message(chat_id=chat,text=r['id']+' — '+done)
         elif p[2]=='edit':
             booked=any(x!='pending' for x in v.get('decisions',[]))
             rd=v['reading'];got=sum(l.get('amountSen',0) for l in rd['lines'])

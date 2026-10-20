@@ -66,7 +66,12 @@ async def main():
                 for rid,future in list(running.items()):
                     if not future.done():continue
                     running.pop(rid);r=future.result();v=r['data']
-                    if r['state'] in ('UNCONFIGURED','NEEDS_REVIEW') and not v.get('batch') and not v.get('notified'):
+                    if cr.from_vista(r):
+                        # Sent from the Vista RMS: its card (if any) goes back there, once read.
+                        if r['state'] in ('UNCONFIGURED','NEEDS_REVIEW') and not v.get('notified'):
+                            try:await asyncio.to_thread(cr.vista_card,m,r);r=cr.get(rid);r['data'].update(notified=True,alerted=True);cr.save(r)
+                            except Exception as e:print('Vista card failed, will retry:',e,file=sys.stderr)
+                    elif r['state'] in ('UNCONFIGURED','NEEDS_REVIEW') and not v.get('batch') and not v.get('notified'):
                         # The card carries any problem or warning itself.
                         await cr.card(adapter,m,r,v['chat']);r=cr.get(rid);r['data'].update(notified=True,alerted=True);cr.save(r)
                     elif cr.alert_text(r) and not v.get('alerted') and r['state'] in ('UNCONFIGURED','NEEDS_REVIEW','CONFIGURED'):
@@ -90,7 +95,7 @@ async def main():
                     except Exception as e:print('RMS sort poll failed:',e,file=sys.stderr);notes=[]
                     sorting=None
                     for note in notes:
-                        if note.get('chat'):
+                        if note.get('chat') and not str(note['chat']).startswith('vista'):
                             try:await adapter._bot.send_message(chat_id=note['chat'],text=note['text'],reply_markup=cr.markup(note['rows']))
                             except Exception as e:print('RMS sort message failed:',e,file=sys.stderr)
             await asyncio.sleep(2)
