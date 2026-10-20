@@ -325,6 +325,27 @@ const adjustmentBody = z.object({
   shiftId: ID.nullable(),
 })
 
+const drawingBody = z.object({
+  businessDate: DATE,
+  amountSen: z.number().int().positive(),
+  /** Which partner took it; null for a business without partner settlement (the owner). */
+  partnerId: ID.nullable(),
+  note: z.string().trim().max(150).nullish().transform((value) => value || null),
+})
+
+/** A withdrawal's cash-book line: the partner's brand, and words that say who and why. */
+async function drawingLine(tx: Tx, body: z.infer<typeof drawingBody>) {
+  const partner = body.partnerId ? await tx.partner.findUnique({ where: { id: body.partnerId } }) : null
+  if (body.partnerId && !partner) throw notFound('rms:PARTNER_NOT_FOUND')
+  const who = partner?.name ?? 'Owner'
+  return {
+    businessDate: toDate(body.businessDate),
+    amountSen: body.amountSen,
+    brandId: partner?.brandId ?? null,
+    description: (`Withdrawal · ${who}` + (body.note ? ` — ${body.note}` : '')).slice(0, 200),
+  }
+}
+
 const settingsBody = z.object({
   businessName: z.string().trim().min(1).max(80),
   outletName: z.string().trim().min(1).max(80),
@@ -798,6 +819,48 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
    * Adjust Balance: one RECONCILIATION_ADJUSTMENT row, nothing else changed.
    * Tying it to a shift only records which close prompted it.
    */
+  /**
+   * The owner (or a partner) taking money out of the stall for themselves. One
+   * OWNER_DRAWING line in the cash book, against the partner's brand, so
+   * settlement takes it off their payout. Changing or removing one amends that
+   * line — no reversing rows.
+   */
+  app.post('/rms/drawings', { preHandler: requireOwner }, async (request) => {
+    const body = drawingBody.parse(request.body)
+    const { db, businessId } = request
+    return db.$transaction(async (tx) => {
+      await assertNotLocked(tx, body.businessDate)
+      const entry = await tx.ledgerEntry.create({ data: { businessId, direction: 'MONEY_OUT', category: 'OWNER_DRAWING', ...(await drawingLine(tx, body)) } })
+      return { id: Number(entry.id) }
+    })
+  })
+
+  app.put<{ Params: { id: string } }>('/rms/drawings/:id', { preHandler: requireOwner }, async (request) => {
+    const id = BigInt(z.string().regex(/^\d{1,18}$/).parse(request.params.id))
+    const body = drawingBody.parse(request.body)
+    const { db } = request
+    return db.$transaction(async (tx) => {
+      const old = await tx.ledgerEntry.findFirst({ where: { id, category: 'OWNER_DRAWING' } })
+      if (!old) throw notFound('rms:DRAWING_NOT_FOUND')
+      await assertNotLocked(tx, isoDate(old.businessDate))
+      await assertNotLocked(tx, body.businessDate)
+      await tx.ledgerEntry.update({ where: { id }, data: await drawingLine(tx, body) })
+      return { id: Number(id) }
+    })
+  })
+
+  app.delete<{ Params: { id: string } }>('/rms/drawings/:id', { preHandler: requireOwner }, async (request) => {
+    const id = BigInt(z.string().regex(/^\d{1,18}$/).parse(request.params.id))
+    const { db } = request
+    return db.$transaction(async (tx) => {
+      const old = await tx.ledgerEntry.findFirst({ where: { id, category: 'OWNER_DRAWING' } })
+      if (!old) throw notFound('rms:DRAWING_NOT_FOUND')
+      await assertNotLocked(tx, isoDate(old.businessDate))
+      await tx.ledgerEntry.delete({ where: { id } })
+      return { id: Number(id) }
+    })
+  })
+
   app.post('/rms/ledger/adjustments', { preHandler: requireOwner }, async (request) => {
     const body = adjustmentBody.parse(request.body)
     const { db, businessId } = request

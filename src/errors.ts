@@ -75,6 +75,7 @@ export const MESSAGES: Record<string, string> = {
   'rms:UNKNOWN_BRAND': 'That brand does not exist.',
   'rms:PRODUCT_NOT_FOUND': 'That item is no longer on the menu.',
   'rms:NOTHING_TO_CHANGE': 'Nothing to change.',
+  'rms:DRAWING_NOT_FOUND': 'That withdrawal no longer exists.',
   'rms:PARTNER_NOT_FOUND': 'That partner no longer exists.',
   'rms:UNCATEGORISED_EXPENSES': 'Some receipts in that range are not categorised yet. Sort them under Expenses › Stash first.',
   'agent:LINES_ALREADY_SORTED': 'Some of those lines were booked or scrapped already. Reopen the receipt to see where it stands.',
