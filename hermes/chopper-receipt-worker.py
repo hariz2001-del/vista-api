@@ -87,7 +87,9 @@ async def main():
                     if not batch or s.get('bulkNotified'):continue
                     batch_rows=[r for r in cr.pending(actor) if r['data'].get('batch')==batch]
                     if not any(r['state']=='PROCESSING' for r in batch_rows):
-                        await cr.list_card(adapter,m,actor,s['bulkChat'],batch);cr.settings(actor,bulkNotified=True)
+                        try:await cr.list_card(adapter,m,actor,s['bulkChat'],batch)
+                        except Exception as e:print('Bulk list failed:',e,file=sys.stderr)
+                        cr.settings(actor,bulkNotified=True)
                 # What the owner sorted in the RMS: applied, filed, and told on Telegram.
                 if sorting is None and time.time()-last_poll>4:sorting=sorter.submit(cr.vista_events,m);last_poll=time.time()
                 if sorting is not None and sorting.done():

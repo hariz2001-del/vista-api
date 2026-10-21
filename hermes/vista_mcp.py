@@ -65,6 +65,55 @@ class VistaError(Exception):
     pass
 
 
+PDF_ROOTS = ("documents", "reports", "drive")
+def _pdf_pages(spec, count):
+    if not spec: return list(range(count))
+    picked = []
+    for part in str(spec).replace(" ", "").split(","):
+        if not part: continue
+        first, _, last = part.partition("-")
+        start, end = int(first), int(last or first)
+        if start < 1 or end < start: raise VistaError("Pages look like 1-3 or 2,5")
+        picked += [i - 1 for i in range(start, min(end, count) + 1) if i - 1 not in picked]
+    return picked
+def _read_pdf(args):
+    """Read-only PDF text + optional page images, limited to Chopper's own cache folders."""
+    for packages in (PROFILE / "cache/scan-runtime/lib").glob("python*/site-packages"):
+        if str(packages) not in sys.path: sys.path.append(str(packages))
+    import pypdf, pypdfium2
+    path = Path(str(args.get("path", "")).removeprefix("MEDIA:")).expanduser().resolve()
+    if not any(path.is_relative_to((PROFILE / "cache" / root).resolve()) for root in PDF_ROOTS):
+        raise VistaError("I can only read PDFs that were sent to me, Vista reports, or files downloaded from Finances.")
+    if not path.is_file() or path.read_bytes()[:5] != b"%PDF-":
+        raise VistaError("That file is not a PDF I can open.")
+    reader = pypdf.PdfReader(str(path))
+    if reader.is_encrypted:
+        try:
+            if not reader.decrypt(""): raise ValueError
+        except Exception: raise VistaError("This PDF is password-protected; ask the sender for an unlocked copy.") from None
+    count = len(reader.pages)
+    pages = _pdf_pages(args.get("pages"), count)[:40]
+    out = []
+    for i in pages:
+        text = (reader.pages[i].extract_text() or "").strip()
+        out.append({"page": i + 1, "text": text[:12000], "no_text": not text})
+    result = {"file": path.name, "page_count": count, "pages": out}
+    if count > len(pages) and not args.get("pages"): result["note"] = "Only the first 40 pages were read; ask for more with pages."
+    if args.get("render") or any(p["no_text"] for p in out):
+        folder = PROFILE / "cache" / "vision" / "pdf-pages"
+        folder.mkdir(parents=True, exist_ok=True)
+        doc = pypdfium2.PdfDocument(str(path))
+        images = []
+        for i in pages[:8]:
+            target = folder / f"{path.stem[:60]}-p{i + 1}.png"
+            doc[i].render(scale=2).to_pil().save(target)
+            images.append({"page": i + 1, "image_path": str(target)})
+        doc.close()
+        result["page_images"] = images
+        result["how_to_look"] = "Call vision_analyze with image_url set to an image_path to see that page."
+    return result
+
+
 def _call(method: str, path: str, body: object | None = None, telegram_user: str | None = None) -> dict:
     base = _setting("VISTA_API_URL", "https://api.vistahub.my").rstrip("/")
     key = _setting("VISTA_AGENT_KEY")
@@ -95,7 +144,8 @@ def _call(method: str, path: str, body: object | None = None, telegram_user: str
                 message += " " + "; ".join(f"{field['path']}: {field['message']}" for field in detail["fields"])
         except Exception:  # noqa: BLE001 - any body shape
             message = f"HTTP {error.code}"
-        raise VistaError(message) from None
+        exc=VistaError(message);exc.status_code=error.code;exc.detail=detail if 'detail' in locals() else {}
+        raise exc from None
     except urllib.error.URLError as error:
         raise VistaError(f"Cannot reach Vista: {error.reason}") from None
 
@@ -457,9 +507,10 @@ DIRECT_DRIVE_TOOL = _tool('chopper_drive', 'OWNER independent Finances Google Dr
     'local_path': {'type':'string'}, 'mime_type': {'type':'string'}, 'text': {'type':'string'}, 'reason': {'type':'string'}, 'show_buttons': {'type':'boolean'},
 }, ['action'])
 
+TOOLS.append(_tool('vista_read_pdf', 'Read a PDF on this machine: any PDF the user sent in Telegram (cache/documents), a Vista report from vista_report (cache/reports) or a file downloaded from Finances (cache/drive). Returns each page\'s text. Set render=true to also get page pictures; then look at them with vision_analyze when layout, ticks, tables or handwriting matter, or when a page has no text (scanned). Read-only; never edits the PDF.', {'path': {'type': 'string', 'description': 'Local path of the PDF, e.g. the document path from the user\'s message or local_path from vista_report'}, 'pages': {'type': 'string', 'description': 'Optional pages, e.g. "1-3" or "2,5". Default: all (up to 40).'}, 'render': {'type': 'boolean', 'description': 'Also save page pictures for vision_analyze (up to 8 pages).'}}, ['path']))
 TOOLS.append(_tool('vista_receipt_annotate', 'Maintain a SEPARATE annotated Drive scan showing posted items by brand and crossed-out scrapped items. Never changes receipt text, amounts, originals or accounting. Inspect the actual cropped scan with vision before supplying normalized scan regions per ZERO-BASED line index. Use reading_hash from vista_receipt_form. Omit regions to retry upload only. Unknown positions stay unmarked, not guessed.', {'receipt_id':{'type':'string'},'reading_hash':{'type':'string'},'regions':{'type':'array','items':{'type':'object','properties':{k:{'type':'integer' if k=='index' else 'number'} for k in ('index','x','y','width','height')},'required':['index','x','y','width','height']}}}, ['receipt_id']))
 
-TOOLS.append(_tool('chopper_receipts','Chopper Drive-first pending receipt register: list/get/edit reading only. No financial submission or confirmation through the model. Native Telegram buttons choose live Vista fields, preview and confirm.',{'action':{'type':'string','enum':['list','get','edit']},'receipt_id':{'type':'string'},'reading':{'type':'object'}},['action']))
+TOOLS.append(_tool('chopper_receipts','Receipts read by Chopper. action=recent: the 5 receipts this sender touched last (use it when they say "this receipt", "the edited lines", "that one" without a key — cards and ✓ Saved notes are not in your chat history). action=problems: only receipts with something wrong (no total, items not adding up to the total, unreadable, possible duplicate, unsure readings), each with its issues. action=list: everything still in the stash, as short rows (optional query: shop, date YYYY-MM-DD or key). action=get with receipt_id: the full reading. action=edit with receipt_id and reading: correct a reading (lines must add up to the total; a printed rounding line is a line). No booking through the model: Telegram buttons and the Vista RMS do that.',{'action':{'type':'string','enum':['recent','problems','list','get','edit']},'receipt_id':{'type':'string'},'query':{'type':'string'},'reading':{'type':'object'}},['action']))
 
 def _receipt_card_send(rid, view, user):
     import receipt_form
@@ -511,7 +562,7 @@ def _bulk_notify(user,receipt_id=None):
     _call('POST','/agent/inbox/bulk/delivered',{'id':delivery['id'],'leaseToken':delivery['leaseToken'],'messageId':sent['result']['message_id']},user)
     return {'sent':True,'message_id':sent['result']['message_id'],'total':delivery['result']['total']}
 
-LEGACY_RECEIPT_WRITES=frozenset(('vista_upload_receipt','vista_post','vista_preview','vista_link','vista_skip','vista_reject','vista_set_extraction','vista_receipt_form','vista_receipt_inbox','vista_save_reading','vista_scan_receipt','vista_drive_sync','vista_reuse_receipt','vista_receipt_annotate','vista_receipt_notify','vista_receipt_queue'))
+LEGACY_RECEIPT_WRITES=frozenset(('vista_upload_receipt','vista_post','vista_preview','vista_link','vista_skip','vista_reject','vista_set_extraction','vista_receipt_form','vista_receipt_inbox','vista_save_reading','vista_scan_receipt','vista_drive_sync','vista_reuse_receipt','vista_receipt_annotate','vista_receipt_notify','vista_receipt_queue','vista_drive_folder','vista_drive_edit','vista_drive_write','vista_drive_status','vista_drive_list','vista_drive_read','vista_cleanup_receipt','vista_receipt_checks'))
 if (PROFILE/'drive-first.enabled').exists():
     TOOLS=[tool for tool in TOOLS if tool['name'] not in LEGACY_RECEIPT_WRITES]
 
@@ -715,6 +766,8 @@ def _run(name: str, args: dict) -> object:
         if not allowed: raise VistaError("Choose a method/path from vista_operations' catalog.")
         query = urllib.parse.urlencode(args.get("query", {}))
         return _with_rm(_call(method, path + ("?" + query if query else ""), args.get("body") if method != "GET" else None, user))
+    if name == "vista_read_pdf":
+        return _read_pdf(args)
     if name == "vista_report":
         query = urllib.parse.urlencode({key: args[key] for key in ("kind", "format", "id", "from", "to") if args.get(key)})
         result = _call("GET", "/agent/reports?" + query, telegram_user=user)
