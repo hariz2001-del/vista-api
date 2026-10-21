@@ -69,6 +69,9 @@ function merge(incoming: StashItem, current: StashData | null, unacked: boolean)
     ...incoming,
     ...(keepReading ? { reading: current!.reading, readingEditedAt: current!.readingEditedAt } : {}),
     decisions, allocations: current?.allocations ?? [], events: current?.events ?? [],
+    ...(unacked && current && 'keptApart' in current
+      ? { keptApart: current.keptApart, duplicateDismissed: current.duplicateDismissed, duplicates: current.duplicates, stashDuplicates: current.stashDuplicates }
+      : {}),
   } as StashData
 }
 
@@ -180,8 +183,10 @@ export async function chopperStashRoutes(app: FastifyInstance) {
         const pending = receipt.expenses.find(e => e.uncategorised)
         return { recorded: true, alreadyRecorded: true, receiptKey: body.receiptKey, expenseId: pending?.id ?? null }
       }
-      // Already in Vista under another key: leave it in the stash for a person to decide.
-      if (r.receiptNo) {
+      // Already in Vista under another key: leave it in the stash for a person to decide —
+      // unless they have: "not a duplicate" makes it a receipt of its own.
+      const keptApart = Boolean(((await tx.chopperStash.findFirst({ where: { receiptKey: body.receiptKey } }))?.data as { keptApart?: boolean } | undefined)?.keptApart)
+      if (r.receiptNo && !keptApart) {
         const twin = await tx.receiptDocument.findFirst({ where: { OR: [{ receiptKey: { not: body.receiptKey } }, { receiptKey: null }], vendor: { equals: r.vendor, mode: 'insensitive' }, receiptNo: { equals: r.receiptNo, mode: 'insensitive' }, receiptDate: new Date(r.date + 'T00:00:00Z'), totalSen: r.totalSen, expenses: { some: {} } } })
         if (twin) throw conflict('agent:DUPLICATE_INVOICE', keyOf(twin))
       }
@@ -356,6 +361,7 @@ export async function chopperStashRoutes(app: FastifyInstance) {
       allocations: d.allocations ?? [],
       expenses,
       sorted: row.status !== 'OPEN' || (d.decisions ?? []).every(x => x !== 'pending'),
+      keptApart: Boolean((d as { keptApart?: boolean }).keptApart),
       guess: suggestion?.overall ?? null,
       hasOriginal: Boolean(d.originalFileId),
       revision: row.vistaRevision,
@@ -613,7 +619,8 @@ async function carryReading(tx: Tx, businessId: string, userId: string, receiptD
 }
 
 const resolution = z.object({
-  action: z.enum(['cancel', 'replace', 'keep']),
+  /** undo: it was a duplicate after all — out of the books again, back to the review. */
+  action: z.enum(['cancel', 'replace', 'keep', 'undo']),
   /** The receipt it duplicates (booked or stashed), or the hand-typed expenses it belongs to. */
   otherKey: KEY.nullish(),
   expenseIds: z.array(z.string().uuid()).max(20).nullish(),
@@ -662,6 +669,13 @@ export async function findDuplicates(db: Tx, key: string): Promise<Other[]> {
   }
   // Another photo of it still in the stash (sent twice, or from two channels).
   const stashed = await db.chopperStash.findMany({ where: { status: 'OPEN', receiptKey: { not: key } } })
+  // A copy only in the books as not categorised is still a stash copy: deleting it takes it out again.
+  for (const other of stashed) {
+    const known = others.get(other.receiptKey)
+    if (!known || known.kind !== 'booked') continue
+    const categorised = await db.expense.count({ where: { id: { in: known.expenseIds }, uncategorised: false } })
+    if (!categorised) known.kind = 'stash'
+  }
   for (const other of stashed) {
     if (others.has(other.receiptKey)) continue
     const o = other.data as StashData & StashItem
@@ -701,7 +715,20 @@ async function resolveDuplicate(tx: Tx, request: FastifyRequest, key: string, bo
   let result: Record<string, unknown> = { action: body.action }
 
   if (body.action === 'keep') {
-    await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({ ...d, ...clean }) } })
+    await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({ ...d, ...clean, keptApart: true }) } })
+  } else if (body.action === 'undo') {
+    if (!d.keptApart) throw conflict('agent:NOT_KEPT_APART')
+    if ((d.decisions ?? []).some((x) => x !== 'pending')) throw conflict('agent:ALREADY_SORTED')
+    // A duplicate group is one transaction: this copy's not-categorised expense goes again.
+    const doc = await receiptByKey(tx, key)
+    const pending = doc ? await pendingExpense(tx, doc.id) : null
+    if (pending) await scrapFromPending(tx, businessId, pending, pending.items.map((i) => i.sortOrder), pending.amountSen)
+    await tx.receiptDocument.deleteMany({ where: { receiptKey: key, expenses: { none: {} } } })
+    const others = await findDuplicates(tx, key)
+    await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({
+      ...d, keptApart: false, duplicateDismissed: false, recorded: false,
+      duplicates: others.filter((o) => o.kind !== 'stash').length, stashDuplicates: others.filter((o) => o.kind === 'stash').map((o) => o.receiptKey!),
+    }) } })
   } else if (body.action === 'cancel') {
     await dropReceipt(tx, businessId, key, from)
   } else if (otherKind === 'stash') {

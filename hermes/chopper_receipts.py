@@ -211,7 +211,19 @@ def needs_record(r):
     return (r['state'] in ('UNCONFIGURED','CONFIGURED') and bool(v.get('scanVerified')) and bool(v.get('duplicateChecked'))
             and not v.get('recorded') and not v.get('recordBlocked') and bool(v.get('fileId'))
             and bool(rd.get('totalSen')) and rd['totalSen']>0 and bool(rd.get('vendor')) and bool(rd.get('date'))
-            and not candidates(r) and not v.get('stashDuplicates') and not any(x!='pending' for x in v.get('decisions',[])))
+            and not candidates(r) and not held_by_copy(r) and not any(x!='pending' for x in v.get('decisions',[])))
+
+def held_by_copy(r):
+    """Another copy of this receipt in the stash comes first: it is older, or already in the books."""
+    keys=[k for k in (r['data'].get('stashDuplicates') or []) if k!=r['id']]
+    if not keys or r['data'].get('keptApart'):return False
+    with db() as c:
+        mine=c.execute('SELECT rowid FROM receipts WHERE id=?',(r['id'],)).fetchone()[0]
+        rows=c.execute('SELECT rowid,state,data FROM receipts WHERE id IN (%s)'%','.join('?'*len(keys)),keys).fetchall()
+    for row in rows:
+        if row['state']=='RETIRED':continue
+        if row['state']=='SUBMITTED' or json.loads(row['data']).get('recorded') or row['rowid']<mine:return True
+    return False
 
 def record_in_vista(m,r):
     v=r['data'];rd=v['reading']
@@ -235,7 +247,7 @@ def vista_item(r):
     cut=lambda x:str(x)[:390] if x else None
     return {'receiptKey':r['id'],'state':r['state'],'reading':reading,'decisions':v.get('decisions',[]),'scanVerified':bool(v.get('scanVerified')),
             'problem':cut(v.get('problem')),'warning':cut(v.get('warning')),'error':cut(v.get('error')),'duplicates':min(len(candidates(r)),100),
-            'stashDuplicates':(v.get('stashDuplicates') or [])[:50],'batch':v.get('batch'),'fileId':v.get('fileId'),'fileName':v.get('fileName'),
+            'stashDuplicates':(v.get('stashDuplicates') or [])[:50],'keptApart':bool(v.get('keptApart')),'batch':v.get('batch'),'fileId':v.get('fileId'),'fileName':v.get('fileName'),
             'drivePath':v.get('drivePath'),'sha256':v.get('scanHash'),'originalFileId':v.get('sourceFile') if not v.get('sourceRetired') else None}
 
 def mirror_to_vista(m,rows):
@@ -312,7 +324,7 @@ def rms_note(r,new):
     left=[i for i,x in enumerate(v.get('decisions',[])) if x=='pending']
     text=rest+'\n'+key+'\n'
     if new.get('edited'):text+='\n✎ Reading corrected in Vista.'
-    if new.get('duplicate'):text+='\n⚑ Duplicate settled in Vista: '+{'cancel':'the new photo was dropped.','replace':'replaced.','keep':'kept both.'}.get(new['duplicate'],'done.')
+    if new.get('duplicate'):text+='\n⚑ Duplicate settled in Vista: '+{'cancel':'the new photo was dropped.','replace':'replaced.','keep':'registered as a receipt of its own.','undo':'it is a duplicate after all, back for review.'}.get(new['duplicate'],'done.')
     if new['posted']:text+='\n✓ Sorted in Vista: '+nums(new['posted'])+' · '+amount(new['posted'])
     if new['scrapped']:text+='\n✗ Left out in Vista: '+nums(new['scrapped'])+' · '+amount(new['scrapped'])
     if left:text+='\n◻ Still to sort: '+nums(left)+' · '+amount(left)
@@ -365,7 +377,11 @@ def apply_duplicate(m,r,action,res):
         xv['duplicateSettled']=action;x['state']='RETIRED';return save(x)
     def clear(x):
         xv=x['data'];xv.update(duplicates={},stashDuplicates=[],duplicateDismissed=True);xv.pop('recordBlocked',None);xv.pop('dupOther',None);return save(x)
-    if action=='keep':r=clear(r)
+    if action=='keep':
+        r=clear(r);r['data']['keptApart']=True;r=save(r)
+    elif action=='undo':
+        v.update(keptApart=False,duplicateDismissed=False,recorded=False);v.pop('recordBlocked',None);v.pop('duplicateSettled',None)
+        r=save(r);r=check_duplicates(m,r)
     elif action=='cancel':r=retire(r)
     elif kind=='stash':
         if other:
@@ -1106,7 +1122,7 @@ async def _callback(adapter,query,data,m):
                   '1 · New: '+list_line(0,r).split('. ',1)[1]+'\n'
                   '2 · '+(o.get('receiptKey') or 'Expense')+' — '+(o.get('vendor') or 'Receipt')+' · '+(o.get('date') or '')+' · '+rm(o.get('totalSen') or 0)+' — '+where+'\n\n'
                   'Cancel drops the new one. Replace '+replace+' Keep both if they really are two receipts.')
-            await adapter._bot.send_message(chat_id=chat,text=text,reply_markup=markup([[button('✗ Cancel new',prefix+'dupcancel'),button('⇄ Replace',prefix+'dupreplace')],[button('Keep both',prefix+'dupkeep')]]))
+            await adapter._bot.send_message(chat_id=chat,text=text,reply_markup=markup([[button('✗ Cancel new',prefix+'dupcancel'),button('⇄ Replace',prefix+'dupreplace')],[button('Not a duplicate',prefix+'dupkeep')]]))
         elif p[2] in ('dupcancel','dupreplace','dupkeep'):
             action={'dupcancel':'cancel','dupreplace':'replace','dupkeep':'keep'}[p[2]];o=v.get('dupOther') or {}
             body={'action':action,'otherKey':o.get('receiptKey'),'expenseIds':o.get('expenseIds') if o.get('kind')=='manual' else None}
@@ -1115,7 +1131,7 @@ async def _callback(adapter,query,data,m):
                     res=m._call('POST','/agent/chopper/stash/'+r['id']+'/duplicate',body,actor)
                     return apply_duplicate(m,get(r['id']),action,res)
             r=await asyncio.to_thread(settle)
-            done={'cancel':'✗ Cancelled — the new photo is gone from the stash and the books.','keep':'Kept apart. It goes into Vista as not categorised.' if o.get('kind')=='manual' else 'Kept both. It goes into Vista as not categorised.',
+            done={'cancel':'✗ Cancelled — the new photo is gone from the stash and the books.','keep':'Kept apart. It goes into Vista as not categorised.' if o.get('kind')=='manual' else 'Registered as a receipt of its own. It goes into Vista as not categorised.',
                   'replace':{'booked':'⇄ Replaced — the booking keeps its categories, with the new photo.','stash':'⇄ Replaced — the other photo is gone; this one goes into Vista.','manual':'🔗 Linked — that expense now has this receipt.'}.get(o.get('kind'),'⇄ Replaced.')}[action]
             await adapter._bot.send_message(chat_id=chat,text=r['id']+' — '+done)
         elif p[2]=='edit':

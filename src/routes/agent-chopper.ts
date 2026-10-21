@@ -128,7 +128,9 @@ export async function bookReceipt(tx: Tx, who: Booker, payload: Booking, file: D
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${who.businessId + ':chopper:' + payload.receiptKey}))::text`
   const again = await stored(tx, submissionId, hash)
   if (again) return again
-  if (r.receiptNo) {
+  // The owner said this copy is a receipt of its own: the same invoice number does not stop it.
+  const keptApart = Boolean(((await tx.chopperStash.findFirst({ where: { receiptKey: payload.receiptKey } }))?.data as { keptApart?: boolean } | undefined)?.keptApart)
+  if (r.receiptNo && !keptApart) {
     const twin = await tx.receiptDocument.findFirst({ where: {
       OR: [{ receiptKey: { not: payload.receiptKey } }, { receiptKey: null }],
       vendor: { equals: r.vendor, mode: 'insensitive' }, receiptNo: { equals: r.receiptNo, mode: 'insensitive' },

@@ -239,7 +239,7 @@ it('reviews duplicates: keep both, cancel the new one, or replace a stashed, boo
   await rec('R-D00001', 'dup-a')
   await sync(item('R-D00001', 'dup-a'), item('R-D00002', 'dup-b'))
   const found = (await app.inject({ method: 'GET', url: '/rms/stash/R-D00002/duplicates', headers: owner })).json().others
-  expect(found).toEqual([expect.objectContaining({ kind: 'booked', receiptKey: 'R-D00001' })]) // recorded, so in the books (not categorised)
+  expect(found).toEqual([expect.objectContaining({ kind: 'stash', receiptKey: 'R-D00001' })]) // in the books only as not categorised: still a stash copy
 
   // Keep both: the flag goes.
   expect((await dup('R-D00002', { action: 'keep' })).statusCode).toBe(200)
@@ -335,4 +335,36 @@ it('splits one receipt into bookings with their own settings, still one receipt'
   const expenses = await prisma.expense.findMany({ where: { businessId: business.businessId }, include: { receiptDocument: true }, orderBy: { amountSen: 'desc' } })
   expect(expenses.map((e) => [e.amountSen, e.brandId, e.category, e.uncategorised])).toEqual([[8130, drinks.id, 'RAW_MATERIALS', false], [TOTAL - 8130, food.id, 'PACKAGING', false]].toSorted((a, b) => (b[0] as number) - (a[0] as number)))
   expect(new Set(expenses.map((e) => e.receiptDocument?.receiptKey))).toEqual(new Set(['R-B00003']))
+})
+
+it('registers a flagged copy as a receipt of its own, and undoes that back into the review', async () => {
+  const { business, owner, bot } = await setup()
+  files['grp-a'] = Buffer.from('group a'); files['grp-b'] = Buffer.from('group b')
+  const item = (key: string, file: string) => ({ ...stashItem(key, file), reading: { ...stashItem(key, file).reading, receiptNo: 'INV-55' } })
+  const rec = (key: string, file: string) => app.inject({ method: 'POST', url: '/agent/chopper/record', headers: bot, payload: { receiptKey: key, receipt: { ...receipt(key, file), receiptNo: 'INV-55' }, lines: LINES } })
+  const dup = (key: string, body: object) => app.inject({ method: 'POST', url: `/rms/stash/${key}/duplicate`, headers: owner, payload: body })
+  const inBooks = () => prisma.expense.count({ where: { businessId: business.businessId, uncategorised: true } })
+  const first = await rec('R-C00001', 'grp-a'); expect(first.statusCode, first.body).toBe(200)
+  await app.inject({ method: 'PUT', url: '/agent/chopper/stash', headers: bot, payload: { receipts: [item('R-C00001', 'grp-a'), { ...item('R-C00002', 'grp-b'), stashDuplicates: ['R-C00001'] }] } })
+  expect(await inBooks()).toBe(1) // a duplicate group is one transaction
+
+  // Not a duplicate: it is its own receipt, and Chopper records it.
+  expect((await dup('R-C00002', { action: 'keep' })).statusCode).toBe(200)
+  const kept = (await app.inject({ method: 'GET', url: '/rms/stash/R-C00002', headers: owner })).json()
+  expect([kept.keptApart, kept.duplicate]).toEqual([true, false])
+  // Chopper's next sync (before it has taken the decision in) does not undo it.
+  await app.inject({ method: 'PUT', url: '/agent/chopper/stash', headers: bot, payload: { receipts: [item('R-C00001', 'grp-a'), { ...item('R-C00002', 'grp-b'), stashDuplicates: ['R-C00001'] }] } })
+  expect((await app.inject({ method: 'GET', url: '/rms/stash/R-C00002', headers: owner })).json().keptApart).toBe(true)
+  const second = await rec('R-C00002', 'grp-b'); expect(second.statusCode, second.body).toBe(200)
+  expect(await inBooks()).toBe(2)
+
+  // A duplicate after all: out of the books again, flagged for the review.
+  const undo = await dup('R-C00002', { action: 'undo' })
+  expect(undo.statusCode, undo.body).toBe(200)
+  expect(await inBooks()).toBe(1)
+  const back = (await app.inject({ method: 'GET', url: '/rms/stash/R-C00002', headers: owner })).json()
+  expect([back.keptApart, back.duplicate, back.recorded]).toEqual([false, true, false])
+  const events = (await app.inject({ method: 'GET', url: '/agent/chopper/stash/events', headers: bot })).json().events
+  expect(events.find((e: any) => e.receiptKey === 'R-C00002').events.at(-1)).toMatchObject({ type: 'duplicate', action: 'undo' })
+  expect((await dup('R-C00002', { action: 'undo' })).statusCode).toBe(409)
 })
