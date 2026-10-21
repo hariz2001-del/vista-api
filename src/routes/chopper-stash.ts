@@ -46,6 +46,8 @@ const stashItem = z.object({
   error: z.string().max(400).nullish(),
   duplicates: z.number().int().min(0).max(100).default(0),
   stashDuplicates: z.array(KEY).max(50).default([]),
+  /** The owner said this flagged copy is a receipt of its own. */
+  keptApart: z.boolean().optional(),
   batch: z.string().max(80).nullish(),
   fileId: FILE_ID.nullish(),
   fileName: z.string().max(250).nullish(),
