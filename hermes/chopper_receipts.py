@@ -222,7 +222,10 @@ def held_by_copy(r):
         rows=c.execute('SELECT rowid,state,data FROM receipts WHERE id IN (%s)'%','.join('?'*len(keys)),keys).fetchall()
     for row in rows:
         if row['state']=='RETIRED':continue
-        if row['state']=='SUBMITTED' or json.loads(row['data']).get('recorded') or row['rowid']<mine:return True
+        d=json.loads(row['data']);rd=d.get('reading') or {}
+        # An older copy comes first only if it can go into the books itself (read, checked, dated).
+        readable=row['state'] in ('UNCONFIGURED','CONFIGURED') and d.get('scanVerified') and rd.get('date') and rd.get('vendor') and (rd.get('totalSen') or 0)>0
+        if row['state']=='SUBMITTED' or d.get('recorded') or (row['rowid']<mine and readable):return True
     return False
 
 def record_in_vista(m,r):
