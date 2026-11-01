@@ -471,7 +471,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
         include: { targets: true },
       }),
-      db.balanceCheck.findMany({ orderBy: { businessDate: 'asc' } }),
+      db.balanceCheck.findMany({ orderBy: [{ businessDate: 'asc' }, { createdAt: 'asc' }] }),
     ])
 
     const current = settings ?? DEFAULT_SETTINGS
@@ -634,6 +634,8 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         isLocked: expense.isLocked,
       })),
       balanceChecks: balanceChecks.map((check) => ({
+        id: check.id,
+        recordedAt: check.createdAt.toISOString(),
         businessDate: isoDate(check.businessDate),
         bankSen: check.bankSen,
         cashSen: check.cashSen,
@@ -877,25 +879,23 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
   })
 
   /**
-   * A bank balance check: what the bank actually held at the end of a day. One
-   * per day — saving the same day again replaces it. It never writes to the
-   * ledger; the RMS compares it with the book live, so it is not period-locked.
+   * A bank balance check: what the bank actually held at the end of a day.
+   * Every one is kept — a second check on the same day is a new record, and
+   * the newest counts. It never writes to the ledger; the RMS compares it with
+   * the book live, so it is not period-locked. Removing is only for a typo.
    */
-  app.put<{ Params: { date: string } }>('/rms/balance-checks/:date', { preHandler: requireOwner }, async (request) => {
-    const businessDate = toDate(DATE.parse(request.params.date))
-    const body = balanceCheckBody.parse(request.body)
+  app.post('/rms/balance-checks', { preHandler: requireOwner }, async (request) => {
+    const { businessDate, ...body } = balanceCheckBody.extend({ businessDate: DATE }).parse(request.body)
     const { db, businessId } = request
-    const check = await db.balanceCheck.upsert({
-      where: { businessId_businessDate: { businessId, businessDate } },
-      create: { businessId, businessDate, ...body, createdById: request.user.id },
-      update: body,
+    const check = await db.balanceCheck.create({
+      data: { businessId, businessDate: toDate(businessDate), ...body, createdById: request.user.id },
     })
     return { id: check.id }
   })
 
-  app.delete<{ Params: { date: string } }>('/rms/balance-checks/:date', { preHandler: requireOwner }, async (request) => {
-    const businessDate = toDate(DATE.parse(request.params.date))
-    const { count } = await request.db.balanceCheck.deleteMany({ where: { businessDate } })
+  app.delete<{ Params: { id: string } }>('/rms/balance-checks/:id', { preHandler: requireOwner }, async (request) => {
+    const id = ID.parse(request.params.id)
+    const { count } = await request.db.balanceCheck.deleteMany({ where: { id } })
     if (count === 0) throw notFound('rms:BALANCE_CHECK_NOT_FOUND')
     return { ok: true }
   })

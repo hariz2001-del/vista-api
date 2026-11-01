@@ -861,7 +861,8 @@ model PeriodClosure {
 }
 
 /// What the bank (and the cash on hand) actually held at the end of a business
-/// day, as the owner read it off the bank app. One per day, optional.
+/// day, as the owner read it off the bank app. Optional, and every one is kept:
+/// a second check on the same day is a new row, and the newest counts.
 ///
 /// Never touches the ledger. The gap against the cash book is worked out live,
 /// so a receipt keyed in later with its real date closes the gap by itself.
@@ -879,7 +880,7 @@ model BalanceCheck {
   business  Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
   createdBy User     @relation("BalanceChecksRecorded", fields: [businessId, createdById], references: [businessId, id], onDelete: Restrict)
 
-  @@unique([businessId, businessDate])
+  @@index([businessId, businessDate])
   @@map("balance_checks")
 }
 
