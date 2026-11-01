@@ -10,7 +10,7 @@ const TABLES = [
   'modifier_items', 'partners', 'shifts', 'orders', 'order_items',
   'order_item_modifiers', 'sale_corrections', 'correction_brand_deltas',
   'ledger_entries', 'expenses', 'expense_items', 'period_closures',
-  'promotions', 'promotion_targets',
+  'promotions', 'promotion_targets', 'balance_checks',
 ] as const
 
 export async function rmsRevision(db: Tx, businessId: string): Promise<string> {

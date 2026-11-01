@@ -333,6 +333,13 @@ const drawingBody = z.object({
   note: z.string().trim().max(150).nullish().transform((value) => value || null),
 })
 
+/** What the bank showed at the end of a day. Cash on hand is optional. */
+const balanceCheckBody = z.object({
+  bankSen: z.number().int().min(0),
+  cashSen: z.number().int().min(0).default(0),
+  note: z.string().trim().max(150).nullish().transform((value) => value || null),
+})
+
 /** A withdrawal's cash-book line: the partner's brand, and words that say who and why. */
 async function drawingLine(tx: Tx, body: z.infer<typeof drawingBody>) {
   const partner = body.partnerId ? await tx.partner.findUnique({ where: { id: body.partnerId } }) : null
@@ -417,6 +424,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       terminal,
       counterSessions,
       promotions,
+      balanceChecks,
     ] = await Promise.all([
       db.accountSettings.findUnique({ where: { businessId } }),
       db.brand.findMany({ orderBy: { sortOrder: 'asc' } }),
@@ -463,6 +471,7 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
         include: { targets: true },
       }),
+      db.balanceCheck.findMany({ orderBy: { businessDate: 'asc' } }),
     ])
 
     const current = settings ?? DEFAULT_SETTINGS
@@ -623,6 +632,12 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
         })),
         isSettled: expense.isSettled,
         isLocked: expense.isLocked,
+      })),
+      balanceChecks: balanceChecks.map((check) => ({
+        businessDate: isoDate(check.businessDate),
+        bankSen: check.bankSen,
+        cashSen: check.cashSen,
+        note: check.note,
       })),
       closures: closures.map((closure) => ({
         id: closure.id,
@@ -859,6 +874,30 @@ export async function rmsRoutes(app: FastifyInstance): Promise<void> {
       await tx.ledgerEntry.delete({ where: { id } })
       return { id: Number(id) }
     })
+  })
+
+  /**
+   * A bank balance check: what the bank actually held at the end of a day. One
+   * per day — saving the same day again replaces it. It never writes to the
+   * ledger; the RMS compares it with the book live, so it is not period-locked.
+   */
+  app.put<{ Params: { date: string } }>('/rms/balance-checks/:date', { preHandler: requireOwner }, async (request) => {
+    const businessDate = toDate(DATE.parse(request.params.date))
+    const body = balanceCheckBody.parse(request.body)
+    const { db, businessId } = request
+    const check = await db.balanceCheck.upsert({
+      where: { businessId_businessDate: { businessId, businessDate } },
+      create: { businessId, businessDate, ...body, createdById: request.user.id },
+      update: body,
+    })
+    return { id: check.id }
+  })
+
+  app.delete<{ Params: { date: string } }>('/rms/balance-checks/:date', { preHandler: requireOwner }, async (request) => {
+    const businessDate = toDate(DATE.parse(request.params.date))
+    const { count } = await request.db.balanceCheck.deleteMany({ where: { businessDate } })
+    if (count === 0) throw notFound('rms:BALANCE_CHECK_NOT_FOUND')
+    return { ok: true }
   })
 
   app.post('/rms/ledger/adjustments', { preHandler: requireOwner }, async (request) => {

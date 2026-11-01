@@ -152,6 +152,7 @@ model Business {
   chopperStash       ChopperStash[]
   chopperChat        ChopperChatMessage[]
   productRecipes ProductRecipe[]
+  balanceChecks  BalanceCheck[]
 
   @@map("businesses")
 }
@@ -265,6 +266,7 @@ model User {
   sessions           Session[]
   handoffCodes       HandoffCode[]
   stockCounts        StockCount[]     @relation("StockCountsSubmitted")
+  balanceChecks      BalanceCheck[]   @relation("BalanceChecksRecorded")
 
   @@unique([businessId, id])
   @@map("users")
@@ -856,6 +858,29 @@ model PeriodClosure {
 
   @@index([businessId, endDate])
   @@map("period_closures")
+}
+
+/// What the bank (and the cash on hand) actually held at the end of a business
+/// day, as the owner read it off the bank app. One per day, optional.
+///
+/// Never touches the ledger. The gap against the cash book is worked out live,
+/// so a receipt keyed in later with its real date closes the gap by itself.
+model BalanceCheck {
+  id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
+  businessDate DateTime @map("business_date") @db.Date
+  bankSen      Int      @map("bank_sen")
+  cashSen      Int      @default(0) @map("cash_sen")
+  note         String?
+  createdById  String   @map("created_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  business  Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  createdBy User     @relation("BalanceChecksRecorded", fields: [businessId, createdById], references: [businessId, id], onDelete: Restrict)
+
+  @@unique([businessId, businessDate])
+  @@map("balance_checks")
 }
 
 /// What the owner can know about their counter tablet. One row per business.
