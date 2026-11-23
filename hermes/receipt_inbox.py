@@ -48,6 +48,8 @@ async def open_selection(adapter,query,m,user,number,list_id=None):
     await present_receipt(adapter,query.message.chat.id,m,user,result['receiptId'],result['form'])
 
 async def callback(adapter,query,data,m):
+    await query.answer('Old receipt button retired. Use /stash.',show_alert=True)
+    return True
     if not data.startswith('vi:'):return False
     user=str(query.from_user.id);p=data.split(':')
     try:
@@ -77,6 +79,8 @@ async def callback(adapter,query,data,m):
     return True
 
 async def command(adapter,event,m):
+    import chopper_receipts
+    return await chopper_receipts.command(adapter,event,m)
     text=(getattr(event,'text','') or '').strip().lower();user=str(event.source.user_id);chat=getattr(event.source,'chat_id',None) or user
     slash=re.fullmatch(r'/(bulk|endbulk)(?:@chopper67bot)?',text)
     stop=bool(re.search(r'\b(stop|disable|off|finish|done)\b.*\bstash|\bstash\w*\b.*\b(off|stop|finish|done)\b',text))

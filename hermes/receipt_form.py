@@ -136,6 +136,8 @@ async def continue_inbox(adapter,query,rid,view,m,user):
     await adapter._bot.send_message(chat_id=query.message.chat.id,text=f"✅ {view['receipt']['ref']} handled. Choose what to do next.",reply_markup=markup(receipt_inbox.progress(rid)))
 
 async def callback(adapter,query,data,m):
+    await query.answer('Old receipt button retired. Use /stash.',show_alert=True)
+    return True
     match=re.fullmatch(r'vf:([a-f0-9-]{36}):(.+)',data)
     if not match:return False
     rid,action=match.groups();user=str(query.from_user.id);path=f'/agent/receipts/{rid}/form'
