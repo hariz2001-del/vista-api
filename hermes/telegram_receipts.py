@@ -19,6 +19,20 @@ def form_module():
     import receipt_form
     return receipt_form
 
+def closing_context(m, actor, text):
+    """Date-labelled live bank comparisons prevent stale history/sign guesses."""
+    if not re.search(r'(?i)closing|coupon|kupon|variance|bank|balance|rm\s*24|perbezaan',text or ''):return ''
+    import json
+    try:
+        result=m._call('GET','/agent/closing/status',None,actor)
+        rows=[]
+        for c in result.get('closings',[]):
+            d=c['detail'];bank=d['comparison']['lines']['closingBank']
+            rows.append({'date':d['input']['businessDate'],'statedSen':bank['closingSen'],'expectedSen':bank['vistaExpectedSen'],'statedMinusExpectedSen':bank['shortSen'],'direction':bank['differenceDirection'],'flags':d['flags']})
+        return ' LIVE CLOSINGS FOR THIS TURN (integer sen, date-specific): '+json.dumps(rows)+'. Use the date the owner actually named, never silently select the newest closing. If the same amount appears across days, report each actual date, amount and direction from these live rows, and clarify linkage. Do not reuse old day-specific amounts or signs after a bank-balance correction. Equal opposite differences may be timing but do not prove payment. Owner-confirmed unpaid coupon sales use vista_coupon_claim record_unpaid; a receipt against an existing unpaid claim uses collect with confirmed date. An older received claim whose original sale is not recorded uses record_prior_collection; save paid confirmation and clarify sales inclusion, never invent an unpaid claim. A missing screenshot is pending evidence, not a blanket reason to refuse owner-confirmed bookkeeping. Never book a collection from "suppose" or a bare variance.'
+    except Exception:
+        return ' Live closing read failed. Use vista_closing status for the exact date before stating figures or recording coupon money; do not fall back to old assistant figures.'
+
 def business_context(adapter, event):
     """Refresh capabilities on actual Telegram turns, preserving old chat history."""
     if not enabled(adapter): return event
@@ -33,6 +47,17 @@ def business_context(adapter, event):
         'rather than vista_sales with omitted dates (which is a seven-day report). Show the '
         'actual sales date and as-of time; explain any overnight trading-day cutoff. '
         'CURRENT BUSINESS CAPABILITIES: '
+        'Daily CLOSING logs use vista_closing preview/status/evidence. Standard logs are handled natively without a model call. '
+        'Closings reuse expenses by actual transaction date; never post the declared expense total again. '
+        'Missing receipts and unmatched totals remain flagged; the user may defer. Read vista_closing status for outstanding work. '
+        'An owner-confirmed older coupon RECEIVED on a date is not unpaid. Use record_prior_collection even without its old sale date or screenshot. Confirm whether included in the reported Sales figure before adding cash; an unknown inclusion saves paid confirmation pending classification without posting extra money. '
+        'Coupon claims have a dedicated vista_coupon_claim tool: record unpaid existing-sales receivables and collect only on the owner-confirmed actual date. Do not demand a screenshot as a prerequisite; keep missing payment evidence flagged. '
+        'For a new manually described expense without paper receipt use vista_manual_expense after collecting real category/funding/brand choices; only native confirmation saves it. '
+        'Bank screenshots may support interest, balances, purchases or partner repayments. Use the owner caption and conversation purpose; do not repeatedly ask for information already supplied. Never fabricate purchase items. Inspect saved evidence via chopper_receipts; vista_closing evidence attaches interest/balance support. '
+        'If a partner temporarily advances cash pending organiser coupon reimbursement, payment back is LOAN_REPAYMENT, not a purchase expense or owner drawing. Use vista_partner_advance only after the owner explicitly identifies an already-paid advance repayment, date, amount and payee. Never invent the original advance or organiser deposit. Resolve actual brand names from vista_options; enum PARTNER_DRINKS does not necessarily mean the brand named Drinks. '
+        'Bank comparison: shortSen = stated minus expected. Positive is OVER/above expected; negative is SHORT/below. Use differenceDirection and interpretation from the API. Evidence never removes a numerical difference by itself. '
+        'A bank-transfer screenshot can support a purchase expense. With the owner purpose use chopper_receipts action=transfer_expense, receipt_id, description and vendor from the visible beneficiary (not bank logo). If still PROCESSING, the tool durably queues this same receipt until the existing scan finishes; do not say it cannot be logged or ask for another upload. Explicit purchase captions also continue automatically after OCR. /transfer R-XXXXXX description is implemented. Income/interest/closing evidence and partner repayments are separate. Use native category flow for the resulting expense. '
+        'Unique exact date+amount+merchant hand-keyed matches can auto-link evidence under the owner standing instruction; ambiguous matches need review. '
         'Chopper has an independent direct Google Drive connection through mcp__finances_drive__chopper_drive, scoped to Finances, owner-only. '
         'Use chopper_drive for Drive browsing, folders, uploads, rename/move, and previewed replacement/Trash/restore. '
         'Those Google file operations do not go through Vista. Receipt image changes notify Vista separately; '
@@ -52,6 +77,19 @@ def business_context(adapter, event):
         'Forward only this event actual sender ID and respect backend role denials. '
         'No financial posting or business mutation is authorised by a read-only question.'
     )
+    try:
+        import vista_mcp as m
+        context+=closing_context(m,str(event.source.user_id),getattr(event,'text','') or '')
+    except Exception:pass
+    # Sender/chat-bound context makes a following bare date refer to the actual
+    # recent photo, without selecting another person's or another chat's evidence.
+    try:
+        import time,json,chopper_receipts as cr
+        actor=str(event.source.user_id);chat=str(getattr(event.source,'chat_id',None) or actor);s=cr.settings(actor)
+        if s.get('lastPhoto') and s.get('lastPhotoChat')==chat and 0<=time.time()-s.get('lastPhotoAt',0)<7200:
+            r=cr.get(s['lastPhoto'],actor)
+            context+=' RECENT PHOTO IN THIS SENDER/CHAT: '+json.dumps({'receiptKey':r['id'],'status':r['state'],'ownerCaption':r['data'].get('ownerCaption'),'reading':r['data'].get('reading'),'evidenceOnly':r['data'].get('evidenceOnly'),'partnerRepayment':r['data'].get('partnerRepayment'),'partnerAdvance':r['data'].get('partnerAdvance'),'transferDirection':r['data'].get('transferDirection')},ensure_ascii=False)+'. Use this evidence when the owner follows up with its date/purpose. Call the appropriate write tool and report its result; merely repeating figures does not attach evidence.'
+    except Exception:pass
     event.channel_prompt = '\n\n'.join(x for x in [getattr(event, 'channel_prompt', '') or '', context] if x)
     # Hermes' supported auto-skill path avoids a separate model/tool round trip.
     event.auto_skill = 'sarang-bookkeeping'
@@ -62,158 +100,66 @@ def enabled(adapter):
 
 def menu_commands(adapter,commands):
     if not enabled(adapter):return commands
-    return [('bulk','Silently scan and store a receipt batch'),('endbulk','Finish batch and list scanned receipts')]+[row for row in commands if row[0] not in ('bulk','endbulk')]
+    return [('receipt','Parse the next photo as a purchase receipt'),('evidence','Use the next bank screenshot as evidence'),('closing','Paste a daily closing log'),('bulk','Silently scan and store a receipt batch'),('end','Finish the active mode and keep saved work'),('stash','Open saved receipts for later'),('closings','Check daily closings and missing evidence')] + [row for row in commands if row[0] not in ('receipt','evidence','closing','bulk','end','endbulk','stash','closings')]
 
 def bridge():
     spec = importlib.util.spec_from_file_location('sarang_receipt_bridge', HOME / 'integrations/vista_mcp.py')
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=module
     spec.loader.exec_module(module)
     return module
 
+PAUSED = HOME / 'receipts-paused'
+PAUSE_TEXT = ('Receipt intake is paused while Chopper\'s receipt flow is being rebuilt. '
+              'Nothing was saved or posted — please resend this photo once Chopper says receipts are back.')
+
 async def photo(adapter, message, event, data):
     if not enabled(adapter): return False
+    if PAUSED.exists():
+        await adapter._bot.send_message(chat_id=message.chat.id, text=PAUSE_TEXT)
+        return True
     form_module()
     import chopper_receipts
-    if chopper_receipts.enabled(): return await chopper_receipts.photo(adapter,message,event,data,bridge())
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    m = bridge()
-    try:
-        document = getattr(message, 'document', None)
-        mime = getattr(document, 'mime_type', None) or 'image/jpeg'
-        result = await asyncio.to_thread(m._call, 'POST', '/agent/receipts', {
-            'imageBase64': base64.b64encode(data).decode(), 'mimeType': mime.lower(),
-            'telegramChatId': str(message.chat.id), 'telegramMessageId': str(message.message_id),
-            'deferProcessing': True,
-        }, str(message.from_user.id))
-        receipt = result['receipt']; rid = receipt['id']
-        if result.get('bulk'):return True # Silent intake; durable worker does OCR/colour scan/Drive.
-        form_module()
-        import chopper_drive
-        # A user-requested replacement photo must reach the agent instead of
-        # being swallowed by the ordinary automatic receipt menu.
-        if hasattr(m, 'PROFILE'):
-            intent = await asyncio.to_thread(chopper_drive.photo_intent, m, str(message.from_user.id), getattr(message, 'caption', '') or '')
-            if intent:
-                import json
-                from hashlib import sha256
-                directory = m.PROFILE / 'cache' / 'receipt-replacements'
-                directory.mkdir(parents=True, exist_ok=True)
-                extension = {'image/png':'png','image/webp':'webp'}.get(mime.lower(), 'jpg')
-                incoming = directory / (rid + '-' + sha256(data).hexdigest()[:12] + '.' + extension)
-                incoming.write_bytes(data)
-                context = ('REPLACEMENT PHOTO HANDOFF: this photo is registered in Vista under full receipt UUID ' + rid + '. '
-                    'The EXACT incoming photo is cached at ' + str(incoming) + '. '
-                    'If upload deduplicated to an existing UUID, its current Drive image may be different after a previous replacement: '
-                    'inspect the incoming cached photo, never substitute that existing Drive image as the new input. '
-                    'If duplicate input cannot be cropped safely using the available tools, explain and ask rather than scanning a different source. '
-                    'Do not reupload it or book a new expense. Owner replacement intent: ' + json.dumps(intent) + '. '
-                    'Fetch/inspect the staged photo with this UUID, make a real colour crop if requested, then use '
-                    'chopper_drive action=preview operation=replace for the exact Google target and inspected cached image. '
-                    'Show native owner confirmation; no replacement is authorised until that click. Preserve accounting. '
-                    'If the image is a different purchase, stop and clarify rather than swapping booked evidence.')
-                event.channel_prompt = '\n\n'.join(x for x in [getattr(event, 'channel_prompt', '') or '', context] if x)
-                return False # Existing authenticated photo routing delivers the image/caption to Hermes.
-        if result.get('autoStash'):
-            warning=' Same photo already saved; flagged in the inbox for reviewing prior allocations.' if result.get('duplicate') else ''
-            await adapter._bot.send_message(chat_id=message.chat.id,text=f"📥 {receipt['ref']} saved safely.{warning} Reading, cropped scan, Drive storage and cross-check processing continue in the background; no new expense posted.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Finish batch / Review inbox',callback_data='vi:mode:off')]]))
-            return True
-        warning = ''
-        if result.get('duplicate'):
-            amount = sum(row['amountSen'] for row in receipt.get('expenses', [])) / 100
-            warning = f"Already saved: {result.get('duplicateReason', 'same receipt')}. Existing entries RM {amount:.2f}. You can add a brand allocation or link existing expenses; I will not duplicate the purchase.\n"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton('Categorise', callback_data=f'vr:{rid}:key'), InlineKeyboardButton('Stash for later', callback_data=f'vr:{rid}:stash')],
-            [InlineKeyboardButton('Edit receipt', callback_data=f'vr:{rid}:edit'), InlineKeyboardButton('View scan', callback_data=f'vr:{rid}:scan')],
-            [InlineKeyboardButton('Split receipt', callback_data=f'vr:{rid}:split')],
-        ])
-        if result.get('duplicate'):
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton('Another brand allocation', callback_data=f'vf:{rid}:why:brand')],
-                [InlineKeyboardButton('Attach existing entries', callback_data=f'vf:{rid}:why:link')],
-                [InlineKeyboardButton('Different purchase', callback_data=f'vf:{rid}:why:different'),InlineKeyboardButton('Stop', callback_data=f'vf:{rid}:cancel')],
-            ])
-            warning += 'Why are you sending this receipt again?\n'
-        kwargs = {'chat_id': message.chat.id, 'text': f"🔎 Parsing receipt…\n{warning}{receipt['ref']} saved safely. Choose what to do; reading/scan continues in the background.", 'reply_markup': keyboard}
-        if message.message_thread_id: kwargs['message_thread_id'] = message.message_thread_id
-        await adapter._bot.send_message(**kwargs)
-        # Caption requests still reach Hermes with the durable receipt reference.
-        if message.caption:
-            event.text = f"Receipt already saved as {rid}. {message.caption}. Do not upload it again or post without confirmation."
-            await adapter.handle_message(event)
+    if not chopper_receipts.enabled():
+        await adapter._bot.send_message(chat_id=message.chat.id, text='Receipt intake is not enabled in the Chopper receipt core. Nothing was saved or posted.')
         return True
-    except Exception:
-        # Do not swallow receipt failures or emit secrets/provider payloads.
-        await adapter._bot.send_message(chat_id=message.chat.id, text='The automatic receipt menu could not be saved. I am passing the photo to Hermes to retry; no expense has been posted.')
-        return False
+    return await chopper_receipts.photo(adapter, message, event, data, bridge())
 
 async def callback(adapter, query, data):
     if not enabled(adapter): return False
+    if data.startswith(('vc:','cr:closing:')):
+        form_module()
+        import vista_closing
+        return await vista_closing.callback(adapter,query,data.replace('cr:closing:','vc:',1),bridge())
     if data.startswith('cr:'):
         form_module()
         import chopper_receipts
-        return await chopper_receipts.callback(adapter,query,data,bridge())
+        return await chopper_receipts.callback(adapter, query, data, bridge())
     if data.startswith('dg:'):
-        form_module()
         import chopper_drive
         return await chopper_drive.callback(adapter, query, data, bridge())
-    if data.startswith('vm:'):
-        form_module()
-        import receipt_maintenance
-        return await receipt_maintenance.callback(adapter,query,data,bridge())
-    if data.startswith('vi:'):
-        form_module()
-        import receipt_inbox
-        return await receipt_inbox.callback(adapter,query,data,bridge())
-    if data.startswith('vf:'):
-        return await form_module().callback(adapter, query, data, bridge())
-    match = re.fullmatch(r'vr:([a-f0-9-]{36}):(key|stash|edit|scan|split)', data)
-    if not match: return False
-    rid, action = match.groups(); user = str(query.from_user.id)
-    m = bridge()
-    try:
-        # Revalidate backend role before accepting a stale/shared button.
-        receipt = await asyncio.to_thread(m._call, 'GET', f'/agent/receipts/{rid}', None, user)
-        if action == 'stash':
-            status = receipt['receipt']['status']
-            if status in ('POSTED', 'LINKED', 'REJECTED'):
-                await query.answer('Already processed. Use Categorise to review existing allocations.', show_alert=True)
-                return True
-            await asyncio.to_thread(m._call, 'POST', f'/agent/receipts/{rid}/skip', {'reason': 'Stashed from Telegram button'}, user)
-            await query.answer('Stashed; no expense posted.')
-            import receipt_inbox
-            await query.edit_message_text(text=f"📥 {receipt['receipt']['ref']} stashed for later.",reply_markup=form_module().markup(receipt_inbox.progress(rid)))
-            return True
-        await query.answer()
-        if action in ('key', 'split'):
-            form = await asyncio.to_thread(m._call, 'GET', f'/agent/receipts/{rid}/form', None, user)
-            if action == 'split':
-                form = await asyncio.to_thread(m._call, 'PATCH', f'/agent/receipts/{rid}/form', {'version':form['form']['version'],'ledgerVersion':form['workflow']['version'],'field':'selection','value':[]}, user)
-            await form_module().show(query, form)
-            return True
-        if action == 'scan':
-            result = await asyncio.to_thread(m._run, 'vista_get_receipt', {'receipt_id': rid, 'with_image': True, 'telegram_user_id': user})
-            path = result['receipt'].get('image_path')
-            if path:
-                with open(path, 'rb') as stream:
-                    await adapter._bot.send_photo(chat_id=query.message.chat.id, photo=stream, caption='Receipt scan' if result['receipt'].get('hasScan') else 'Original photo; scan is still pending.')
-                return True
-        from gateway.platforms.base import MessageType
-        event = adapter._build_message_event(query.message, MessageType.TEXT)
-        event.source = dataclasses.replace(event.source, user_id=user, user_name=query.from_user.full_name, is_bot=False)
-        event.text = f"{ {'key': 'Key in this receipt; first show existing entries and duplicate/matching reasons, then ask live Vista category and brand buttons.', 'edit': 'Edit this receipt reading using buttons; retrieve original and read it if still pending.', 'scan': 'Make and show the receipt scan.'}[action]} Receipt UUID {rid}. The authenticated Telegram sender is {user}. Receipt already saved; do not upload again. Never post/link without my confirmation."
-        event.message_id = f'vista-callback-{query.id}'
-        await adapter.handle_message(event)
+    if data.startswith(('vr:','vf:','vi:','vm:')):
+        await query.answer('Old receipt button retired. Use /stash.',show_alert=True)
         return True
-    except Exception:
-        await query.answer('Could not complete this action. Nothing was posted; please retry or ask Hermes.', show_alert=True)
-        return True
+    return False
 
 async def text_command(adapter,event):
     if not enabled(adapter):return False
     form_module()
+    import vista_closing
+    try:
+        if await vista_closing.command(adapter,event,bridge()):return True
+    except Exception as e:
+        await adapter._bot.send_message(chat_id=getattr(event.source,'chat_id',None) or event.source.user_id,text='Closing request needs review: '+str(e)[:250])
+        return True
+    if PAUSED.exists():
+        if (getattr(event,'text','') or '').strip().lower() in ('/bulk','/endbulk','/stash','/inbox'):
+            await adapter._bot.send_message(chat_id=getattr(event.source,'chat_id',None) or event.source.user_id,text=PAUSE_TEXT)
+            return True
     import chopper_receipts
     if chopper_receipts.enabled():
-        try: return await chopper_receipts.command(adapter,event,bridge())
+        try:
+            return await chopper_receipts.command(adapter,event,bridge())
         except Exception as e:
             await adapter._bot.send_message(chat_id=getattr(event.source,'chat_id',None) or event.source.user_id,text='Receipt request needs review: '+str(e)[:250])
             return True

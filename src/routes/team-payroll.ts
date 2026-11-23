@@ -550,6 +550,9 @@ export async function teamPayrollRoutes(app: FastifyInstance): Promise<void> {
       if (draft.missingRate.length > 0) throw badRequest('team:NO_RATE')
       if (draft.lines.length === 0) throw badRequest('team:NOTHING_TO_PAY')
       const lines: DraftLine[] = draft.lines
+      if (request.agentUser && lines.reduce((sum, line) => sum + line.amountSen, 0) !== (request.body as { expectedTotalSen: number }).expectedTotalSen) {
+        throw conflict('team:PAYSLIP_CHANGED')
+      }
       const created = await tx.payslip.create({
         data: {
           businessId,
@@ -626,6 +629,10 @@ export async function teamPayrollRoutes(app: FastifyInstance): Promise<void> {
     const result = await db.$transaction(async (tx) => {
       const payslip = await tx.payslip.findUnique({ where: { id }, include: { staff: { select: { name: true } } } })
       if (!payslip) throw notFound('team:PAYSLIP_NOT_FOUND')
+      if (request.agentUser && (payslip.totalSen !== (request.body as { expectedTotalSen: number }).expectedTotalSen ||
+          (payslip.status === 'PAID' && payslip.paidOn?.toISOString().slice(0, 10) !== body.paidOn))) {
+        throw conflict('team:PAYSLIP_CHANGED')
+      }
       if (payslip.status === 'PAID') {
         return { replayed: true, expenseId: payslip.expenseId, ledgerEntryId: payslip.ledgerEntryId?.toString() ?? null }
       }
@@ -636,6 +643,10 @@ export async function teamPayrollRoutes(app: FastifyInstance): Promise<void> {
       // then finds it already paid.
       await tx.$queryRaw`SELECT id FROM payslips WHERE id = ${id} AND business_id = ${businessId} FOR UPDATE`
       const locked = await tx.payslip.findUniqueOrThrow({ where: { id } })
+      if (request.agentUser && (locked.totalSen !== (request.body as { expectedTotalSen: number }).expectedTotalSen ||
+          (locked.status === 'PAID' && locked.paidOn?.toISOString().slice(0, 10) !== body.paidOn))) {
+        throw conflict('team:PAYSLIP_CHANGED')
+      }
       if (locked.status === 'PAID') {
         return { replayed: true, expenseId: locked.expenseId, ledgerEntryId: locked.ledgerEntryId?.toString() ?? null }
       }

@@ -1,5 +1,5 @@
 """Chopper durable queue: plain code owns all effects; vision children read only."""
-import sys,asyncio,concurrent.futures,time
+import os,sys,asyncio,concurrent.futures,time
 from pathlib import Path
 sys.path.insert(0,'/home/ubuntu/.hermes/hermes-agent')
 import hermes_bootstrap
@@ -7,10 +7,13 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 from types import SimpleNamespace
 import vista_mcp as m
 import chopper_receipts as cr
+import vista_closing
 
 def due(r):
     """What the worker should do with this receipt now, if anything."""
     v=r['data']
+    if v.get('evidenceOnly') and r['state']=='UNCONFIGURED':return bool(v.get('purchaseTransferRequest') and v['purchaseTransferRequest'].get('status')=='WAITING_FOR_READING')
+    if cr.auto_link_candidate(r):return True
     if r['state']=='SUBMITTED':return cr.needs_refile(r)
     if r['state'] in ('PROCESSING','FILING') or v.get('retirementPending'):return True
     # Photo upload interrupted (restart mid-intake): pick it up after a while.
@@ -19,7 +22,7 @@ def due(r):
     if cr.needs_recheck(r):return True
     if cr.needs_sumfix(r):return True
     if cr.needs_record(r):return True
-    return bool(v.get('scanVerified')) and not v.get('sourceRetired') and r['state'] in ('UNCONFIGURED','CONFIGURED')
+    return bool(v.get('scanVerified')) and not v.get('sourceRetainedEvidence') and not v.get('sourceRetired') and r['state'] in ('UNCONFIGURED','CONFIGURED')
 
 def work(rid):
     # Same per-receipt lock as the bot's taps: the worker never files, scans or retires
@@ -31,6 +34,8 @@ def locked_work(rid):
     try:
         r=cr.get(rid);v=r['data']
         if not due(r):return r
+        if v.get('evidenceOnly') and v.get('purchaseTransferRequest'):return cr.complete_transfer_expense(m,r)
+        if cr.auto_link_candidate(r):return cr.auto_link(m,r)
         if r['state']=='SUBMITTED':return cr.refile(m,r)
         if r['state']=='FILING':return cr._finish_filing(m,r)
         if v.get('retirementPending'):return cr.retire_source(m,r)
@@ -40,7 +45,7 @@ def locked_work(rid):
         if cr.needs_recheck(r):return cr.recheck(m,r)
         if cr.needs_sumfix(r):return cr.sumfix(m,r)
         if cr.needs_record(r):return cr.record_in_vista(m,r)
-        if v.get('scanVerified') and not v.get('sourceRetired') and r['state'] in ('UNCONFIGURED','CONFIGURED'):return cr.retire_source(m,r)
+        if v.get('scanVerified') and not v.get('sourceRetainedEvidence') and not v.get('sourceRetired') and r['state'] in ('UNCONFIGURED','CONFIGURED'):return cr.retire_source(m,r)
         return cr.process(m,rid)
     except Exception as e:
         r=cr.get(rid);v=r['data'];v['attempts']=v.get('attempts',0)+1;v['error']=type(e).__name__+': '+str(e)[:220];v['retryAfter']=time.time()+min(300,30*v['attempts'])
@@ -50,13 +55,27 @@ def locked_work(rid):
         except Exception:pass
         return cr.get(rid)
 
+# Each check is a billed Vercel request. The closing reconciliation is slow-moving; the RMS-sort check is
+# quick only while receipts are actually being worked on (see ACTIVE_FOR_S).
+CLOSING_EVERY_S = int(os.environ.get('CHOPPER_CLOSING_EVERY_S', '600'))
+SORT_ACTIVE_S, SORT_QUIET_S, ACTIVE_FOR_S = 60, int(os.environ.get('CHOPPER_SORT_QUIET_S', '300')), 900
+
 async def main():
     from telegram import Bot
     adapter=SimpleNamespace(_bot=Bot(m._dotenv()['TELEGRAM_BOT_TOKEN']))
     pool=concurrent.futures.ThreadPoolExecutor(max_workers=2);running={}
-    sorter=concurrent.futures.ThreadPoolExecutor(max_workers=1);sorting=None;last_poll=0
+    sorter=concurrent.futures.ThreadPoolExecutor(max_workers=1);sorting=None;last_poll=0;last_activity=0
+    closing_pool=concurrent.futures.ThreadPoolExecutor(max_workers=1);closing_job=None;last_closing=0
     async with adapter._bot:
         while True:
+            # Independent low-frequency reconciliation: no model/Drive/OCR and never
+            # blocks the receipt/button lane. Reuses existing expense IDs by date.
+            if closing_job is None and time.time()-last_closing>CLOSING_EVERY_S:
+                closing_job=closing_pool.submit(vista_closing.refresh_evidence,m);last_closing=time.time()
+            if closing_job is not None and closing_job.done():
+                try:closing_job.result()
+                except Exception as e:print('Closing refresh failed:',type(e).__name__,file=sys.stderr)
+                closing_job=None
             if cr.enabled() and not (cr.HOME/'receipts-paused').exists():
                 with cr.db() as c:rows=c.execute("SELECT id FROM receipts WHERE state NOT IN ('RETIRED','SUBMITTING') ORDER BY rowid").fetchall()
                 for row in rows:
@@ -65,7 +84,7 @@ async def main():
                     if rid not in running and due(r) and r['data'].get('retryAfter',0)<=time.time():running[rid]=pool.submit(work,rid)
                 for rid,future in list(running.items()):
                     if not future.done():continue
-                    running.pop(rid);r=future.result();v=r['data']
+                    running.pop(rid);r=future.result();v=r['data'];last_activity=time.time()
                     if cr.from_vista(r):
                         # Sent from the Vista RMS: its card (if any) goes back there, once read.
                         if r['state'] in ('UNCONFIGURED','NEEDS_REVIEW') and not v.get('notified'):
@@ -86,16 +105,18 @@ async def main():
                     s=cr.settings(actor);batch=s.get('closedBulk')
                     if not batch or s.get('bulkNotified'):continue
                     batch_rows=[r for r in cr.pending(actor) if r['data'].get('batch')==batch]
-                    if not any(r['state']=='PROCESSING' for r in batch_rows):
+                    if not any(r['state'] in ('RECEIVING','PROCESSING') for r in batch_rows):
                         try:await cr.list_card(adapter,m,actor,s['bulkChat'],batch)
                         except Exception as e:print('Bulk list failed:',e,file=sys.stderr)
                         cr.settings(actor,bulkNotified=True)
                 # What the owner sorted in the RMS: applied, filed, and told on Telegram.
-                if sorting is None and time.time()-last_poll>4:sorting=sorter.submit(cr.vista_events,m);last_poll=time.time()
+                every=SORT_ACTIVE_S if time.time()-last_activity<ACTIVE_FOR_S else SORT_QUIET_S
+                if sorting is None and time.time()-last_poll>every:sorting=sorter.submit(cr.vista_events,m);last_poll=time.time()
                 if sorting is not None and sorting.done():
                     try:notes=sorting.result()
                     except Exception as e:print('RMS sort poll failed:',e,file=sys.stderr);notes=[]
                     sorting=None
+                    if notes:last_activity=time.time()
                     for note in notes:
                         if note.get('chat') and not str(note['chat']).startswith('vista'):
                             try:await adapter._bot.send_message(chat_id=note['chat'],text=note['text'],reply_markup=cr.markup(note['rows']))

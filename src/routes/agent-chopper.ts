@@ -230,7 +230,7 @@ export async function agentChopperRoutes(app: FastifyInstance) {
       if (byInvoice && (same(e.receiptNo, q.receiptNo) || same(doc?.receiptNo, q.receiptNo))) reasons.push('invoice')
       if (byDateTotal && ((e.businessDate.getTime() === day!.getTime() && e.amountSen === q.totalSen) || (doc?.receiptDate?.getTime() === day!.getTime() && doc?.totalSen === q.totalSen))) reasons.push('date+total')
       if (byImage && doc?.sha256 === q.sha256) reasons.push('image')
-      if (!doc && !e.receiptUrl && byDateTotal && e.amountSen === q.totalSen && !reasons.includes('date+total')) reasons.push('keyed in by hand')
+      if (!doc && !e.receiptUrl && byDateTotal && e.amountSen === q.totalSen) reasons.push('keyed in by hand')
       const receiptKey = doc ? keyOf(doc) : null
       return { expenseId: e.id, receiptKey, date: e.businessDate.toISOString().slice(0, 10), amountSen: e.amountSen, vendor: e.vendor ?? doc?.vendor ?? null, description: e.description, reasons, sameReceiptKey: Boolean(q.receiptKey && receiptKey === q.receiptKey) }
     })
@@ -290,6 +290,7 @@ export async function agentChopperRoutes(app: FastifyInstance) {
         }
         // Link metadata only: amounts, dates and the cash book are untouched.
         await tx.expense.updateMany({ where: { id: { in: body.expenseIds } }, data: { receiptDocumentId: receipt.id } })
+        await tx.reconciliationCase.updateMany({ where: { key: { in: body.expenseIds.map(id => `missing:${id}`) }, kind: 'MISSING_RECEIPT', status: 'OPEN' }, data: { status: 'RESOLVED', resolution: `Evidence ${body.receiptKey} linked to the existing expense.` } })
         const result = { status: 'accepted', submissionId, receiptKey: body.receiptKey, expenseIds: body.expenseIds, receipt: linkOf(receipt) }
         await tx.chopperSubmission.create({ data: { businessId: request.businessId, submissionId, kind: 'link', receiptKey: body.receiptKey, digest: hash, result, agentUserId: request.agentUser!.id } })
         await tx.agentAction.create({ data: { businessId: request.businessId, agentUserId: request.agentUser!.id, action: 'chopper.receipt.linked', entityType: 'receipt', entityId: receipt.id, detail: result } })

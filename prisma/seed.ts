@@ -185,6 +185,21 @@ async function main(): Promise<void> {
     prisma.teamSettings.deleteMany(),
     prisma.teamAuditEntry.deleteMany(),
   ])
+  // Campaigns: their audit log also refuses deletes by trigger.
+  await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL session_replication_role = replica`,
+    prisma.campaignRedemption.deleteMany(),
+    prisma.campaignPaymentProof.deleteMany(),
+    prisma.campaignCoupon.deleteMany(),
+    prisma.campaignOrderLine.deleteMany(),
+    prisma.campaignOrder.deleteMany(),
+    prisma.campaignBenefit.deleteMany(),
+    prisma.campaignProduct.deleteMany(),
+    prisma.campaignImage.deleteMany(),
+    prisma.campaignSyncRun.deleteMany(),
+    prisma.campaignAuditEntry.deleteMany(),
+    prisma.campaign.deleteMany(),
+  ])
   await prisma.stockCountLine.deleteMany()
   await prisma.stockCount.deleteMany()
   await prisma.stockItem.deleteMany()
@@ -199,6 +214,7 @@ async function main(): Promise<void> {
   await prisma.agentUser.deleteMany()
   await prisma.agentKey.deleteMany()
   await prisma.periodClosure.deleteMany()
+  await prisma.balanceCheck.deleteMany()
   await prisma.terminalStatus.deleteMany()
   await prisma.ledgerEntry.deleteMany()
   // Corrections point at orders, so they go first or the order delete refuses.

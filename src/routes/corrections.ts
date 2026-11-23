@@ -5,6 +5,7 @@ import { requireUser } from '../auth.ts'
 import type { Tx } from '../db.ts'
 import { priceOrder, type PricedLineInput, type PricedOrder } from '../domain/cart.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
+import { releaseCoupons } from '../campaigns/redeem.ts'
 
 const modifierSchema = z.object({ modifier_id: z.string().uuid() })
 
@@ -385,6 +386,8 @@ export async function recordCorrection(tx: Tx, input: {
   replacementMenuPriceSen: number | null
 }) {
   const { businessId, order, shift, deltaSen, brandDeltas } = input
+  // A cancelled sale gives back any campaign coupons it used.
+  if (input.kind === 'CANCEL') await releaseCoupons(tx, businessId, order.id, `sale ${order.queueNumber} cancelled`)
   const correction = await tx.saleCorrection.create({
     data: {
       businessId,

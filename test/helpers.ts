@@ -18,6 +18,7 @@ export const DEMO = {
  */
 export async function resetTransactional(): Promise<void> {
   await resetTeam()
+  await resetCampaigns()
   // Sarang AI: expenses point at receipts, so they go first (below) — receipts after.
   await prisma.chopperSubmission.deleteMany()
   await prisma.agentAction.deleteMany()
@@ -33,6 +34,7 @@ export async function resetTransactional(): Promise<void> {
   await prisma.agentUser.deleteMany()
   await prisma.agentKey.deleteMany()
   await prisma.periodClosure.deleteMany()
+  await prisma.balanceCheck.deleteMany()
   await prisma.terminalStatus.deleteMany()
   await prisma.ledgerEntry.deleteMany()
   await prisma.correctionBrandDelta.deleteMany()
@@ -58,6 +60,24 @@ export async function resetTransactional(): Promise<void> {
   await prisma.accountSettings.deleteMany({ where: others })
   await prisma.user.deleteMany({ where: others })
   await prisma.business.deleteMany({ where: { id: { not: DEMO.businessId } } })
+}
+
+/** Clear the Campaigns module. Its audit log refuses deletes by trigger. */
+export async function resetCampaigns(): Promise<void> {
+  await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL session_replication_role = replica`,
+    prisma.campaignRedemption.deleteMany(),
+    prisma.campaignPaymentProof.deleteMany(),
+    prisma.campaignCoupon.deleteMany(),
+    prisma.campaignOrderLine.deleteMany(),
+    prisma.campaignOrder.deleteMany(),
+    prisma.campaignBenefit.deleteMany(),
+    prisma.campaignProduct.deleteMany(),
+    prisma.campaignImage.deleteMany(),
+    prisma.campaignSyncRun.deleteMany(),
+    prisma.campaignAuditEntry.deleteMany(),
+    prisma.campaign.deleteMany(),
+  ])
 }
 
 /**

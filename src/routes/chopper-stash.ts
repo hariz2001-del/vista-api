@@ -188,6 +188,11 @@ export async function chopperStashRoutes(app: FastifyInstance) {
       // Already in Vista under another key: leave it in the stash for a person to decide —
       // unless they have: "not a duplicate" makes it a receipt of its own.
       const keptApart = Boolean(((await tx.chopperStash.findFirst({ where: { receiptKey: body.receiptKey } }))?.data as { keptApart?: boolean } | undefined)?.keptApart)
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${request.businessId + ':expense-date-amount:' + r.date + ':' + r.totalSen}))::text`
+      if (!keptApart) {
+        const manual = await tx.expense.findFirst({ where: { businessDate: new Date(r.date + 'T00:00:00Z'), amountSen: r.totalSen, vendor: { equals: r.vendor, mode: 'insensitive' }, receiptDocumentId: null, OR: [{ receiptUrl: null }, { receiptUrl: '' }] } })
+        if (manual) throw conflict('agent:DUPLICATE_MANUAL_EXPENSE', 'Link this evidence to the existing hand-keyed expense instead of recording it again.')
+      }
       if (r.receiptNo && !keptApart) {
         const twin = await tx.receiptDocument.findFirst({ where: { OR: [{ receiptKey: { not: body.receiptKey } }, { receiptKey: null }], vendor: { equals: r.vendor, mode: 'insensitive' }, receiptNo: { equals: r.receiptNo, mode: 'insensitive' }, receiptDate: new Date(r.date + 'T00:00:00Z'), totalSen: r.totalSen, expenses: { some: {} } } })
         if (twin) throw conflict('agent:DUPLICATE_INVOICE', keyOf(twin))
@@ -549,7 +554,7 @@ export async function chopperStashRoutes(app: FastifyInstance) {
       while (decisions.length < lines.length) decisions.push('pending')
       const receipt = await receiptByKey(tx, key)
       if (receipt) await carryReading(tx, request.businessId, request.user.id, receipt.id, key, body, lines, decisions)
-      const reading = { ...(data.reading ?? {}), vendor: body.vendor, date: body.date, receiptNo: body.receiptNo, totalSen: body.totalSen, lines, flags: data.reading?.flags ?? [] }
+      const reading = { ...data.reading, vendor: body.vendor, date: body.date, receiptNo: body.receiptNo, totalSen: body.totalSen, lines, flags: data.reading?.flags ?? [] }
       const events = [...(data.events ?? []), { type: 'reading', reading, decisions }]
       const warning = lineSum(lines) === body.totalSen ? null : `The lines add up to RM ${(lineSum(lines) / 100).toFixed(2)} but the total is RM ${(body.totalSen / 100).toFixed(2)}.`
       await tx.chopperStash.update({ where: { id: row.id }, data: { data: json({ ...data, reading, decisions, events, warning, readingEditedAt: new Date().toISOString() }), vistaRevision: { increment: 1 } } })
@@ -745,7 +750,7 @@ async function resolveDuplicate(tx: Tx, request: FastifyRequest, key: string, bo
     const other = (await receiptByKey(tx, body.otherKey!))!
     await tx.receiptDocument.update({ where: { id: other.id }, data: {
       sha256: d.sha256, driveFileId: file.id, scanDriveFileId: file.id, driveUrl: file.webViewLink ?? null, scanDriveUrl: file.webViewLink ?? null,
-      extracted: json({ ...((other as { extracted?: object }).extracted ?? {}), _replacedBy: key }),
+      extracted: json({ ...(other as { extracted?: object }).extracted, _replacedBy: key }),
     } })
     result = { ...result, otherKey: body.otherKey, oldFileId: other.scanDriveFileId ?? other.driveFileId, drivePath: other.drivePath, fileName: other.fileName }
   } else {

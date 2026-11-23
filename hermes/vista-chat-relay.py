@@ -74,14 +74,28 @@ def take_photo(message):
     m._call('POST', f"/agent/chopper/chat/{message['id']}/received", {'receiptKey': r['id']}, None)
 
 
+# Every claim is a billed Vercel request. While someone is using the RMS chat, check often (3s backing off to
+# 30s); once it has been quiet for ACTIVE_FOR_S, check only every QUIET_S — so a first message after a quiet
+# spell waits up to that long, and everything after it is quick again.
+IDLE_MIN_S, IDLE_MAX_S = 3, 30
+ACTIVE_FOR_S = int(os.environ.get('CHOPPER_CHAT_ACTIVE_FOR_S', '600'))
+QUIET_S = int(os.environ.get('CHOPPER_CHAT_QUIET_S', '180'))
+
+
 def main():
+    idle = IDLE_MIN_S
+    last_message = 0.0
     while True:
         try:
             message = (m._call('POST', '/agent/chopper/chat/claim', {}, None) or {}).get('message')
         except Exception as e:
-            print('claim failed:', e, file=sys.stderr); time.sleep(10); continue
+            print('claim failed:', e, file=sys.stderr); time.sleep(max(10, idle)); continue
         if not message:
-            time.sleep(2); continue
+            if time.time() - last_message > ACTIVE_FOR_S:
+                time.sleep(QUIET_S); continue
+            time.sleep(idle); idle = min(IDLE_MAX_S, idle * 1.5); continue
+        idle = IDLE_MIN_S
+        last_message = time.time()
         if message.get('kind') in ('receipt', 'upload'):
             try:
                 take_photo(message)

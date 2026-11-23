@@ -9,3 +9,14 @@ dist/
 
 .env*
 __pycache__/
+
+# One-off production data fixes and audits: they hold real staff, payroll and
+# bank figures, so they stay on the operator's machine, never in this public repo.
+scripts/correct-*.mjs
+scripts/verify-*.mjs
+scripts/clarify-*.mjs
+scripts/bank-audit-*.mjs
+scripts/closing-smoke.mjs
+.vercel-*/
+# Chopper's live bookkeeping notes carry business figures; the VPS copy is the source.
+hermes/sarang-bookkeeping/SKILL.md

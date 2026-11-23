@@ -20,6 +20,44 @@ async function setup() {
   return { business, headers, agent }
 }
 
+it('records confirmed historical payroll once, guards reviewed amounts and links the payment-day closing', async () => {
+  const { business, headers, agent } = await setup()
+  const rms = async (url: string, payload: object) => {
+    const r = await app.inject({ method: 'POST', url, headers, payload }); expect(r.statusCode, r.body).toBe(200); return r.json()
+  }
+  const workType = await rms('/rms/team/work-types', { name: 'Regular', rateSenPerHour: 700 })
+  const staff = await rms('/rms/team/staff', { name: 'Aina', defaultWorkTypeId: workType.workType.id })
+  await rms('/rms/team/attendance', { staffId: staff.staff.id, startAt: '2026-10-30T17:00:00+08:00', endAt: '2026-10-30T22:00:00+08:00' })
+  const post = (url: string, payload: object, user = '111') => app.inject({ method: 'POST', url, payload, headers: agent(user) })
+  const approval = { staffId: staff.staff.id, start: '2026-10-26', end: '2026-11-01', expectedTotalSen: 3500 }
+  expect((await post('/agent/team/payroll/approve', approval, '222')).statusCode).toBe(403)
+  expect((await post('/agent/team/payroll/approve', { ...approval, expectedTotalSen: 9999 })).statusCode).toBe(409)
+  const approved = await post('/agent/team/payroll/approve', approval)
+  expect(approved.statusCode, approved.body).toBe(200)
+  const id = approved.json().payslipId
+  const payment = { paidOn: '2026-11-02', expectedTotalSen: 3500, confirmedAlreadyPaid: true }
+  expect((await post(`/agent/team/payslips/${id}/pay`, { paidOn: payment.paidOn })).statusCode).toBe(400)
+  expect((await post(`/agent/team/payslips/${id}/pay`, { ...payment, expectedTotalSen: 9999 })).statusCode).toBe(409)
+  const other = await setup()
+  expect((await app.inject({ method: 'POST', url: `/agent/team/payslips/${id}/pay`, headers: other.agent(), payload: payment })).statusCode).toBe(404)
+  const paid = await post(`/agent/team/payslips/${id}/pay`, payment)
+  expect(paid.statusCode, paid.body).toBe(200)
+  expect((await post(`/agent/team/payslips/${id}/pay`, payment)).json()).toMatchObject({ replayed: true, expenseId: paid.json().expenseId })
+  expect((await post(`/agent/team/payslips/${id}/pay`, { ...payment, paidOn: '2026-11-03' })).statusCode).toBe(409)
+  const expenses = await prisma.expense.findMany({ where: { businessId: business.businessId } })
+  expect(expenses).toHaveLength(1)
+  expect(expenses[0]).toMatchObject({ category: 'WAGES', businessDate: new Date('2026-11-02'), amountSen: 3500 })
+  const preview = await post('/agent/closing/preview', { businessDate: '2026-11-02', salesSen: 0, expensesSen: 3500, closingBankSen: 10000 })
+  expect(preview.statusCode, preview.body).toBe(200)
+  const closing = await post('/agent/closing/confirm', { confirmationId: preview.json().confirmationId })
+  expect(closing.statusCode, closing.body).toBe(200)
+  const detail = closing.json().closing.detail
+  expect(detail).toMatchObject({ actualExpensesSen: 3500, remainingExpensesSen: 0, missingReceiptExpenseIds: [] })
+  expect(detail.expenses[0].payslip).toMatchObject({ id, periodStart: '2026-10-26', periodEnd: '2026-11-01', paidOn: '2026-11-02', staff: { name: 'Aina' } })
+  expect(detail.flags).not.toContain('AWAITING_RECEIPTS')
+  expect(await prisma.ledgerEntry.count({ where: { businessId: business.businessId, category: 'OPERATING_EXPENSE' } })).toBe(1)
+})
+
 it('shares roster rules with RMS, attributes Hermes, and refuses viewers and other businesses', async () => {
   const { business, agent } = await setup()
   const created = await app.inject({ method: 'POST', url: '/agent/team/weeks', headers: agent(), payload: { weekStart: '2026-10-12', fromTemplate: false } })

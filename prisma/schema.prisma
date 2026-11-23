@@ -115,6 +115,8 @@ enum LedgerCategory {
   LOAN_PROCEEDS
   LOAN_REPAYMENT
   RECONCILIATION_ADJUSTMENT
+  /// Interest the bank pays in. Money in, never a sale.
+  BANK_INTEREST
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +155,17 @@ model Business {
   chopperChat        ChopperChatMessage[]
   productRecipes ProductRecipe[]
   balanceChecks  BalanceCheck[]
+  campaigns          Campaign[]
+  campaignImages     CampaignImage[]
+  campaignProducts   CampaignProduct[]
+  campaignBenefits   CampaignBenefit[]
+  campaignOrders     CampaignOrder[]
+  campaignOrderLines CampaignOrderLine[]
+  campaignCoupons    CampaignCoupon[]
+  campaignProofs     CampaignPaymentProof[]
+  campaignRedemptions CampaignRedemption[]
+  campaignSyncRuns   CampaignSyncRun[]
+  campaignAuditLog   CampaignAuditEntry[]
 
   @@map("businesses")
 }
@@ -293,6 +306,7 @@ model Brand {
   products         Product[]
   orderItems       OrderItem[]
   ledgerEntries    LedgerEntry[]
+  campaigns        Campaign[]
   correctionDeltas CorrectionBrandDelta[]
   expenses         Expense[]
   partner          Partner?
@@ -341,6 +355,7 @@ model Product {
   modifierGroups   ModifierGroup[]
   orderItems       OrderItem[]
   promotionTargets PromotionTarget[]
+  campaignBenefits CampaignBenefit[]
   recipe           ProductRecipe?
 
   @@unique([businessId, id])
@@ -509,6 +524,7 @@ model Order {
   items         OrderItem[]
   ledgerEntries LedgerEntry[]
   corrections   SaleCorrection[]
+  campaignRedemptions CampaignRedemption[]
 
   @@unique([businessId, id])
   @@unique([businessId, businessDate, queueNumber])
@@ -677,6 +693,8 @@ model LedgerEntry {
   order      Order?          @relation(fields: [businessId, orderId], references: [businessId, id], onDelete: Restrict)
   shift      Shift?          @relation(fields: [businessId, shiftId], references: [businessId, id], onDelete: Restrict)
   correction SaleCorrection? @relation(fields: [businessId, correctionId], references: [businessId, id], onDelete: Restrict)
+  campaignPosting  CampaignOrder?  @relation("CampaignPosting")
+  campaignReversal CampaignOrder?  @relation("CampaignReversal")
 
   @@index([businessId, businessDate, id])
   @@index([orderId])
@@ -1995,4 +2013,407 @@ model AgentAction {
 
   @@index([businessId, createdAt])
   @@map("agent_actions")
+}
+
+// ---------------------------------------------------------------------------
+// Campaigns
+//
+// A campaign is a run of pre-orders a business sells outside the till (a web
+// form, a sheet), paid upfront by bank transfer, and collected later at the
+// counter with a coupon. Nothing here is specific to one campaign: names,
+// prices, benefits and where the orders come from are all rows.
+//
+// Money rules:
+//  - An order counts as revenue only once the owner verifies its payment, and
+//    on the date the customer paid (`paymentDate`), not the date it was checked.
+//    Exactly one REVENUE ledger line per order (`ledgerEntryId`, unique); a
+//    reversal adds a REFUND line and never edits the first.
+//  - Redeeming a coupon at the till takes nothing again: prepaid items ring up
+//    fully discounted and vouchers come off the bill, never below zero.
+// ---------------------------------------------------------------------------
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+/// Where a campaign's orders come from.
+enum CampaignSourceKind {
+  NONE
+  GOOGLE_SHEET
+}
+
+enum CampaignImageKind {
+  BACKGROUND
+  LOGO
+}
+
+enum CampaignBenefitKind {
+  /// An item already paid for: rings up at its menu price, fully discounted.
+  PREPAID_PRODUCT
+  /// Up to `valueSen` off eligible items on the redeeming order.
+  FIXED_VOUCHER
+}
+
+/// The owner's decision on a payment. Never set by the reader.
+enum CampaignVerification {
+  UNVERIFIED
+  VERIFIED
+  REJECTED
+}
+
+enum CampaignProofRead {
+  /// Waiting for the reader.
+  PENDING
+  /// Claimed by the reader (leased).
+  READING
+  DONE
+  /// Gave up after repeated failures; the owner checks it by eye.
+  FAILED
+  /// The order has no proof to read.
+  NONE
+}
+
+enum CampaignRedemptionStatus {
+  COMPLETED
+  /// Undone by a cancelled sale; the coupon can be used again.
+  REVERSED
+}
+
+enum CampaignSyncStatus {
+  RUNNING
+  OK
+  FAILED
+}
+
+model Campaign {
+  id          String         @id @default(uuid())
+  businessId  String         @map("business_id")
+  name        String
+  description String?
+  status      CampaignStatus @default(DRAFT)
+  /// The brand its verified revenue is booked to. Null books it unbranded.
+  brandId     String?        @map("brand_id")
+  /// Tile text colour on the background image: LIGHT or DARK.
+  tileTone    String         @default("LIGHT") @map("tile_tone")
+  sortOrder   Int            @default(0) @map("sort_order")
+  /// Menu items sold over the counter as part of the campaign (walk-ins), so
+  /// the campaign dashboard counts their sales too. The sales stay ordinary sales.
+  walkInProductIds String[]  @default([]) @map("walk_in_product_ids")
+  startsOn    DateTime?      @map("starts_on") @db.Date
+  endsOn      DateTime?      @map("ends_on") @db.Date
+
+  sourceKind   CampaignSourceKind @default(NONE) @map("source_kind")
+  /// Where to read orders (sheet id, tab, column names, proof folder). No secrets.
+  sourceConfig Json               @default("{}") @map("source_config")
+  /// Credentials for the source, AES-256-GCM sealed with CAMPAIGN_SECRET_KEY. Never sent to a client.
+  sourceSecret String?            @map("source_secret")
+  lastSyncedAt DateTime?          @map("last_synced_at")
+
+  archivedAt DateTime? @map("archived_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  business Business             @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  brand    Brand?               @relation(fields: [businessId, brandId], references: [businessId, id], onDelete: Restrict)
+  images   CampaignImage[]
+  products CampaignProduct[]
+  benefits CampaignBenefit[]
+  orders   CampaignOrder[]
+  coupons  CampaignCoupon[]
+  syncRuns CampaignSyncRun[]
+  auditLog CampaignAuditEntry[]
+
+  @@unique([businessId, id])
+  @@index([businessId, status, sortOrder])
+  @@map("campaigns")
+}
+
+/// A tile background or logo, kept in the database (resized on upload) and
+/// served only through the owner's authenticated routes.
+model CampaignImage {
+  id         String            @id @default(uuid())
+  businessId String            @map("business_id")
+  campaignId String            @map("campaign_id")
+  kind       CampaignImageKind
+  mimeType   String            @map("mime_type")
+  bytes      Bytes
+  width      Int
+  height     Int
+  createdAt  DateTime          @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  campaign Campaign @relation(fields: [businessId, campaignId], references: [businessId, id], onDelete: Cascade)
+
+  @@unique([businessId, id])
+  @@unique([businessId, campaignId, kind])
+  @@map("campaign_images")
+}
+
+/// Something a customer can pre-order (e.g. a bouquet set), at its price.
+model CampaignProduct {
+  id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
+  campaignId  String   @map("campaign_id")
+  name        String
+  /// How the source names it, to match imported rows (e.g. the sheet Set name).
+  externalKey String?  @map("external_key")
+  priceSen    Int      @map("price_sen")
+  isActive    Boolean  @default(true) @map("is_active")
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  business Business            @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  campaign Campaign            @relation(fields: [businessId, campaignId], references: [businessId, id], onDelete: Cascade)
+  benefits CampaignBenefit[]
+  lines    CampaignOrderLine[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, campaignId, externalKey])
+  @@map("campaign_products")
+}
+
+/// What one coupon gives at the till. A benefit with no campaign product
+/// applies to every coupon of the campaign; with one, only to coupons for it.
+model CampaignBenefit {
+  id                String              @id @default(uuid())
+  businessId        String              @map("business_id")
+  campaignId        String              @map("campaign_id")
+  campaignProductId String?             @map("campaign_product_id")
+  kind              CampaignBenefitKind
+  label             String
+  /// PREPAID_PRODUCT: what it is worth (for reports). FIXED_VOUCHER: the most it takes off.
+  valueSen          Int                 @map("value_sen")
+  /// PREPAID_PRODUCT: the menu item handed over (optional; without one it is
+  /// fulfilled without a till line). FIXED_VOUCHER: limits it to one item.
+  productId         String?             @map("product_id")
+  /// FIXED_VOUCHER: limits it to items of these categories (any of them). Empty: any item.
+  categoryIds       String[]            @default([]) @map("category_ids")
+  /// Last business date a coupon can use it. Null never expires.
+  expiresOn         DateTime?           @map("expires_on") @db.Date
+  sortOrder         Int                 @default(0) @map("sort_order")
+  createdAt         DateTime            @default(now()) @map("created_at")
+
+  business        Business         @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  campaign        Campaign         @relation(fields: [businessId, campaignId], references: [businessId, id], onDelete: Cascade)
+  campaignProduct CampaignProduct? @relation(fields: [businessId, campaignProductId], references: [businessId, id], onDelete: Cascade)
+  product         Product?         @relation(fields: [businessId, productId], references: [businessId, id], onDelete: Restrict)
+
+  @@unique([businessId, id])
+  @@index([businessId, campaignId])
+  @@map("campaign_benefits")
+}
+
+/// One customer pre-order, as imported. `externalRef` is the source order code
+/// and is never changed, so re-importing finds the same row.
+model CampaignOrder {
+  id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
+  campaignId   String   @map("campaign_id")
+  externalRef  String   @map("external_ref")
+  customerName String   @map("customer_name")
+  contact      String?
+  submittedAt  DateTime @map("submitted_at")
+  /// What the customer should have paid, from the order lines.
+  expectedSen  Int      @map("expected_sen")
+  /// Free-form pickup details from the source (date, slot).
+  fulfilment   Json     @default("{}")
+  /// Every field the source sent, untouched, for the detail view.
+  sourceData   Json     @default("{}") @map("source_data")
+  /// The source status text (informational; the decision is `verification`).
+  sourceStatus String?  @map("source_status")
+  lastSeenAt   DateTime @default(now()) @map("last_seen_at")
+
+  verification    CampaignVerification @default(UNVERIFIED)
+  /// The business date the customer paid on. The ledger line is dated by it.
+  paymentDate     DateTime?            @map("payment_date") @db.Date
+  paymentRef      String?              @map("payment_ref")
+  paidSen         Int?                 @map("paid_sen")
+  decidedById     String?              @map("decided_by_id")
+  decidedByLabel  String?              @map("decided_by_label")
+  decidedAt       DateTime?            @map("decided_at")
+  reviewNote      String?              @map("review_note")
+  /// The REVENUE line booked on verification, and the REFUND line if undone.
+  ledgerEntryId   BigInt?              @unique @map("ledger_entry_id")
+  reversalEntryId BigInt?              @unique @map("reversal_entry_id")
+
+  /// Vista changed something the source should show (status, voucher used) and it is not written yet.
+  sheetDirty     Boolean   @default(false) @map("sheet_dirty")
+  sheetPushedAt  DateTime? @map("sheet_pushed_at")
+  sheetPushError String?   @map("sheet_push_error")
+
+  deletedAt DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  business      Business              @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  campaign      Campaign              @relation(fields: [businessId, campaignId], references: [businessId, id], onDelete: Restrict)
+  ledgerEntry   LedgerEntry?          @relation("CampaignPosting", fields: [ledgerEntryId], references: [id], onDelete: Restrict)
+  reversalEntry LedgerEntry?          @relation("CampaignReversal", fields: [reversalEntryId], references: [id], onDelete: Restrict)
+  lines         CampaignOrderLine[]
+  coupons       CampaignCoupon[]
+  proof         CampaignPaymentProof?
+  redemptions   CampaignRedemption[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, campaignId, externalRef])
+  @@index([businessId, campaignId, verification])
+  @@index([businessId, campaignId, sheetDirty])
+  @@map("campaign_orders")
+}
+
+model CampaignOrderLine {
+  id                String  @id @default(uuid())
+  businessId        String  @map("business_id")
+  orderId           String  @map("order_id")
+  campaignProductId String? @map("campaign_product_id")
+  lineNo            Int     @map("line_no")
+  label             String
+  priceSen          Int     @map("price_sen")
+  /// Anything else the source says about this line (message, style, design).
+  details           Json    @default("{}")
+
+  business        Business         @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  order           CampaignOrder    @relation(fields: [businessId, orderId], references: [businessId, id], onDelete: Cascade)
+  campaignProduct CampaignProduct? @relation(fields: [businessId, campaignProductId], references: [businessId, id], onDelete: Restrict)
+  coupons         CampaignCoupon[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, orderId, lineNo])
+  @@map("campaign_order_lines")
+}
+
+/// A code the customer brings to the counter. Codes come from the source and
+/// are kept exactly; a code is unique within the business.
+model CampaignCoupon {
+  id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
+  campaignId  String   @map("campaign_id")
+  orderId     String   @map("order_id")
+  orderLineId String?  @map("order_line_id")
+  code        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  business    Business             @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  campaign    Campaign             @relation(fields: [businessId, campaignId], references: [businessId, id], onDelete: Restrict)
+  order       CampaignOrder        @relation(fields: [businessId, orderId], references: [businessId, id], onDelete: Restrict)
+  orderLine   CampaignOrderLine?   @relation(fields: [businessId, orderLineId], references: [businessId, id], onDelete: Restrict)
+  redemptions CampaignRedemption[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, code])
+  @@map("campaign_coupons")
+}
+
+/// The payment screenshot for an order and what the reader made of it.
+/// The reader only raises flags; it never verifies or rejects.
+model CampaignPaymentProof {
+  id          String            @id @default(uuid())
+  businessId  String            @map("business_id")
+  orderId     String            @map("order_id")
+  /// Where it lives at the source (a Drive file id), and its link.
+  sourceRef   String?           @map("source_ref")
+  sourceUrl   String?           @map("source_url")
+  mimeType    String?           @map("mime_type")
+  sha256      String?
+  readStatus  CampaignProofRead @default(PENDING) @map("read_status")
+  attempts    Int               @default(0)
+  leaseToken  String?           @map("lease_token")
+  leaseUntil  DateTime?         @map("lease_until")
+  lastError   String?           @map("last_error")
+  /// What was read: provider, date, time, amountSen, reference, recipient, looksLikeReceipt.
+  extraction  Json?
+  /// Reader flags: PASSED, FLAGGED, POSSIBLE_DUPLICATE, AMOUNT_MISMATCH, INVALID_IMAGE, UNREADABLE.
+  flags       String[]          @default([])
+  summary     String?
+  readAt      DateTime?         @map("read_at")
+  /// Set when the owner clears the flags after looking.
+  dismissedAt DateTime?         @map("dismissed_at")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  business Business      @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  order    CampaignOrder @relation(fields: [businessId, orderId], references: [businessId, id], onDelete: Cascade)
+
+  @@unique([businessId, id])
+  @@unique([businessId, orderId])
+  @@index([businessId, sha256])
+  @@index([readStatus, leaseUntil])
+  @@map("campaign_payment_proofs")
+}
+
+/// A coupon used at the till, written in the same transaction as the sale.
+/// At most one COMPLETED redemption per coupon (partial unique index in SQL).
+model CampaignRedemption {
+  id              String                   @id @default(uuid())
+  businessId      String                   @map("business_id")
+  couponId        String                   @map("coupon_id")
+  campaignOrderId String                   @map("campaign_order_id")
+  posOrderId      String                   @map("pos_order_id")
+  clientTxnId     String                   @map("client_txn_id")
+  status          CampaignRedemptionStatus @default(COMPLETED)
+  /// What it gave: [{ benefitId, kind, label, amountSen, productId }].
+  applied         Json
+  prepaidSen      Int                      @map("prepaid_sen")
+  voucherSen      Int                      @map("voucher_sen")
+  redeemedAt      DateTime                 @default(now()) @map("redeemed_at")
+  reversedAt      DateTime?                @map("reversed_at")
+
+  business Business       @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  coupon   CampaignCoupon @relation(fields: [businessId, couponId], references: [businessId, id], onDelete: Restrict)
+  order    CampaignOrder  @relation(fields: [businessId, campaignOrderId], references: [businessId, id], onDelete: Restrict)
+  posOrder Order          @relation(fields: [businessId, posOrderId], references: [businessId, id], onDelete: Restrict)
+
+  @@unique([businessId, id])
+  @@index([businessId, couponId])
+  @@index([businessId, posOrderId])
+  @@map("campaign_redemptions")
+}
+
+model CampaignSyncRun {
+  id         String             @id @default(uuid())
+  businessId String             @map("business_id")
+  campaignId String             @map("campaign_id")
+  /// MANUAL (owner pressed Sync) or SCHEDULED.
+  trigger    String
+  status     CampaignSyncStatus @default(RUNNING)
+  added      Int                @default(0)
+  updated    Int                @default(0)
+  unchanged  Int                @default(0)
+  skipped    Int                @default(0)
+  error      String?
+  startedAt  DateTime           @default(now()) @map("started_at")
+  finishedAt DateTime?          @map("finished_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  campaign Campaign @relation(fields: [businessId, campaignId], references: [businessId, id], onDelete: Cascade)
+
+  @@unique([businessId, id])
+  @@index([businessId, campaignId, startedAt])
+  @@map("campaign_sync_runs")
+}
+
+/// Every owner, staff and system action on a campaign. Append-only (trigger).
+model CampaignAuditEntry {
+  id         BigInt   @id @default(autoincrement())
+  businessId String   @map("business_id")
+  campaignId String   @map("campaign_id")
+  orderId    String?  @map("order_id")
+  /// OWNER, STAFF, AGENT or SYSTEM.
+  actorKind  String   @map("actor_kind")
+  actorId    String?  @map("actor_id")
+  actorLabel String   @map("actor_label")
+  action     String
+  before     Json?
+  after      Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  campaign Campaign @relation(fields: [businessId, campaignId], references: [businessId, id], onDelete: Restrict)
+
+  @@index([businessId, campaignId, createdAt])
+  @@index([businessId, orderId])
+  @@map("campaign_audit_log")
 }

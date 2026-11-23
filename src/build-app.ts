@@ -20,6 +20,9 @@ import { rmsCorrectionRoutes } from './routes/rms-corrections.ts'
 import { agentDriveRoutes } from './routes/agent-drive.ts'
 import { collectAgentOperations } from './agent-operations.ts'
 import { agentReportRoutes } from './routes/agent-reports.ts'
+import { agentCouponRoutes } from './routes/agent-coupons.ts'
+import { agentClosingRoutes } from './routes/agent-closing.ts'
+import { agentPartnerAdvanceRoutes } from './routes/agent-partner-advances.ts'
 import { chopperStashRoutes } from './routes/chopper-stash.ts'
 import { chopperChatRoutes } from './routes/chopper-chat.ts'
 import { expenseReceiptRoutes } from './routes/expense-receipts.ts'
@@ -29,6 +32,11 @@ import { checkoutRoutes } from './routes/checkout.ts'
 import { correctionRoutes } from './routes/corrections.ts'
 import { menuRoutes } from './routes/menu.ts'
 import { promotionRoutes } from './routes/promotions.ts'
+import { campaignRoutes } from './routes/campaigns.ts'
+import { campaignOrderRoutes } from './routes/campaign-orders.ts'
+import { campaignProofRoutes } from './routes/campaign-proofs.ts'
+import { campaignDecisionRoutes } from './routes/campaign-decisions.ts'
+import { campaignPosRoutes } from './routes/campaign-pos.ts'
 import { receiptRoutes } from './routes/receipts.ts'
 import { teamAuthRoutes } from './routes/team-auth.ts'
 import { teamPayrollRoutes } from './routes/team-payroll.ts'
@@ -157,6 +165,11 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(rmsRoutes)
   await app.register(menuRoutes)
   await app.register(promotionRoutes)
+  await app.register(campaignRoutes)
+  await app.register(campaignOrderRoutes)
+  await app.register(campaignProofRoutes)
+  await app.register(campaignDecisionRoutes)
+  await app.register(campaignPosRoutes)
   await app.register(teamRmsRoutes)
   await app.register(teamRosterRoutes)
   await app.register(teamPayrollRoutes)
@@ -175,6 +188,9 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   registerAgentMaintenance()
   await app.register(agentDriveRoutes)
   await app.register(agentReportRoutes)
+  await app.register(agentCouponRoutes)
+  await app.register(agentClosingRoutes)
+  await app.register(agentPartnerAdvanceRoutes)
   await app.register(chopperStashRoutes)
   await app.register(chopperChatRoutes)
   await app.register(expenseReceiptRoutes)

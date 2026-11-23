@@ -454,6 +454,8 @@ def _tool(name: str, description: str, properties: dict, required: list[str] | N
     return {"name": name, "description": description, "inputSchema": {"type": "object", "properties": {**properties, "telegram_user_id": USER}, "required": required or []}}
 
 TOOLS += [
+    _tool('vista_closing', 'Daily CLOSING log: preview integer-sen figures with native owner Confirm; other_inflows_sen declares existing incoming funding separately from sales; never invent or duplicate it. other_outflows_sen records DECLARED repayments/drawings separately from expenses and never posts a second payment; status refreshes persistent missing receipts/differences; evidence attaches a user-designated bank statement/interest screenshot by exact receipt key, never books it as an expense. Already keyed expenses are reused by transaction date, never post the declared total as another expense. Interest evidence requires the user to identify the matching statement/date/amount. Use action=status for deferred work.', {'action':{'type':'string','enum':['preview','status','evidence']},'business_date':{'type':'string'},'sales_sen':{'type':'integer'},'interest_sen':{'type':'integer'},'expenses_sen':{'type':'integer'},'other_outflows_sen':{'type':'integer'},'other_inflows_sen':{'type':'integer'},'opening_bank_sen':{'type':'integer'},'stated_total_sen':{'type':'integer'},'closing_bank_sen':{'type':'integer'},'cash_sen':{'type':'integer'},'receipt_key':{'type':'string'},'purpose':{'type':'string','enum':['interest','bank']},'show_buttons':{'type':'boolean'}}),
+    _tool('vista_manual_expense', 'OWNER: preview a manually described expense without a paper receipt. Ask for missing actual date, amount, purpose, category, brand/funding; fetch vista_options for valid choices. input is exact Vista expenseBody in integer sen, businessDate YYYY-MM-DD, amountSen, category, paidBy, brandId (null=shared), foodSplitPct, description; optional vendor/paymentMethod/notes. If receipt/transfer already exists use that receipt or link its existing expense, never enter it again. Only native owner Confirm writes; missing evidence stays flagged.', {'input':{'type':'object'}}, ['input']),
     _tool('vista_current_time', 'Read authoritative live Malaysia day/date/time and this business configured trading-date cutoff. Use for now/today/tomorrow, never dates from memory. Calendar today may differ from the overnight businessDate.', {}),
     _tool('vista_sales_today', 'Sales so far TODAY, explicitly resolved from the live Malaysia clock and RMS trading-day cutoff, not the generic seven-day report. Returns calendar time, exact report date and totals; explain overnight cutoff if calendarDate differs. basis=calendar only when user explicitly requests that dated RMS report.', {'basis': {'type': 'string', 'enum': ['business', 'calendar']}}),
     _tool("vista_receipt_notify", "Send ONE reading/duplicate warning with real receipt buttons back to the stored originating Telegram photo. Background worker only after reading saved; no arbitrary destination/text and no expense posted. Token stays private. Skips an already-notified receipt.", {"receipt_id": {"type": "string"}}, ["receipt_id"]),
@@ -478,7 +480,9 @@ TOOLS += [
     _tool("vista_drive_sync", "Retry receipt originals and scans still cached in Vista, without posting expenses. Use after connecting Google or when inDrive is false. Each receipt reports stored or its actual failure.", {"receipt_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}),
     _tool("vista_scan_receipt", "Make a cropped, straightened, clean scan while preserving the original. Inspect the original photo with vision; supply its four paper corners in clockwise order top-left, top-right, bottom-right, bottom-left, with x/y fractions 0..1 in the auto-oriented image. Keep every printed edge. Omit corners if paper edges are uncertain; then only enhance contrast. Never invent receipt content.", {"receipt_id": {"type": "string"}, "corners": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "object", "properties": {"x": {"type": "number", "minimum": 0, "maximum": 1}, "y": {"type": "number", "minimum": 0, "maximum": 1}}, "required": ["x", "y"]}}}, ["receipt_id"]),
     _tool("vista_receipt_choices", "Build live button choices for a receipt step from Vista options. Returns question/choices for clarify (at most four; categories are paged, never silently truncated), and choice values. Steps: start, review, edit, brand, category, paid_by, payment_method, split, confirm. Always show start after saving each new photo.", {"step": {"type": "string", "enum": ["start", "review", "edit", "brand", "category", "paid_by", "payment_method", "split", "confirm"]}, "page": {"type": "integer", "minimum": 0}}, ["step"]),
-    _tool("vista_operations", "Vista staff/roster, schedule, stock sheet/count history, coverage, attendance and payroll reads, plus owner-authorised roster/stock edits. Without path: discover supported routes. Use the exact API fields documented in sarang-bookkeeping. method GET reads; mutation methods require the owner request. Never fabricate count values or publish a roster without instruction.", {"method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]}, "path": {"type": "string", "description": "An /agent/team/... or /agent/stock/... path from the operations catalog"}, "query": {"type": "object"}, "body": {"type": "object"}}),
+    _tool('vista_coupon_claim', 'Owner-only coupon bookkeeping: list claims; record_unpaid reclassifies coupon sales already included in POS sales as a receivable, NOT an expense or outgoing bank payment; collect settles that claim on the actual received date without another sale. record_prior_collection records an owner-confirmed payment for an older coupon even if the original sale date is unknown; do not create a new unpaid claim for it. Ask whether it is included in the closing Sales total. If included_in_sales is omitted, save RECEIVED confirmation pending classification with no cash-book entry. If true reuse existing sales cash, if false post a single additional receipt (not a sale). Explicit owner confirmation is required, not a variance guess. A screenshot is optional for owner-confirmed recording: missing payment evidence stays flagged and can be attached later with collect. Never infer collection date from matching amounts or move a 3 Nov question to 4 Nov. Repeated calls reuse the same daily claim and collection.', {'action':{'type':'string','enum':['list','record_unpaid','collect','record_prior_collection']},'business_date':{'type':'string'},'amount_sen':{'type':'integer'},'description':{'type':'string'},'confirmed_coupon_sale':{'type':'boolean'},'sales_already_recorded':{'type':'boolean'},'included_in_sales':{'type':['boolean','null']},'source_claim_date':{'type':['string','null']},'claim_id':{'type':'string'},'received_date':{'type':'string'},'confirmed_already_received':{'type':'boolean'},'receipt_key':{'type':'string'}}, ['action']),
+    _tool("vista_partner_advance", "Owner-only: list or record an ALREADY PAID repayment of temporary cash advanced by a partner (e.g. coupon funding pending organiser payment). Records LOAN_REPAYMENT, links verified transfer evidence and the closing; never a purchase expense, sale, owner drawing or new bank transfer. Resolve actual partner brandId using vista_options, never infer from payment-source enum names. Original advance/organiser receipts remain pending until evidenced. Requires explicit owner request and exact date, amount, reference and saved screenshot.", {"action":{"type":"string","enum":["list","record_repayment"]},"business_date":{"type":"string"},"amount_sen":{"type":"integer"},"partner_brand_id":{"type":"string"},"receipt_key":{"type":"string"},"bank_reference":{"type":"string"},"description":{"type":"string"},"confirmed_already_paid":{"type":"boolean"}}, ["action"]),
+    _tool("vista_operations", "Vista staff/roster, schedule, stock sheet/count history, coverage, attendance/payroll reads, owner-authorised roster/stock edits and recording already-paid payroll. Payroll writes require explicit owner instruction: approve body staffId,start,end,expectedTotalSen; pay body paidOn,expectedTotalSen,confirmedAlreadyPaid=true. Never initiates bank transfers. Without path: discover supported routes. Use the exact API fields documented in sarang-bookkeeping. method GET reads; mutation methods require the owner request. Never fabricate count values or publish a roster without instruction.", {"method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]}, "path": {"type": "string", "description": "An /agent/team/... or /agent/stock/... path from the operations catalog"}, "query": {"type": "object"}, "body": {"type": "object"}}),
     _tool("vista_report", "Get the file Vista itself makes, cached locally, with a path to send as a Telegram attachment. Always use this for stock and roster files; never make your own PDF or picture. stock-count = Vista's closing stock PDF (no id = the latest count). stock-checklist = Vista's blank stock checklist PDF. roster png = Vista's roster picture for WhatsApp, roster pdf = the same on A4 (no id = this week's roster). sales, expenses and audit are table reports. Can then upload this path to Finances with vista_drive_write.", {"kind": {"type": "string", "enum": ["roster", "stock-checklist", "stock-count", "sales", "expenses", "audit"]}, "format": {"type": "string", "enum": ["pdf", "png"]}, "id": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"}}, ["kind"]),
 ]
 
@@ -510,7 +514,7 @@ DIRECT_DRIVE_TOOL = _tool('chopper_drive', 'OWNER independent Finances Google Dr
 TOOLS.append(_tool('vista_read_pdf', 'Read a PDF on this machine: any PDF the user sent in Telegram (cache/documents), a Vista report from vista_report (cache/reports) or a file downloaded from Finances (cache/drive). Returns each page\'s text. Set render=true to also get page pictures; then look at them with vision_analyze when layout, ticks, tables or handwriting matter, or when a page has no text (scanned). Read-only; never edits the PDF.', {'path': {'type': 'string', 'description': 'Local path of the PDF, e.g. the document path from the user\'s message or local_path from vista_report'}, 'pages': {'type': 'string', 'description': 'Optional pages, e.g. "1-3" or "2,5". Default: all (up to 40).'}, 'render': {'type': 'boolean', 'description': 'Also save page pictures for vision_analyze (up to 8 pages).'}}, ['path']))
 TOOLS.append(_tool('vista_receipt_annotate', 'Maintain a SEPARATE annotated Drive scan showing posted items by brand and crossed-out scrapped items. Never changes receipt text, amounts, originals or accounting. Inspect the actual cropped scan with vision before supplying normalized scan regions per ZERO-BASED line index. Use reading_hash from vista_receipt_form. Omit regions to retry upload only. Unknown positions stay unmarked, not guessed.', {'receipt_id':{'type':'string'},'reading_hash':{'type':'string'},'regions':{'type':'array','items':{'type':'object','properties':{k:{'type':'integer' if k=='index' else 'number'} for k in ('index','x','y','width','height')},'required':['index','x','y','width','height']}}}, ['receipt_id']))
 
-TOOLS.append(_tool('chopper_receipts','Receipts read by Chopper. action=recent: the 5 receipts this sender touched last (use it when they say "this receipt", "the edited lines", "that one" without a key — cards and ✓ Saved notes are not in your chat history). action=problems: only receipts with something wrong (no total, items not adding up to the total, unreadable, possible duplicate, unsure readings), each with its issues. action=list: everything still in the stash, as short rows (optional query: shop, date YYYY-MM-DD or key). action=get with receipt_id: the full reading. action=edit with receipt_id and reading: correct a reading (lines must add up to the total; a printed rounding line is a line). No booking through the model: Telegram buttons and the Vista RMS do that.',{'action':{'type':'string','enum':['recent','problems','list','get','edit']},'receipt_id':{'type':'string'},'query':{'type':'string'},'reading':{'type':'object'}},['action']))
+TOOLS.append(_tool('chopper_receipts','Receipts read by Chopper. action=recent: the 5 receipts this sender touched last (use it when they say "this receipt", "the edited lines", "that one" without a key — cards and ✓ Saved notes are not in your chat history). action=problems: only receipts with something wrong (no total, items not adding up to the total, unreadable, possible duplicate, unsure readings), each with its issues. action=list: everything still in the stash, as short rows (optional query: shop, date YYYY-MM-DD or key). action=get with receipt_id: the full reading. action=edit with receipt_id and reading: correct a reading (lines must add up to the total; a printed rounding line is a line). For a bank screenshot with an owner-described purchase use action=transfer_expense, receipt_id, description and vendor (the visible recipient, not bank brand). It queues the same receipt if still processing, never rescans or needs another upload. Prepared transfer expenses follow existing duplicate checks and Vista stash intake; category choices remain in the native flow. Never use this for interest, balances, incoming claims or partner repayments. No final categorised booking through the model: Telegram buttons and the Vista RMS do that.',{'action':{'type':'string','enum':['recent','problems','list','get','edit','transfer_expense']},'receipt_id':{'type':'string'},'query':{'type':'string'},'description':{'type':'string'},'vendor':{'type':'string'},'reading':{'type':'object'}},['action']))
 
 def _receipt_card_send(rid, view, user):
     import receipt_form
@@ -568,6 +572,47 @@ if (PROFILE/'drive-first.enabled').exists():
 
 def _run(name: str, args: dict) -> object:
     user = args.get("telegram_user_id")
+    if name == 'vista_coupon_claim':
+        if args['action']=='list':return _call('GET','/agent/coupon-claims',telegram_user=user)
+        if args['action']=='record_unpaid':
+            fields={'business_date':'businessDate','amount_sen':'amountSen','description':'description','confirmed_coupon_sale':'confirmedCouponSale','sales_already_recorded':'salesAlreadyRecorded'}
+            path='/agent/coupon-claims'
+        elif args['action']=='record_prior_collection':
+            fields={'received_date':'receivedDate','amount_sen':'amountSen','description':'description','confirmed_already_received':'confirmedAlreadyReceived','included_in_sales':'includedInSales','source_claim_date':'sourceClaimDate','receipt_key':'receiptKey'}
+            path='/agent/coupon-claims/prior-collection'
+        elif args['action']=='collect':
+            fields={'claim_id':'claimId','received_date':'receivedDate','amount_sen':'amountSen','confirmed_already_received':'confirmedAlreadyReceived','receipt_key':'receiptKey'}
+            path='/agent/coupon-claims/collect'
+        else:raise VistaError('Unknown coupon action')
+        return _call('POST',path,{field:args[arg] for arg,field in fields.items() if args.get(arg) is not None},user)
+    if name in ('vista_closing','vista_manual_expense'):
+        import vista_closing
+        if name=='vista_closing':
+            action=args.get('action','preview')
+            if action=='status':return _call('GET','/agent/closing/status'+('?' + urllib.parse.urlencode({'date':args['business_date']}) if args.get('business_date') else ''),telegram_user=user)
+            if action=='evidence':return _call('POST','/agent/closing/evidence',{'businessDate':args['business_date'],'purpose':args['purpose'],'receiptKey':args['receipt_key']},user)
+            fields={'business_date':'businessDate','sales_sen':'salesSen','interest_sen':'interestSen','expenses_sen':'expensesSen','other_outflows_sen':'otherOutflowsSen','other_inflows_sen':'otherInflowsSen','opening_bank_sen':'openingBankSen','stated_total_sen':'statedTotalSen','closing_bank_sen':'closingBankSen','cash_sen':'cashSen'}
+            result=_call('POST','/agent/closing/preview',{field:args[arg] for arg,field in fields.items() if args.get(arg) is not None},user)
+            text,rows=vista_closing.preview_card(result)
+        else:
+            result=_call('POST','/agent/closing/expense/preview',args['input'],user)
+            entry=result['input']
+            options=_options(user)
+            brand=next((x['name'] for x in options.get('brands',[]) if x['id']==entry.get('brandId')),'Shared' if entry.get('brandId') is None else 'Selected brand')
+            text=('Manual expense — NOT saved yet.\n'+entry['businessDate']+' · '+vista_closing.rm(entry['amountSen'])+'\n'+entry['description']+
+                  '\nCategory: '+entry['category'].replace('_',' ').title()+'\nBrand: '+brand+'\nPaid by: '+entry['paidBy'].replace('_',' ').title()+
+                  '\nPayment: '+(entry.get('paymentMethod') or 'Not specified').replace('_',' ').title()+'\nMissing receipt stays flagged. You can send a transfer screenshot later.')
+            if result.get('existing'):
+                result['note']='Possible existing expense(s): review/link these first; no new expense confirmed.'
+                return result
+            rows=[[{'text':'Confirm expense','callback_data':'cr:closing:e:'+result['confirmationId']}],[{'text':'Cancel','callback_data':'cr:closing:c:0'}]]
+        if args.get('show_buttons',True):
+            token=_dotenv().get('TELEGRAM_BOT_TOKEN','')
+            req=urllib.request.Request('https://api.telegram.org/bot'+token+'/sendMessage',data=json.dumps({'chat_id':user or _default_user(),'text':text[:3900],'reply_markup':{'inline_keyboard':rows}}).encode(),headers={'Content-Type':'application/json'},method='POST')
+            with urllib.request.urlopen(req,timeout=30) as response:sent=json.load(response)
+            if not sent.get('ok'):raise VistaError('Could not send confirmation preview')
+            result['notification']={'sent':True,'note':'Native preview sent; do not repeat it. Only the user button confirms.'}
+        return result
     if name == 'chopper_receipts':
         import chopper_receipts
         return chopper_receipts.tool(sys.modules[__name__],user or _default_user(),args)
@@ -757,10 +802,36 @@ def _run(name: str, args: dict) -> object:
         choices = [v["label"] for v in selected]
         if len(values) > 3: choices.append("More choices" if (page + 1) * 3 < len(values) else "First page")
         return {"question": {"brand": "Which brand does this belong to?", "category": "Choose the Vista category", "paid_by": "Who paid?", "payment_method": "How was it paid?"}[step], "choices": choices, "values": selected, "page": page, "next_page": page + 1 if (page + 1) * 3 < len(values) else 0}
+    if name == "vista_partner_advance":
+        if args['action']=='list':return _with_rm(_call('GET','/agent/partner-advances/repayments',telegram_user=user))
+        if args.get('confirmed_already_paid') is not True:raise VistaError('The owner must explicitly identify this as an already-paid partner advance repayment.')
+        # Photo captions reach the conversation immediately; allow its existing
+        # native OCR job a short time to finish without spawning another reader.
+        import time,chopper_receipts as cr
+        for attempt in range(21):
+            receipt=cr.get(args['receipt_key'],user)
+            if receipt['data'].get('scanVerified'):break
+            if receipt['state'] not in ('RECEIVING','PROCESSING') or attempt==20:raise VistaError('The saved transfer is not verified yet. It remains safe; retry after processing, do not upload it again.')
+            time.sleep(1)
+        cr.sync_vista_only(sys.modules[__name__])
+        body={'businessDate':args['business_date'],'amountSen':args['amount_sen'],'partnerBrandId':args['partner_brand_id'],'receiptKey':args['receipt_key'],'bankReference':args['bank_reference'],'description':args['description'],'confirmedAlreadyPaid':True}
+        result=_call('POST','/agent/partner-advances/repayments',body,user)
+        with cr.receipt_lock(args['receipt_key']):
+            receipt=cr.get(args['receipt_key'],user)
+            detail=result['repayment']['detail']
+            receipt['data']['partnerRepayment']={'caseId':result['repayment']['id'],'businessDate':detail['businessDate'],'paymentStatus':detail['paymentStatus'],'ledgerEntryId':detail['ledgerEntryId'],'canonicalReceiptKey':detail['receiptKey']}
+            cr.save(receipt)
+        return _with_rm(result)
     if name == "vista_operations":
         if not args.get("path"): return _call("GET", "/agent/operations", telegram_user=user)
         path = args["path"]
         method = args.get("method", "GET")
+        if method == "GET" and re.search(r"/(pdf|png)/?$", path.split("?")[0]):
+            raise VistaError(
+                "That is a file route; vista_operations only returns data. Use vista_report instead: "
+                "kind=stock-count with no id for the owner's 'stock checklist' / latest keyed-in count; "
+                "kind=stock-checklist only if a BLANK sheet was explicitly asked for; "
+                "kind=roster format=pdf with no id for this week's roster / staff timetable.")
         catalog = _call("GET", "/agent/operations", telegram_user=user)
         allowed = any(route["method"] == method and re.fullmatch(re.sub(r":[A-Za-z]+", r"[^/?]+", re.escape(route["path"])), path) for route in catalog["routes"])
         if not allowed: raise VistaError("Choose a method/path from vista_operations' catalog.")

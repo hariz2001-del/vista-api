@@ -6,6 +6,7 @@ import type { Tx } from '../db.ts'
 import { businessDateToUtc } from '../domain/business-date.ts'
 import { priceOrder, type PricedLineInput } from '../domain/cart.ts'
 import { badRequest, conflict, notFound } from '../errors.ts'
+import { redeemCoupons, redemptionSchema } from '../campaigns/redeem.ts'
 
 const modifierSchema = z.object({
   /** Required: without it the server has no key to reprice a modifier against. */
@@ -39,6 +40,12 @@ const checkoutBody = z.object({
   claimed_total_sen: z.number().int().min(0),
   cart_discount_sen: z.number().int().min(0).default(0),
   cart_items: z.array(itemSchema).min(1),
+  /**
+   * Campaign coupons used on this sale (src/campaigns/redeem.ts). Their value
+   * is already in the line discounts above; this only says which coupon it was,
+   * so the coupon is used up in the same transaction as the sale.
+   */
+  coupon_redemptions: z.array(redemptionSchema).max(5).default([]),
 })
 
 type CheckoutBody = z.infer<typeof checkoutBody>
@@ -342,6 +349,36 @@ async function runCheckout(tx: Tx, body: CheckoutBody, userId: string, businessI
     },
     include: { items: { include: { modifiers: true } } },
   })
+
+  if (body.coupon_redemptions.length > 0) {
+    const { problems } = await redeemCoupons(tx, {
+      businessId,
+      posOrderId: order.id,
+      clientTxnId: body.client_txn_id,
+      businessDate: body.business_date,
+      offlineSync: body.origin === 'OFFLINE_SYNC',
+      redemptions: body.coupon_redemptions,
+      lines: resolved.map((line, index) => {
+        const pricedLine = recorded.lines[index]
+        const item = body.cart_items[index]
+        if (!pricedLine || !item) throw badRequest('server:UNEXPECTED', 'priced line missing')
+        return {
+          productId: line.product.id,
+          categoryId: line.product.categoryId,
+          quantity: line.quantity,
+          unitPriceSen: repriced ? (item.charged_unit_price_sen ?? line.product.basePriceSen) : line.product.basePriceSen,
+          grossSen: pricedLine.grossSen,
+          lineDiscountSen: pricedLine.lineDiscountSen,
+        }
+      }),
+    })
+    if (problems.length > 0) {
+      await tx.order.update({
+        where: { id: order.id },
+        data: { needsReview: true, reviewReason: [reviewReason, `Coupon not redeemed: ${problems.join('; ')}`].filter(Boolean).join(' ').slice(0, 500) },
+      })
+    }
+  }
 
   // One revenue entry per brand on the order, so the ledger itself carries the
   // brand attribution the partner settlement is built on. A fully discounted
