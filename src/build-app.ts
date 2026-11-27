@@ -23,6 +23,7 @@ import { agentReportRoutes } from './routes/agent-reports.ts'
 import { agentCouponRoutes } from './routes/agent-coupons.ts'
 import { agentClosingRoutes } from './routes/agent-closing.ts'
 import { agentPartnerAdvanceRoutes } from './routes/agent-partner-advances.ts'
+import { agentCampaignTransferRoutes } from './routes/agent-campaign-transfers.ts'
 import { chopperStashRoutes } from './routes/chopper-stash.ts'
 import { chopperChatRoutes } from './routes/chopper-chat.ts'
 import { expenseReceiptRoutes } from './routes/expense-receipts.ts'
@@ -191,6 +192,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await app.register(agentCouponRoutes)
   await app.register(agentClosingRoutes)
   await app.register(agentPartnerAdvanceRoutes)
+  await app.register(agentCampaignTransferRoutes)
   await app.register(chopperStashRoutes)
   await app.register(chopperChatRoutes)
   await app.register(expenseReceiptRoutes)

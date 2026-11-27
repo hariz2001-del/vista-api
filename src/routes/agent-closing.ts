@@ -109,8 +109,8 @@ async function compare(db: Tx, input: Closing) {
     db.expense.findMany({ where: { businessDate: date }, select: { amountSen: true, paidBy: true } }),
     db.balanceCheck.findFirst({ where: { businessDate: { lt: date } }, orderBy: [{ businessDate: 'desc' }, { createdAt: 'desc' }] }),
     dayState(db, date),
-    db.ledgerEntry.findMany({ where: { businessDate: date, direction: 'MONEY_OUT', category: { in: ['LOAN_REPAYMENT', 'OWNER_DRAWING'] } }, select: { id: true, amountSen: true, category: true, description: true } }),
-    db.ledgerEntry.findMany({ where: { businessDate: date, direction: 'MONEY_IN', category: { in: ['LOAN_PROCEEDS', 'CAPITAL_INJECTION'] } }, select: { id: true, amountSen: true, category: true, description: true } }),
+    db.ledgerEntry.findMany({ where: { businessDate: date, direction: 'MONEY_OUT', category: { in: ['LOAN_REPAYMENT', 'OWNER_DRAWING', 'CAMPAIGN_TRANSFER'] } }, select: { id: true, amountSen: true, category: true, description: true } }),
+    db.ledgerEntry.findMany({ where: { businessDate: date, direction: 'MONEY_IN', category: { in: ['LOAN_PROCEEDS', 'CAPITAL_INJECTION', 'CAMPAIGN_TRANSFER'] } }, select: { id: true, amountSen: true, category: true, description: true } }),
     db.reconciliationCase.findMany({ where: { kind: { in: ['COUPON_RECEIVABLE', 'COUPON_PRIOR_COLLECTION'] } }, select: { id: true, detail: true } }),
   ])
 
@@ -163,9 +163,9 @@ async function compare(db: Tx, input: Closing) {
           awaitingCollectionEvidence: collections.filter(c => c.evidenceStatus === 'AWAITING_PAYMENT_EVIDENCE').map(c => c.id),
           note: 'Coupon receivables defer existing sales from bank cash; collections settle them without another sale. Read actual sale and received dates.' },
         otherInflows: { closingSen: otherInflowsSen, vistaSen: vistaOtherInflowsSen, differenceSen: otherInflowsSen - vistaOtherInflowsSen,
-          entries: otherInflows.map(row => ({ ...row, id: row.id.toString() })), note: 'Incoming funding is separate from sales. Existing entries are reused; closing confirmation never creates another receipt of funds.' },
+          entries: otherInflows.map(row => ({ ...row, id: row.id.toString() })), note: 'Incoming funding and campaign money landing in the bank (CAMPAIGN_TRANSFER) are separate from sales. Existing entries are reused; closing confirmation never creates another receipt of funds.' },
         otherOutflows: { closingSen: otherOutflowsSen, vistaSen: vistaOtherOutflowsSen, differenceSen: otherOutflowsSen - vistaOtherOutflowsSen,
-          entries: otherOutflows.map(row => ({ ...row, id: row.id.toString() })), note: 'Repayments and drawings are money out, separate from expenses. Existing entries are reused; confirming a closing never posts another repayment.' },
+          entries: otherOutflows.map(row => ({ ...row, id: row.id.toString() })), note: 'Repayments, drawings and campaign money moved to the campaign wallet (CAMPAIGN_TRANSFER, e.g. SIB to TNG) are money out, separate from expenses. Existing entries are reused; confirming a closing never posts another repayment or transfer.' },
         openingBank: {
           closingSen: input.openingBankSen,
           vistaSen: previous ? previous.bankSen + previous.cashSen : null,

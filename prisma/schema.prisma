@@ -117,6 +117,9 @@ enum LedgerCategory {
   RECONCILIATION_ADJUSTMENT
   /// Interest the bank pays in. Money in, never a sale.
   BANK_INTEREST
+  /// Campaign money moving between the stall bank and the campaign partner's own
+  /// wallet (e.g. SIB's TNG). Real bank movement; never a sale or an expense.
+  CAMPAIGN_TRANSFER
 }
 
 // ---------------------------------------------------------------------------
