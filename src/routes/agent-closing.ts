@@ -78,8 +78,11 @@ export async function refreshClosing(db: Tx, businessId: string, input: Closing,
     periodStart: iso(e.payslip.periodStart), periodEnd: iso(e.payslip.periodEnd), paidOn: e.payslip.paidOn ? iso(e.payslip.paidOn) : null } : null }))
   const actualSen = expenses.reduce((n, e) => n + e.amountSen, 0)
   // A paid payroll snapshot is the supporting record for wages, not a purchase receipt.
+  // Wages paid after midnight (before the 5am rollover) belong to the evening before.
+  const nextDay = new Date(Date.parse(`${input.businessDate}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10)
   const missing = expenses.filter(e => !e.receiptDocumentId && !e.receiptUrl &&
-    !(e.category === 'WAGES' && e.payslip?.status === 'PAID' && e.payslip.totalSen === e.amountSen && e.payslip.paidOn === input.businessDate))
+    !(e.category === 'WAGES' && e.payslip?.status === 'PAID' && e.payslip.totalSen === e.amountSen &&
+      (e.payslip.paidOn === input.businessDate || e.payslip.paidOn === nextDay)))
   const flags: string[] = []
   if (actualSen !== input.expensesSen) flags.push('EXPENSE_TOTAL_DIFFERENCE')
   if (missing.length) flags.push('AWAITING_RECEIPTS')

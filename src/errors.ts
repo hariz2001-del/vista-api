@@ -153,6 +153,8 @@ export const MESSAGES: Record<string, string> = {
   'agent:PREVIEW_STALE': 'The receipt or entries changed since the preview. Preview again before posting.',
   'agent:TOTAL_MISMATCH': 'The entries do not add up to the receipt total.',
   'agent:EXPENSE_HAS_RECEIPT': 'That expense already has a receipt attached.',
+  'team:PAYSLIP_NOT_PAID': 'That payslip is not paid yet, so it has no wages entry to move.',
+  'team:WAGE_DATE_OUT_OF_RANGE': 'Wages can only sit on the day they were paid, or the trading evening before a payment made after midnight.',
   'agent:CAMPAIGN_NOT_FOUND': 'That campaign does not exist in this business.',
   'agent:CAMPAIGN_TRANSFER_NOT_FOUND': 'That campaign transfer does not exist.',
   'agent:CAMPAIGN_TRANSFER_EXISTS': 'A campaign transfer with the same campaign, kind, date and amount is already recorded. Confirm it is a separate movement before adding another.',

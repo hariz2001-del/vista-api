@@ -20,6 +20,7 @@ import {
   type DraftLine,
 } from '../team/payroll-data.ts'
 import { teamSettingsFor } from './team-rms.ts'
+import { refreshClosing } from './agent-closing.ts'
 
 /**
  * Team, management side: attendance review and payroll.
@@ -710,6 +711,50 @@ export async function teamPayrollRoutes(app: FastifyInstance): Promise<void> {
       return { replayed: false, expenseId: expense.id, ledgerEntryId: ledger.id.toString() }
     })
     return result
+  })
+
+  /**
+   * Put a paid payslip's Wages expense and ledger line on the trading day the
+   * money actually left. Trading days roll over at 5am, so wages sent at 2am on
+   * Monday belong to Sunday's business day. The payslip itself is final history
+   * and never changes; only the cash-book date may move, and only to the
+   * payslip's paid date or the evening before it. Amounts never change.
+   */
+  app.post<{ Params: { id: string } }>('/rms/team/payslips/:id/wage-date', pay, async (request) => {
+    const id = ID.parse(request.params.id)
+    const body = z.object({ businessDate: DATE, reason: z.string().trim().min(1).max(200) }).parse(request.body ?? {})
+    const { db, businessId } = request
+    const actor = await actorOf(request)
+    return db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM payslips WHERE id = ${id} AND business_id = ${businessId} FOR UPDATE`
+      const payslip = await tx.payslip.findUnique({ where: { id } })
+      if (!payslip) throw notFound('team:PAYSLIP_NOT_FOUND')
+      if (request.agentUser && payslip.totalSen !== (request.body as { expectedTotalSen: number }).expectedTotalSen) {
+        throw conflict('team:PAYSLIP_CHANGED')
+      }
+      if (payslip.status !== 'PAID' || !payslip.paidOn || !payslip.expenseId || !payslip.ledgerEntryId) {
+        throw conflict('team:PAYSLIP_NOT_PAID')
+      }
+      const paidOn = payslip.paidOn.toISOString().slice(0, 10)
+      if (body.businessDate !== paidOn && body.businessDate !== addDays(paidOn, -1)) throw conflict('team:WAGE_DATE_OUT_OF_RANGE')
+      const expense = await tx.expense.findUniqueOrThrow({ where: { id: payslip.expenseId } })
+      const before = expense.businessDate.toISOString().slice(0, 10)
+      if (before === body.businessDate) return { changed: false, businessDate: before, paidOn }
+      await assertNotLocked(tx, before)
+      await assertNotLocked(tx, body.businessDate)
+      const date = toDate(body.businessDate)
+      await tx.expense.update({ where: { id: expense.id }, data: { businessDate: date } })
+      await tx.ledgerEntry.update({ where: { id: payslip.ledgerEntryId }, data: { businessDate: date } })
+      await audit(tx, businessId, actor, {
+        action: 'payroll.wage_date_corrected', entityType: 'payslip', entityId: id,
+        before: { businessDate: before }, after: { businessDate: body.businessDate, paidOn, reason: body.reason },
+      })
+      for (const day of [before, body.businessDate]) {
+        const closing = await tx.reconciliationCase.findFirst({ where: { key: `closing:${day}`, kind: 'DAILY_CLOSING' } })
+        if (closing) { const d = closing.detail as any; await refreshClosing(tx, businessId, d.input, d.evidence) }
+      }
+      return { changed: true, from: before, businessDate: body.businessDate, paidOn }
+    })
   })
 
   // -------------------------------------------------------------------------

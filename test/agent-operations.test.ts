@@ -56,6 +56,27 @@ it('records confirmed historical payroll once, guards reviewed amounts and links
   expect(detail.expenses[0].payslip).toMatchObject({ id, periodStart: '2026-10-26', periodEnd: '2026-11-01', paidOn: '2026-11-02', staff: { name: 'Aina' } })
   expect(detail.flags).not.toContain('AWAITING_RECEIPTS')
   expect(await prisma.ledgerEntry.count({ where: { businessId: business.businessId, category: 'OPERATING_EXPENSE' } })).toBe(1)
+
+  // Paid at 2am on 2/11, i.e. on the 1/11 trading evening: move the wages entry, never the payslip.
+  const path = `/agent/team/payslips/${id}/wage-date`
+  const fix = { businessDate: '2026-11-01', expectedTotalSen: 3500, reason: 'Paid 02:20, before the 1/11 closing' }
+  expect((await post(path, { businessDate: fix.businessDate, expectedTotalSen: 3500 })).statusCode).toBe(400)
+  expect((await post(path, { ...fix, expectedTotalSen: 9999 })).statusCode).toBe(409)
+  expect((await post(path, fix, '222')).statusCode).toBe(403)
+  expect((await post(path, { ...fix, businessDate: '2026-10-31' })).statusCode).toBe(409)
+  const moved = await post(path, fix)
+  expect(moved.statusCode, moved.body).toBe(200)
+  expect(moved.json()).toMatchObject({ changed: true, from: '2026-11-02', businessDate: '2026-11-01', paidOn: '2026-11-02' })
+  expect((await post(path, fix)).json()).toMatchObject({ changed: false })
+  expect(await prisma.expense.findFirstOrThrow({ where: { businessId: business.businessId } })).toMatchObject({ businessDate: new Date('2026-11-01'), amountSen: 3500 })
+  expect(await prisma.ledgerEntry.findFirstOrThrow({ where: { businessId: business.businessId, category: 'OPERATING_EXPENSE' } })).toMatchObject({ businessDate: new Date('2026-11-01'), amountSen: 3500 })
+  expect(await prisma.payslip.findUniqueOrThrow({ where: { id } })).toMatchObject({ paidOn: new Date('2026-11-02'), status: 'PAID' })
+  // The 2/11 closing no longer counts the wages; a 1/11 closing would, with the payslip as its record.
+  const after = (await app.inject({ method: 'GET', url: '/agent/closing/status?date=2026-11-02', headers: agent() })).json().closings[0]
+  expect(after.detail).toMatchObject({ actualExpensesSen: 0, remainingExpensesSen: 3500 })
+  const p1 = await post('/agent/closing/preview', { businessDate: '2026-11-01', salesSen: 0, expensesSen: 3500, closingBankSen: 10000 })
+  const c1 = (await post('/agent/closing/confirm', { confirmationId: p1.json().confirmationId })).json().closing.detail
+  expect(c1).toMatchObject({ actualExpensesSen: 3500, missingReceiptExpenseIds: [] })
 })
 
 it('shares roster rules with RMS, attributes Hermes, and refuses viewers and other businesses', async () => {

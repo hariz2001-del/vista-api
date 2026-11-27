@@ -11,7 +11,7 @@ export function collectAgentOperations(app: FastifyInstance) {
     const methods = Array.isArray(route.method) ? route.method : [route.method]
     // Explicit owner-requested payroll bookkeeping, reusing the RMS transactions.
     // This records an already-made payment; it never initiates a bank transfer.
-    const payrollWrite = route.url === '/rms/team/payroll/approve' || route.url === '/rms/team/payslips/:id/pay'
+    const payrollWrite = route.url === '/rms/team/payroll/approve' || route.url === '/rms/team/payslips/:id/pay' || route.url === '/rms/team/payslips/:id/wage-date'
     const team = allowedTeam.test(route.url) || payrollWrite
     const stock = route.url.startsWith('/rms/stock/') || ['/stock/sheet', '/stock/counts'].includes(route.url)
     if (!team && !stock) return
@@ -38,7 +38,8 @@ export function collectAgentOperations(app: FastifyInstance) {
           if (payrollWrite) {
             const body = request.body as Record<string, unknown> | undefined
             if (!body || !Number.isSafeInteger(body.expectedTotalSen) || Number(body.expectedTotalSen) <= 0 ||
-                (route.url.endsWith('/pay') && (body.confirmedAlreadyPaid !== true || typeof body.paidOn !== 'string'))) {
+                (route.url.endsWith('/pay') && (body.confirmedAlreadyPaid !== true || typeof body.paidOn !== 'string')) ||
+                (route.url.endsWith('/wage-date') && (typeof body.businessDate !== 'string' || typeof body.reason !== 'string'))) {
               throw new DomainError('agent:PAYROLL_CONFIRMATION_REQUIRED', 400, 'Use the reviewed expectedTotalSen; payment recording also requires paidOn and confirmedAlreadyPaid=true from the owner.')
             }
           }
